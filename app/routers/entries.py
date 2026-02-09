@@ -1,0 +1,112 @@
+import uuid
+
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.database import get_db
+from app.middleware.auth import get_current_user
+from app.models.user import User
+from app.schemas.entry import (
+    EntryCreate,
+    EntryListResponse,
+    EntryResponse,
+    EntryUpdate,
+    EmotionOut,
+)
+from app.services.entry_service import (
+    create_entry,
+    delete_entry,
+    get_entry_by_id,
+    list_entries,
+    update_entry,
+)
+
+router = APIRouter(prefix="/entries", tags=["entries"])
+
+
+def _entry_to_response(entry) -> EntryResponse:
+    """Convert a BookEntry ORM object to an EntryResponse schema."""
+    return EntryResponse(
+        id=entry.id,
+        title=entry.title,
+        author=entry.author,
+        intensity=entry.intensity,
+        quote=entry.quote,
+        public_echo=entry.public_echo,
+        notes=entry.notes,
+        emotions=[
+            EmotionOut(emotion_id=e.emotion_id, strength=e.strength)
+            for e in entry.emotions
+        ],
+        started_at=entry.started_at,
+        finished_at=entry.finished_at,
+        created_at=entry.created_at,
+        updated_at=entry.updated_at,
+    )
+
+
+@router.get("", response_model=EntryListResponse)
+async def get_entries(
+    page: int = Query(default=1, ge=1),
+    per_page: int = Query(default=20, ge=1, le=100),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """List all book entries for the current user."""
+    entries, total = await list_entries(db, current_user.id, page, per_page)
+    return EntryListResponse(
+        entries=[_entry_to_response(e) for e in entries],
+        total=total,
+        page=page,
+        per_page=per_page,
+    )
+
+
+@router.post("", response_model=EntryResponse, status_code=status.HTTP_201_CREATED)
+async def create_new_entry(
+    data: EntryCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Create a new book entry."""
+    entry = await create_entry(db, current_user.id, data)
+    return _entry_to_response(entry)
+
+
+@router.get("/{entry_id}", response_model=EntryResponse)
+async def get_single_entry(
+    entry_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Get a single book entry."""
+    entry = await get_entry_by_id(db, entry_id, current_user.id)
+    if not entry:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Entry not found")
+    return _entry_to_response(entry)
+
+
+@router.put("/{entry_id}", response_model=EntryResponse)
+async def update_existing_entry(
+    entry_id: uuid.UUID,
+    data: EntryUpdate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Update a book entry."""
+    entry = await update_entry(db, entry_id, current_user.id, data)
+    if not entry:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Entry not found")
+    return _entry_to_response(entry)
+
+
+@router.delete("/{entry_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_existing_entry(
+    entry_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Delete a book entry."""
+    deleted = await delete_entry(db, entry_id, current_user.id)
+    if not deleted:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Entry not found")
