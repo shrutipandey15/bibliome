@@ -4,7 +4,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import get_settings
-from app.routers import auth, entries, dna, public
+from app.routers import auth, entries, dna, public, user
 
 settings = get_settings()
 
@@ -40,6 +40,7 @@ app.include_router(auth.router, prefix=settings.API_V1_PREFIX)
 app.include_router(entries.router, prefix=settings.API_V1_PREFIX)
 app.include_router(dna.router, prefix=settings.API_V1_PREFIX)
 app.include_router(public.router, prefix=settings.API_V1_PREFIX)
+app.include_router(user.router, prefix=settings.API_V1_PREFIX)
 
 
 @app.get("/health")
