@@ -404,3 +404,108 @@ def build_heatmap_data(entries: list[dict]) -> dict:
         "total_books": len(books),
         "total_emotions": len(active_emotions),
     }
+
+def generate_recap(
+    month_entries: list[dict],
+    prior_entries: list[dict],
+    current_personality: str | None,
+) -> dict:
+    """
+    Generate a monthly recap from entries logged in that month.
+
+    Args:
+        month_entries: Entries created during the target month.
+        prior_entries: All entries BEFORE the target month (for shift detection).
+        current_personality: User's current personality_type.
+
+    Returns:
+        Dict with recap data.
+    """
+    if not month_entries:
+        return {
+            "books_logged": 0,
+            "avg_intensity": 0.0,
+            "top_emotions": [],
+            "most_intense_book": None,
+            "dominant_emotion": None,
+            "new_emotions": [],
+            "personality_shift": {
+                "previous_type": None,
+                "current_type": current_personality,
+                "shifted": False,
+            },
+            "books": [],
+        }
+
+    # Books list
+    books = [
+        {
+            "title": e.get("title", ""),
+            "author": e.get("author"),
+            "intensity": e.get("intensity", 5),
+            "emotions": e.get("emotions", []),
+        }
+        for e in month_entries
+    ]
+
+    # Average intensity
+    intensities = [e.get("intensity", 5) for e in month_entries]
+    avg_intensity = sum(intensities) / len(intensities)
+
+    # Most intense book
+    most_intense = max(month_entries, key=lambda e: e.get("intensity", 0))
+
+    # Emotion frequency for this month
+    month_freq = Counter()
+    for e in month_entries:
+        for emo in e["emotions"]:
+            month_freq[emo] += 1
+
+    top_emotions = [
+        {"emotion_id": emo, "count": count}
+        for emo, count in month_freq.most_common(5)
+    ]
+
+    dominant = month_freq.most_common(1)[0][0] if month_freq else None
+
+    # New emotions — tagged this month but never before
+    prior_emotions = set()
+    for e in prior_entries:
+        for emo in e["emotions"]:
+            prior_emotions.add(emo)
+
+    month_emotions = set(month_freq.keys())
+    new_emotions = sorted(month_emotions - prior_emotions)
+
+    # Personality shift detection
+    prior_personality = None
+    if len(prior_entries) >= 3:
+        prior_result = calculate_personality(prior_entries)
+        if prior_result.get("personality"):
+            prior_personality = prior_result["personality"]["name"]
+
+    shifted = (
+        prior_personality is not None
+        and current_personality is not None
+        and prior_personality != current_personality
+    )
+
+    return {
+        "books_logged": len(month_entries),
+        "avg_intensity": round(avg_intensity, 1),
+        "top_emotions": top_emotions,
+        "most_intense_book": {
+            "title": most_intense.get("title", ""),
+            "author": most_intense.get("author"),
+            "intensity": most_intense.get("intensity", 0),
+            "emotions": most_intense.get("emotions", []),
+        },
+        "dominant_emotion": dominant,
+        "new_emotions": new_emotions,
+        "personality_shift": {
+            "previous_type": prior_personality,
+            "current_type": current_personality,
+            "shifted": shifted,
+        },
+        "books": books,
+    }

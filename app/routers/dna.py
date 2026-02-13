@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -17,6 +17,7 @@ from app.schemas.dna import (
     DNASnapshotResponse,
     HeatmapResponse,
     PersonalityInfo,
+    RecapResponse,
     StatsResponse,
     TwinResponse,
 )
@@ -24,6 +25,7 @@ from app.services.dna_engine import (
     build_heatmap_data,
     calculate_personality,
     find_twins,
+    generate_recap,
     generate_stats,
 )
 
@@ -181,6 +183,59 @@ async def get_dna_history(
     )
     snapshots = result.scalars().all()
     return snapshots
+
+
+@router.get("/recap", response_model=RecapResponse)
+async def get_monthly_recap(
+    month: str = Query(pattern=r"^\d{4}-\d{2}$", description="YYYY-MM format"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Get a monthly recap — aggregated stats for a specific month.
+    Includes books logged, emotion breakdown, new emotions discovered,
+    and whether your personality type shifted.
+
+    Usage: GET /api/dna/recap?month=2026-02
+    """
+    from datetime import datetime, timezone
+    from calendar import monthrange
+
+    # Parse month
+    try:
+        year, mo = int(month[:4]), int(month[5:7])
+        month_start = datetime(year, mo, 1, tzinfo=timezone.utc)
+        last_day = monthrange(year, mo)[1]
+        month_end = datetime(year, mo, last_day, 23, 59, 59, tzinfo=timezone.utc)
+    except (ValueError, IndexError):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid month format. Use YYYY-MM (e.g. 2026-02).",
+        )
+
+    # Fetch all user entries
+    all_entries = await _get_user_entries(db, current_user.id)
+
+    # Split into month entries and prior entries
+    month_entries = []
+    prior_entries = []
+    for e in all_entries:
+        created = e.get("created_at")
+        if not created:
+            continue
+        if month_start <= created <= month_end:
+            month_entries.append(e)
+        elif created < month_start:
+            prior_entries.append(e)
+
+    recap = generate_recap(
+        month_entries=month_entries,
+        prior_entries=prior_entries,
+        current_personality=current_user.personality_type,
+    )
+    recap["month"] = month
+
+    return recap
 
 
 @router.get("/twin", response_model=TwinResponse)

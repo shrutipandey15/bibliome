@@ -78,6 +78,7 @@ class HeatmapResponse(BaseModel):
     total_books: int
     total_emotions: int
 
+
 class TwinMatch(BaseModel):
     username: str
     display_name: str | None
@@ -91,3 +92,28 @@ class TwinResponse(BaseModel):
     twins: list[TwinMatch]
     your_top_emotions: list[str]
     total_public_users_searched: int
+
+
+class RecapBook(BaseModel):
+    title: str
+    author: str | None
+    intensity: int
+    emotions: list[str]
+
+
+class RecapShift(BaseModel):
+    previous_type: str | None
+    current_type: str | None
+    shifted: bool
+
+
+class RecapResponse(BaseModel):
+    month: str
+    books_logged: int
+    avg_intensity: float
+    top_emotions: list[TopEmotion]
+    most_intense_book: RecapBook | None
+    dominant_emotion: str | None
+    new_emotions: list[str]
+    personality_shift: RecapShift
+    books: list[RecapBook]
