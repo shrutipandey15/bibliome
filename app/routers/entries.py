@@ -70,6 +70,8 @@ async def create_new_entry(
 ):
     """Create a new book entry."""
     entry = await create_entry(db, current_user.id, data)
+    current_user.dna_dirty = True
+    await db.flush()
     return _entry_to_response(entry)
 
 
@@ -97,6 +99,8 @@ async def update_existing_entry(
     entry = await update_entry(db, entry_id, current_user.id, data)
     if not entry:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Entry not found")
+    current_user.dna_dirty = True
+    await db.flush()
     return _entry_to_response(entry)
 
 
@@ -110,3 +114,5 @@ async def delete_existing_entry(
     deleted = await delete_entry(db, entry_id, current_user.id)
     if not deleted:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Entry not found")
+    current_user.dna_dirty = True
+    await db.flush()

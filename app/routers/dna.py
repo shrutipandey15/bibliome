@@ -57,12 +57,23 @@ async def get_dna_profile(
     current_user: User = Depends(get_current_user),
 ):
     """
-    Get the current DNA profile calculated from all entries.
-    This is calculated live — not from a snapshot.
+    Get the current DNA profile. Uses cached result if entries haven't changed.
+    Recalculates and caches when dna_dirty is True.
     """
+    # Serve from cache if clean
+    if not current_user.dna_dirty and current_user.cached_dna_profile:
+        return current_user.cached_dna_profile
+
+    # Recalculate
     entries = await _get_user_entries(db, current_user.id)
     result = calculate_personality(entries)
     result["book_count"] = len(entries)
+
+    # Cache it
+    current_user.cached_dna_profile = result
+    current_user.dna_dirty = False
+    await db.flush()
+
     return result
 
 
@@ -111,8 +122,11 @@ async def generate_dna(
     )
     db.add(snapshot)
 
-    # Update user's cached personality type
+    # Update user's cached personality type and DNA cache
     current_user.personality_type = personality["name"]
+    current_user.cached_dna_profile = result
+    current_user.cached_dna_profile["book_count"] = len(entries)
+    current_user.dna_dirty = False
 
     await db.flush()
 
