@@ -77,3 +77,17 @@ class HeatmapResponse(BaseModel):
     cells: list[HeatmapCell]
     total_books: int
     total_emotions: int
+
+class TwinMatch(BaseModel):
+    username: str
+    display_name: str | None
+    personality_type: str | None
+    similarity: float
+    shared_emotions: list[str]
+    shared_count: int
+
+
+class TwinResponse(BaseModel):
+    twins: list[TwinMatch]
+    your_top_emotions: list[str]
+    total_public_users_searched: int

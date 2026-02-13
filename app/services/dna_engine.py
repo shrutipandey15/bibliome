@@ -7,6 +7,7 @@ Phase 2 (future): Clustering from real user data.
 Phase 3 (future): AI-powered with Claude API.
 """
 
+import math
 from collections import Counter
 from datetime import datetime, timezone
 
@@ -299,6 +300,73 @@ def generate_stats(entries: list[dict]) -> dict:
         "total_emotions_possible": len(VALID_EMOTION_IDS),
         "books_per_month": round(books_per_month, 1),
     }
+
+
+def build_emotion_vector(emotion_freq: dict[str, int]) -> list[float]:
+    """
+    Convert emotion frequency dict to a fixed-length vector.
+    Order follows VALID_EMOTION_IDS for consistency across users.
+    """
+    return [float(emotion_freq.get(emo, 0)) for emo in VALID_EMOTION_IDS]
+
+
+def cosine_similarity(a: list[float], b: list[float]) -> float:
+    """Cosine similarity between two vectors. Returns 0.0-1.0."""
+    dot = sum(x * y for x, y in zip(a, b))
+    mag_a = math.sqrt(sum(x * x for x in a))
+    mag_b = math.sqrt(sum(x * x for x in b))
+    if mag_a == 0 or mag_b == 0:
+        return 0.0
+    return dot / (mag_a * mag_b)
+
+
+def find_twins(
+    user_emotion_freq: dict[str, int],
+    candidates: list[dict],
+    max_results: int = 5,
+) -> list[dict]:
+    """
+    Find reading twins — users with the most similar emotion profiles.
+
+    Args:
+        user_emotion_freq: Current user's emotion frequency dict {emotion_id: count}
+        candidates: List of dicts with keys:
+            - username, display_name, personality_type
+            - emotion_frequency: dict {emotion_id: count}
+        max_results: How many twins to return
+
+    Returns:
+        List of twin matches sorted by similarity (highest first).
+    """
+    if not candidates:
+        return []
+
+    user_vec = build_emotion_vector(user_emotion_freq)
+    user_emotions = set(e for e, c in user_emotion_freq.items() if c > 0)
+
+    results = []
+    for candidate in candidates:
+        cand_freq = candidate.get("emotion_frequency", {})
+        cand_vec = build_emotion_vector(cand_freq)
+
+        sim = cosine_similarity(user_vec, cand_vec)
+        if sim < 0.01:
+            continue
+
+        cand_emotions = set(e for e, c in cand_freq.items() if c > 0)
+        shared = sorted(user_emotions & cand_emotions)
+
+        results.append({
+            "username": candidate["username"],
+            "display_name": candidate.get("display_name"),
+            "personality_type": candidate.get("personality_type"),
+            "similarity": round(sim, 3),
+            "shared_emotions": shared,
+            "shared_count": len(shared),
+        })
+
+    results.sort(key=lambda x: x["similarity"], reverse=True)
+    return results[:max_results]
 
 
 def build_heatmap_data(entries: list[dict]) -> dict:

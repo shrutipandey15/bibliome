@@ -18,10 +18,12 @@ from app.schemas.dna import (
     HeatmapResponse,
     PersonalityInfo,
     StatsResponse,
+    TwinResponse,
 )
 from app.services.dna_engine import (
     build_heatmap_data,
     calculate_personality,
+    find_twins,
     generate_stats,
 )
 
@@ -179,3 +181,66 @@ async def get_dna_history(
     )
     snapshots = result.scalars().all()
     return snapshots
+
+
+@router.get("/twin", response_model=TwinResponse)
+async def get_reading_twin(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Find your reading twin — public users with the most similar emotion profiles.
+    Uses cosine similarity on emotion frequency vectors.
+    Requires at least 3 books.
+    """
+    # Get current user's entries
+    user_entries = await _get_user_entries(db, current_user.id)
+
+    if len(user_entries) < 3:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Need at least 3 books to find twins. You have {len(user_entries)}.",
+        )
+
+    # Build current user's emotion frequency
+    from collections import Counter
+    user_freq = Counter()
+    for entry in user_entries:
+        for emo in entry["emotions"]:
+            user_freq[emo] += 1
+
+    user_top = [emo for emo, _ in user_freq.most_common(5)]
+
+    # Fetch all public users (excluding self) who have entries
+    public_users_result = await db.execute(
+        select(User)
+        .where(User.is_public == True, User.id != current_user.id)
+    )
+    public_users = public_users_result.scalars().all()
+
+    # Build candidate profiles
+    candidates = []
+    for pu in public_users:
+        pu_entries = await _get_user_entries(db, pu.id)
+        if len(pu_entries) < 3:
+            continue
+
+        pu_freq = Counter()
+        for entry in pu_entries:
+            for emo in entry["emotions"]:
+                pu_freq[emo] += 1
+
+        candidates.append({
+            "username": pu.username,
+            "display_name": pu.display_name,
+            "personality_type": pu.personality_type,
+            "emotion_frequency": dict(pu_freq),
+        })
+
+    twins = find_twins(dict(user_freq), candidates, max_results=5)
+
+    return TwinResponse(
+        twins=twins,
+        your_top_emotions=user_top,
+        total_public_users_searched=len(candidates),
+    )
