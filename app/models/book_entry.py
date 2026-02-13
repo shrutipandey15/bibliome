@@ -29,6 +29,8 @@ class BookEntry(Base):
     )
     title: Mapped[str] = mapped_column(String(300), nullable=False)
     author: Mapped[str | None] = mapped_column(String(200))
+    cover_url: Mapped[str | None] = mapped_column(String(500))
+    isbn: Mapped[str | None] = mapped_column(String(13))
     intensity: Mapped[int] = mapped_column(
         Integer, default=5
     )

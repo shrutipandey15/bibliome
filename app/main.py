@@ -4,18 +4,18 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import get_settings
+from app.middleware.error_handlers import register_error_handlers, setup_logging
 from app.routers import auth, entries, dna, public, user, books
 
 settings = get_settings()
+setup_logging(settings.ENVIRONMENT)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup and shutdown events."""
-    # Startup: could initialize DB pool, run migrations, etc.
     print(f"Starting {settings.APP_NAME} API ({settings.ENVIRONMENT})")
     yield
-    # Shutdown: cleanup
     print(f"Shutting down {settings.APP_NAME} API")
 
 
@@ -25,6 +25,8 @@ app = FastAPI(
     version="0.1.0",
     lifespan=lifespan,
 )
+
+register_error_handlers(app)
 
 # CORS
 app.add_middleware(

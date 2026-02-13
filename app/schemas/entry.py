@@ -25,6 +25,8 @@ class EmotionOut(BaseModel):
 class EntryCreate(BaseModel):
     title: str = Field(min_length=1, max_length=300)
     author: str | None = Field(default=None, max_length=200)
+    cover_url: str | None = Field(default=None, max_length=500)
+    isbn: str | None = Field(default=None, max_length=13)
     intensity: int = Field(default=5, ge=1, le=10)
     quote: str | None = None
     public_echo: str | None = None
@@ -37,6 +39,8 @@ class EntryCreate(BaseModel):
 class EntryUpdate(BaseModel):
     title: str | None = Field(default=None, min_length=1, max_length=300)
     author: str | None = None
+    cover_url: str | None = None
+    isbn: str | None = None
     intensity: int | None = Field(default=None, ge=1, le=10)
     quote: str | None = None
     public_echo: str | None = None
@@ -50,6 +54,8 @@ class EntryResponse(BaseModel):
     id: uuid.UUID
     title: str
     author: str | None
+    cover_url: str | None
+    isbn: str | None
     intensity: int
     quote: str | None
     public_echo: str | None
@@ -66,5 +72,8 @@ class EntryResponse(BaseModel):
 class EntryListResponse(BaseModel):
     entries: list[EntryResponse]
     total: int
-    page: int
-    per_page: int
+    next_cursor: str | None = None
+    has_more: bool = False
+    # Legacy — kept for backward compat
+    page: int | None = None
+    per_page: int | None = None

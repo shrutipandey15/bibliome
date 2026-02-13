@@ -30,6 +30,8 @@ def _entry_to_response(entry) -> EntryResponse:
         id=entry.id,
         title=entry.title,
         author=entry.author,
+        cover_url=entry.cover_url,
+        isbn=entry.isbn,
         intensity=entry.intensity,
         quote=entry.quote,
         public_echo=entry.public_echo,
@@ -47,16 +49,31 @@ def _entry_to_response(entry) -> EntryResponse:
 
 @router.get("", response_model=EntryListResponse)
 async def get_entries(
-    page: int = Query(default=1, ge=1),
-    per_page: int = Query(default=20, ge=1, le=100),
+    cursor: str | None = Query(default=None, description="ISO timestamp cursor from previous next_cursor"),
+    limit: int = Query(default=20, ge=1, le=100),
+    page: int | None = Query(default=None, ge=1, description="Legacy offset pagination"),
+    per_page: int | None = Query(default=None, ge=1, le=100, description="Legacy offset pagination"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """List all book entries for the current user."""
-    entries, total = await list_entries(db, current_user.id, page, per_page)
+    """
+    List book entries. Supports cursor-based (preferred) and offset-based (legacy) pagination.
+
+    Cursor mode: pass `cursor` from previous response's `next_cursor`.
+    Offset mode: pass `page` + `per_page` (backward compat).
+    """
+    entries, total, next_cursor = await list_entries(
+        db, current_user.id,
+        limit=limit,
+        cursor=cursor,
+        page=page,
+        per_page=per_page,
+    )
     return EntryListResponse(
         entries=[_entry_to_response(e) for e in entries],
         total=total,
+        next_cursor=next_cursor,
+        has_more=next_cursor is not None,
         page=page,
         per_page=per_page,
     )

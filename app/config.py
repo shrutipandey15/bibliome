@@ -15,6 +15,9 @@ class Settings(BaseSettings):
     # CORS
     CORS_ORIGINS: str = "http://localhost:3000,http://localhost:5173"
 
+    # Redis (rate limiting — optional, falls back to in-memory)
+    REDIS_URL: str | None = None
+
     # App
     ENVIRONMENT: str = "development"
     APP_NAME: str = "Book DNA"

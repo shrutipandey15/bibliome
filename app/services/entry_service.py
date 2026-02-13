@@ -14,6 +14,8 @@ async def create_entry(db: AsyncSession, user_id: uuid.UUID, data: EntryCreate) 
         user_id=user_id,
         title=data.title,
         author=data.author,
+        cover_url=data.cover_url,
+        isbn=data.isbn,
         intensity=data.intensity,
         quote=data.quote,
         public_echo=data.public_echo,
@@ -52,28 +54,75 @@ async def get_entry_by_id(
 
 
 async def list_entries(
-    db: AsyncSession, user_id: uuid.UUID, page: int = 1, per_page: int = 20
-) -> tuple[list[BookEntry], int]:
-    """List a user's entries with pagination. Returns (entries, total_count)."""
+    db: AsyncSession,
+    user_id: uuid.UUID,
+    limit: int = 20,
+    cursor: str | None = None,
+    page: int | None = None,
+    per_page: int | None = None,
+) -> tuple[list[BookEntry], int, str | None]:
+    """
+    List a user's entries. Returns (entries, total_count, next_cursor).
+
+    Supports two modes:
+    - Cursor-based (preferred): pass cursor from previous response's next_cursor
+    - Offset-based (legacy): pass page + per_page
+
+    Entries are ordered newest-first (created_at DESC).
+    Cursor is the created_at ISO timestamp of the last entry in the batch.
+    """
     # Count
     count_result = await db.execute(
         select(func.count(BookEntry.id)).where(BookEntry.user_id == user_id)
     )
     total = count_result.scalar_one()
 
-    # Fetch
-    offset = (page - 1) * per_page
-    result = await db.execute(
+    # Build query
+    query = (
         select(BookEntry)
         .options(selectinload(BookEntry.emotions))
         .where(BookEntry.user_id == user_id)
-        .order_by(BookEntry.created_at.desc())
-        .offset(offset)
-        .limit(per_page)
+        .order_by(BookEntry.created_at.desc(), BookEntry.id.desc())
     )
+
+    if cursor:
+        # Cursor = ISO timestamp — fetch entries older than this
+        from datetime import datetime, timezone
+        try:
+            cursor_dt = datetime.fromisoformat(cursor)
+        except ValueError:
+            cursor_dt = None
+
+        if cursor_dt:
+            query = query.where(BookEntry.created_at < cursor_dt)
+        query = query.limit(limit)
+    elif page is not None and per_page is not None:
+        # Legacy offset mode
+        offset = (page - 1) * per_page
+        query = query.offset(offset).limit(per_page)
+    else:
+        query = query.limit(limit)
+
+    result = await db.execute(query)
     entries = list(result.scalars().all())
 
-    return entries, total
+    # Build next cursor from last entry
+    next_cursor = None
+    if entries:
+        last = entries[-1]
+        remaining = total - (len(entries) if not cursor and not page else 0)
+        # Check if there are more entries after this batch
+        has_next_result = await db.execute(
+            select(func.count(BookEntry.id)).where(
+                BookEntry.user_id == user_id,
+                BookEntry.created_at < last.created_at,
+            )
+        )
+        has_next = has_next_result.scalar_one() > 0
+        if has_next:
+            next_cursor = last.created_at.isoformat()
+
+    return entries, total, next_cursor
 
 
 async def update_entry(
