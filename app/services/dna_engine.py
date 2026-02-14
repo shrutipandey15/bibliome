@@ -244,12 +244,6 @@ def calculate_personality(entries: list[dict]) -> dict:
 def generate_stats(entries: list[dict]) -> dict:
     """
     Generate reading statistics from entries.
-
-    Args:
-        entries: List of dicts with emotions, intensity, created_at, finished_at.
-
-    Returns:
-        Dict with reading stats.
     """
     if not entries:
         return {
@@ -284,13 +278,14 @@ def generate_stats(entries: list[dict]) -> dict:
     unique_emotions = len(set(all_emotions))
     diversity = unique_emotions / len(VALID_EMOTION_IDS)
 
-    # Books per month
     dates = [e["created_at"] for e in entries if e.get("created_at")]
-    if len(dates) >= 2:
-        span = (max(dates) - min(dates)).days or 1
-        books_per_month = total / (span / 30)
-    else:
+    
+    if not dates:
         books_per_month = total
+    else:
+        real_span_days = (max(dates) - min(dates)).days        
+        effective_days = max(real_span_days, 30)
+        books_per_month = (total / effective_days) * 30
 
     return {
         "total_books": total,
@@ -301,7 +296,7 @@ def generate_stats(entries: list[dict]) -> dict:
         },
         "most_common_emotion": most_common[0][0] if most_common else None,
         "most_common_emotion_count": most_common[0][1] if most_common else 0,
-        "emotion_diversity": round(diversity, 2),
+        "emotion_diversity": round(diversity * 100),
         "unique_emotions_used": unique_emotions,
         "total_emotions_possible": len(VALID_EMOTION_IDS),
         "books_per_month": round(books_per_month, 1),
