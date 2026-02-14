@@ -24,6 +24,7 @@ class User(Base):
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
     personality_type: Mapped[str | None] = mapped_column(String(100))
     is_public: Mapped[bool] = mapped_column(Boolean, default=False)
+    share_token: Mapped[str | None] = mapped_column(String(50), unique=True, index=True, nullable=True)
 
     # DNA caching — dirty flag flips true on entry create/update/delete
     dna_dirty: Mapped[bool] = mapped_column(Boolean, default=True)

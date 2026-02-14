@@ -209,3 +209,48 @@ async def get_echo_og_image(entry_id: uuid.UUID, db: AsyncSession = Depends(get_
     )
 
     return Response(content=image_bytes, media_type="image/png")
+
+@router.get("/shared/{token}")
+async def get_shared_card(token: str, db: AsyncSession = Depends(get_db)):
+    """
+    Get a DNA profile via a secure token. 
+    Bypasses the 'is_public' check since the link acts as a key.
+    """
+    result = await db.execute(select(User).where(User.share_token == token))
+    user = result.scalar_one_or_none()
+
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, 
+            detail="Link invalid or expired"
+        )
+
+    result = await db.execute(
+        select(BookEntry)
+        .options(selectinload(BookEntry.emotions))
+        .where(BookEntry.user_id == user.id)
+        .order_by(BookEntry.created_at.asc())
+    )
+    entries = result.scalars().all()
+
+    entry_dicts = [
+        {
+            "id": str(e.id),
+            "title": e.title,
+            "author": e.author,
+            "intensity": e.intensity,
+            "emotions": [em.emotion_id for em in e.emotions],
+            "created_at": e.created_at,
+        }
+        for e in entries
+    ]
+    
+    dna = calculate_personality(entry_dicts)
+    
+    return {
+        "username": user.username,
+        "personality": dna.get("personality"),
+        "stats": dna.get("stats", {}),
+        "top_emotions": dna.get("top_emotions", []),
+        "share_token": user.share_token 
+    }

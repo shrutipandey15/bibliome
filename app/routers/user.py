@@ -1,3 +1,4 @@
+import secrets
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -41,3 +42,16 @@ async def update_settings(
         username=current_user.username,
         email=current_user.email,
     )
+
+@router.post("/share-token")
+async def generate_share_token(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Generate (or reset) a secure share token for the current user."""
+    token = secrets.token_urlsafe(16)
+    
+    current_user.share_token = token
+    await db.commit()
+    
+    return {"share_token": token}

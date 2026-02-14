@@ -1,209 +1,230 @@
-# ◈ Book DNA — API
+# Book DNA API
 
-**The emotional fingerprint of your reading life.**
+Backend API for logging book entries with emotion tags and generating a reading "DNA" profile.
 
-Book DNA doesn't care what you rated a book. It cares what the book did to you — the 2AM spiral, the grief that crept in sideways, the comfort that felt like coming home. This is the backend that powers that experience.
+This README reflects the current implementation and operational constraints.
 
----
+## What It Does
 
-## What This Is
+- User accounts with JWT auth (access + refresh tokens)
+- Book entry CRUD per user
+- Emotion tagging per entry (`entry_emotions`)
+- Rule-based personality calculation from emotion history
+- Cached DNA profile on `users.cached_dna_profile`
+- DNA snapshots stored in `dna_snapshots`
+- Public profile endpoints (echoes + card data + OG images)
+- Book search endpoint backed by Google Books data, with request/response contract exposed via OpenAPI docs
 
-A RESTful API that tracks the emotional aftermath of books and distills it into a reading personality. Built with FastAPI and PostgreSQL, designed for speed, designed for feelings.
+## Stack
 
-Every book entry captures not a rating but an emotional signature — which of ten core emotions it triggered, how intensely, and the one line that hit hardest. From that data, the DNA Engine calculates your reading personality type, tracks how it shifts over time, and generates shareable visual cards.
+- Python / FastAPI
+- SQLAlchemy async + PostgreSQL (`asyncpg`)
+- Alembic migrations
+- JWT via `python-jose`
+- Password hashing via `bcrypt`
+- Pillow for OG image generation
+- Optional Redis-backed rate limiting (falls back to in-memory)
 
----
+## API Surface
 
-## The Emotional Vocabulary
+Base prefix: `/api` (configurable via `API_V1_PREFIX`).
 
-Book DNA recognizes ten emotions that books leave behind:
+Health:
+- `GET /health`
 
-| Emotion | What It Means |
-|---------|--------------|
-| 🔥 **Rage** | The book made you angry — at a character, the world, or yourself |
-| 🧣 **Comfort** | A warm, safe feeling. Like a book-shaped hug |
-| 🌀 **Dread** | A creeping unease that followed you off the page |
-| 🌿 **Healing** | Something shifted. Something got lighter |
-| 💜 **Obsession** | You couldn't stop thinking about it. Still can't |
-| 🌊 **Grief** | Loss — real, fictional, anticipated |
-| 👁 **Seen** | The book knew you. Uncomfortably well |
-| ⚡ **Chaos** | Rules broken, expectations shattered |
-| ◻️ **Nothing** | Emotional numbness. Which is its own kind of feeling |
-| 🌙 **2AM** | You stayed up too late. No regrets |
+Auth:
+- `POST /api/auth/register`
+- `POST /api/auth/login`
+- `POST /api/auth/refresh`
+- `GET /api/auth/me`
 
----
+Entries:
+- `GET /api/entries`
+- `POST /api/entries`
+- `GET /api/entries/{entry_id}`
+- `PUT /api/entries/{entry_id}`
+- `DELETE /api/entries/{entry_id}`
 
-## Reading Personality Types
+DNA:
+- `GET /api/dna/profile`
+- `POST /api/dna/generate`
+- `GET /api/dna/heatmap`
+- `GET /api/dna/stats`
+- `GET /api/dna/history`
+- `GET /api/dna/recap?month=YYYY-MM`
+- `GET /api/dna/twin`
 
-The DNA Engine maps your emotional patterns to one of eight archetypes:
+User:
+- `GET /api/user/settings`
+- `PATCH /api/user/settings`
 
-- **◈ The Grief Romantic** — seeks books that break the heart because feeling deeply is how they know they're alive
-- **◇ The Control-Seeking Intellectual** — reads to master the chaos, understanding as armor
-- **◆ The Soft Masochist** — chooses pain on purpose, trusts books that hurt
-- **○ The Comfort Architect** — builds emotional safety through stories
-- **△ The Midnight Arsonist** — reads like setting fire to their own beliefs
-- **□ The Quiet Witness** — absorbs everything, processes in silence
-- **♡ The Obsessive Romantic** — doesn't read books, falls into them
-- **◎ The Emotional Archaeologist** — digs into stories looking for buried parts of themselves
+Public (no auth):
+- `GET /api/public/echoes/{username}`
+- `GET /api/public/card/{username}`
+- `GET /api/public/card/{username}/og`
+- `GET /api/public/echo/{entry_id}/og`
 
----
+Books:
+- `GET /api/books/search?q=...` (auth required)
 
-## Tech Stack
+## Data Model
 
-| Layer | Technology |
-|-------|-----------|
-| Framework | FastAPI (async Python) |
-| Database | PostgreSQL |
-| ORM | SQLAlchemy (async) |
-| Migrations | Alembic |
-| Auth | JWT access + refresh tokens with rotation |
-| Images | Pillow (OG card generation) |
-| Deployment | Docker-ready |
+Tables:
+- `users`
+- `book_entries`
+- `entry_emotions`
+- `dna_snapshots`
+- `refresh_tokens`
 
----
+Important fields:
+- `users.dna_dirty` + `users.cached_dna_profile` for profile caching
+- `book_entries.intensity` constrained to `1..10`
+- `entry_emotions.strength` constrained to `1..10`
+- unique constraint on `(entry_id, emotion_id)`
 
-## API Endpoints
+## DNA Engine (Current Behavior)
 
-### Auth
+The personality engine in `app/services/dna_engine.py` is rule-based.
+
+It uses:
+- Emotion frequency
+- Average emotion intensity
+- Recency weighting
+- Emotion co-occurrence
+- Penalties for anti-emotions
+
+Returns:
+- winning personality type (8 predefined types)
+- score breakdown
+- top emotions
+- avoided emotions
+- co-occurrence summary
+
+`POST /api/dna/generate` and `GET /api/dna/twin` require at least 3 entries.
+
+## Rate Limiting
+
+Defined in `app/middleware/rate_limit.py`:
+- Auth limiter: 10 requests / 60s per IP
+- DNA generate limiter: 5 requests / 300s per IP
+
+Behavior:
+- Uses Redis sorted sets if `REDIS_URL` is configured and reachable
+- Falls back to in-memory limiter if Redis is unavailable
+
+## Project Layout
+
+```text
+app/
+  main.py
+  config.py
+  database.py
+  middleware/
+    auth.py
+    error_handlers.py
+    rate_limit.py
+  models/
+    user.py
+    book_entry.py
+    dna_snapshot.py
+    refresh_token.py
+  routers/
+    auth.py
+    entries.py
+    dna.py
+    user.py
+    public.py
+    books.py
+  schemas/
+    auth.py
+    entry.py
+    dna.py
+    public.py
+    user.py
+  services/
+    auth_service.py
+    entry_service.py
+    dna_engine.py
+    background.py
+    book_search.py
+    og_image.py
+  utils/
+    emotions.py
+alembic/
+  versions/
 ```
-POST   /api/auth/register     Create account
-POST   /api/auth/login        Get tokens
-POST   /api/auth/refresh      Rotate tokens
-GET    /api/auth/me           Current user
-```
 
-### Book Entries
-```
-GET    /api/entries            List entries (paginated)
-POST   /api/entries            Log a new book
-GET    /api/entries/{id}       Get single entry
-PUT    /api/entries/{id}       Update entry
-DELETE /api/entries/{id}       Delete entry
-```
+## Local Setup
 
-### DNA & Analytics
-```
-GET    /api/dna/profile        Live personality calculation
-POST   /api/dna/generate       Save a DNA snapshot (min 3 books)
-GET    /api/dna/heatmap        Emotion × book matrix
-GET    /api/dna/stats          Reading statistics
-GET    /api/dna/history        Past DNA snapshots
-```
-
-### User Settings
-```
-GET    /api/user/settings      Get profile settings
-PATCH  /api/user/settings      Update (display name, public/private)
-```
-
-### Public (no auth)
-```
-GET    /api/public/echoes/{username}       Public echoes
-GET    /api/public/card/{username}         DNA card data
-GET    /api/public/card/{username}/og      DNA card as PNG image
-GET    /api/public/echo/{entry_id}/og      Echo card as PNG image
-```
-
----
-
-## Setup
+### 1. Install dependencies
 
 ```bash
-# Clone
-git clone <repo-url>
-cd book-dna-api
-
-# Environment
 python -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
+```
 
-# Configure
+### 2. Configure environment
+
+```bash
 cp .env.example .env
-# Edit .env — set your DATABASE_URL and SECRET_KEY
+```
 
-# Database
-createdb bookdna
+Set at minimum:
+- `DATABASE_URL`
+- `SECRET_KEY`
+
+### 3. Run migrations
+
+```bash
 alembic upgrade head
+```
 
-# Run
+### 4. Start API
+
+```bash
 uvicorn app.main:app --reload
 ```
 
-API docs at [http://localhost:8000/docs](http://localhost:8000/docs)
+Docs:
+- Swagger UI: `http://localhost:8000/docs`
+- OpenAPI JSON: `http://localhost:8000/openapi.json`
 
----
+## Docker
 
-## Project Structure
-
-```
-app/
-├── main.py                 Application entry
-├── config.py               Environment configuration
-├── database.py             Async engine + session
-├── models/                 SQLAlchemy models
-│   ├── user.py
-│   ├── book_entry.py
-│   ├── entry_emotion.py
-│   ├── dna_snapshot.py
-│   └── refresh_token.py
-├── schemas/                Pydantic request/response models
-│   ├── auth.py
-│   ├── entries.py
-│   ├── dna.py
-│   ├── public.py
-│   └── user.py
-├── services/               Business logic
-│   ├── auth_service.py     JWT + password hashing
-│   ├── entry_service.py    CRUD operations
-│   ├── dna_engine.py       Personality algorithm
-│   └── og_image.py         Card image generation
-├── routers/                API route handlers
-│   ├── auth.py
-│   ├── entries.py
-│   ├── dna.py
-│   ├── public.py
-│   └── user.py
-├── middleware/
-│   └── auth.py             JWT dependency
-└── utils/
-    └── emotions.py         Emotion definitions
+```bash
+docker build -t book-dna-api .
+docker run --rm -p 8000:8000 --env-file .env book-dna-api
 ```
 
----
-
-## The DNA Engine
-
-The personality algorithm scores users across four dimensions:
-
-1. **Emotion frequency** — which emotions appear most across all entries
-2. **Intensity weighting** — high-intensity emotions count more
-3. **Recency bias** — recent books influence your profile more than older ones
-4. **Co-occurrence patterns** — grief + seen appearing together means something different than grief alone
-
-Each personality type has primary emotions, anti-emotions (which reduce its score), blind spots, and comfort tropes. The engine also detects emotional blind spots — emotions you never tag — and tracks co-occurrence patterns for deeper analysis.
-
-Phase 1 (current): Rule-based scoring
-Phase 2 (planned): Pattern detection from aggregate user data
-Phase 3 (planned): AI-powered with Claude API
-
----
+The container command runs:
+- `uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 4`
 
 ## Environment Variables
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `DATABASE_URL` | `postgresql+asyncpg://postgres:postgres@localhost/bookdna` | Async Postgres connection |
-| `SECRET_KEY` | `change-me-in-production` | JWT signing key |
-| `ACCESS_TOKEN_EXPIRE_MINUTES` | `15` | Access token lifetime |
-| `REFRESH_TOKEN_EXPIRE_DAYS` | `7` | Refresh token lifetime |
+From `app/config.py`:
 
----
+- `DATABASE_URL` (default: `postgresql+asyncpg://postgres:postgres@localhost:5432/bookdna`)
+- `SECRET_KEY` (must be changed for production)
+- `ALGORITHM` (default: `HS256`)
+- `ACCESS_TOKEN_EXPIRE_MINUTES` (default: `15`)
+- `REFRESH_TOKEN_EXPIRE_DAYS` (default: `7`)
+- `CORS_ORIGINS` (comma-separated)
+- `REDIS_URL` (optional)
+- `ENVIRONMENT` (`development` / `production`)
+- `APP_NAME` (default: `Book DNA`)
+- `API_V1_PREFIX` (default: `/api`)
+
+## Current Limitations (Honest Snapshot)
+
+- Automated tests are not yet included in this repository.
+- Background DNA recalculation currently runs as in-process FastAPI background work rather than a separate job queue.
+- Book search relies on external API availability (Google Books) and network access; endpoint behavior is documented via OpenAPI.
+- The personality algorithm is currently deterministic and rule-based, rather than trained on user outcome data.
+- Redis rate limiting is optional; if Redis is absent, limiting falls back to per-process memory.
 
 ## License
 
-Private. Not open source.
-
----
+Public repository. No explicit license file is currently included in this repo.
 
 *Because the books that change you deserve more than a star rating.*
