@@ -158,8 +158,9 @@ async def update_entry(
 
         await db.flush()
 
-    # Reload
-    return await get_entry_by_id(db, entry_id, user_id)
+    # Expire to clear cached relationships, then reload fresh
+    await db.refresh(entry, attribute_names=["emotions"])
+    return entry
 
 
 async def delete_entry(db: AsyncSession, entry_id: uuid.UUID, user_id: uuid.UUID) -> bool:

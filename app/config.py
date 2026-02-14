@@ -1,4 +1,5 @@
 from pydantic_settings import BaseSettings
+from pydantic import model_validator
 from functools import lru_cache
 
 
@@ -26,6 +27,14 @@ class Settings(BaseSettings):
     @property
     def cors_origins_list(self) -> list[str]:
         return [origin.strip() for origin in self.CORS_ORIGINS.split(",")]
+
+    # Security check
+    @model_validator(mode='after')
+    def check_production_security(self):
+        if self.ENVIRONMENT == "production":
+            if self.SECRET_KEY.startswith("change-this"):
+                raise ValueError("CRITICAL: You must set a secure SECRET_KEY env var in production!")
+        return self
 
     class Config:
         env_file = ".env"
