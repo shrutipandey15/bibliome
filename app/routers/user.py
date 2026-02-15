@@ -28,10 +28,14 @@ async def update_settings(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Update user settings (display name, public/private toggle)."""
+    """
+    Update user settings (Display Name only).
+    'is_public' is no longer updatable.
+    """
     update_data = data.model_dump(exclude_unset=True)
     for field, value in update_data.items():
-        setattr(current_user, field, value)
+        if hasattr(current_user, field):
+            setattr(current_user, field, value)
 
     await db.flush()
 
@@ -42,6 +46,7 @@ async def update_settings(
         username=current_user.username,
         email=current_user.email,
     )
+
 
 @router.post("/share-token")
 async def generate_share_token(

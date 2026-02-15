@@ -2,7 +2,7 @@ import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import Response
-from sqlalchemy import select
+from sqlalchemy import select, desc
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -10,14 +10,17 @@ from app.database import get_db
 from app.models.book_entry import BookEntry
 from app.models.user import User
 from app.schemas.public import PublicCardResponse, PublicEcho, PublicEchoesResponse
-from app.services.dna_engine import PERSONALITY_TYPES, calculate_personality
+from app.services.dna_engine import calculate_personality
 from app.services.og_image import generate_dna_card_image, generate_echo_card_image
 
 router = APIRouter(prefix="/public", tags=["public"])
 
 
-async def _get_public_user(db: AsyncSession, username: str) -> User:
-    """Get a user by username. Must be public."""
+async def _get_strict_public_user(db: AsyncSession, username: str) -> User:
+    """
+    Get a user by username. STRICTLY enforces public profile.
+    Used ONLY for the full profile card (which is effectively disabled for everyone now).
+    """
     result = await db.execute(select(User).where(User.username == username))
     user = result.scalar_one_or_none()
 
@@ -29,13 +32,61 @@ async def _get_public_user(db: AsyncSession, username: str) -> User:
     return user
 
 
+@router.get("/stream", response_model=PublicEchoesResponse)
+async def get_public_stream(db: AsyncSession = Depends(get_db)):
+    """
+    The Global Echo Feed.
+    Returns the 50 most recent echoes from ALL users.
+    """
+    result = await db.execute(
+        select(BookEntry)
+        .options(selectinload(BookEntry.emotions), selectinload(BookEntry.user))
+        .where(
+            BookEntry.public_echo.isnot(None),
+            BookEntry.public_echo != "",
+        )
+        .order_by(desc(BookEntry.created_at))
+        .limit(50)
+    )
+    entries = result.scalars().all()
+
+    echoes = []
+    for e in entries:
+        if not e.user: continue
+            
+        echoes.append(
+            PublicEcho(
+                entry_id=e.id,
+                title=e.title,
+                author=e.author,
+                public_echo=e.public_echo,
+                emotions=[em.emotion_id for em in e.emotions],
+                intensity=e.intensity,
+                created_at=e.created_at,
+                username=e.user.username,
+                display_name=e.user.display_name
+            )
+        )
+
+    return PublicEchoesResponse(
+        username="community",
+        display_name="Global Stream",
+        echoes=echoes,
+        total=len(echoes),
+    )
+
+
 @router.get("/echoes/{username}", response_model=PublicEchoesResponse)
-async def get_public_echoes(username: str, db: AsyncSession = Depends(get_db)):
+async def get_user_echoes(username: str, db: AsyncSession = Depends(get_db)):
     """
-    Get a user's public echoes. No auth required.
-    Only returns entries that have a public_echo set.
+    Get a SPECIFIC user's echoes. 
+    Always public, regardless of profile settings.
     """
-    user = await _get_public_user(db, username)
+    result = await db.execute(select(User).where(User.username == username))
+    user = result.scalar_one_or_none()
+
+    if not user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
 
     result = await db.execute(
         select(BookEntry)
@@ -73,12 +124,11 @@ async def get_public_echoes(username: str, db: AsyncSession = Depends(get_db)):
 @router.get("/card/{username}", response_model=PublicCardResponse)
 async def get_public_card(username: str, db: AsyncSession = Depends(get_db)):
     """
-    Get a user's shareable DNA card data. No auth required.
-    Used by the frontend to render the card, and for OG image generation.
+    Get a user's full DNA stats.
+    STRICT: Will return 403 Forbidden for almost everyone now.
     """
-    user = await _get_public_user(db, username)
+    user = await _get_strict_public_user(db, username)
 
-    # Get entries to calculate live personality
     result = await db.execute(
         select(BookEntry)
         .options(selectinload(BookEntry.emotions))
@@ -102,10 +152,7 @@ async def get_public_card(username: str, db: AsyncSession = Depends(get_db)):
     dna = calculate_personality(entry_dicts)
     personality = dna.get("personality")
 
-    # Find full personality type info
-    ptype_info = None
-    if personality:
-        ptype_info = personality
+    ptype_info = personality if personality else None
 
     return PublicCardResponse(
         username=user.username,
@@ -119,15 +166,8 @@ async def get_public_card(username: str, db: AsyncSession = Depends(get_db)):
         member_since=user.created_at,
     )
 
-
-@router.get("/card/{username}/og")
-async def get_card_og_image(username: str, db: AsyncSession = Depends(get_db)):
-    """
-    Generate an OG image for a user's DNA card.
-    Returns a PNG image — use this URL in og:image meta tags.
-    """
-    user = await _get_public_user(db, username)
-
+async def _generate_card_image_for_user(user: User, db: AsyncSession):
+    """Helper to generate the DNA card image."""
     result = await db.execute(
         select(BookEntry)
         .options(selectinload(BookEntry.emotions))
@@ -170,11 +210,36 @@ async def get_card_og_image(username: str, db: AsyncSession = Depends(get_db)):
     return Response(content=image_bytes, media_type="image/png")
 
 
+@router.get("/card/{username}/og")
+async def get_card_og_image(username: str, db: AsyncSession = Depends(get_db)):
+    """
+    Strict OG Image for public profiles.
+    Likely unused now, but kept for backward compatibility.
+    """
+    user = await _get_strict_public_user(db, username)
+    return await _generate_card_image_for_user(user, db)
+
+
+@router.get("/shared/{token}/og")
+async def get_shared_token_og_image(token: str, db: AsyncSession = Depends(get_db)):
+    """
+    Generate OG Image for a SHARE TOKEN.
+    Allows private users to download/share their 'Year in Review'.
+    """
+    result = await db.execute(select(User).where(User.share_token == token))
+    user = result.scalar_one_or_none()
+
+    if not user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Invalid token")
+
+    return await _generate_card_image_for_user(user, db)
+
+
 @router.get("/echo/{entry_id}/og")
 async def get_echo_og_image(entry_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
     """
-    Generate an OG image for a single public echo.
-    Returns a PNG image.
+    Generate OG Image for a single ECHO.
+    Publicly accessible for all valid echoes.
     """
     result = await db.execute(
         select(BookEntry)
@@ -184,20 +249,10 @@ async def get_echo_og_image(entry_id: uuid.UUID, db: AsyncSession = Depends(get_
     entry = result.scalar_one_or_none()
 
     if not entry or not entry.public_echo:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Echo not found",
-        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Echo not found")
 
-    # Get the user
     user_result = await db.execute(select(User).where(User.id == entry.user_id))
     user = user_result.scalar_one_or_none()
-
-    if not user or not user.is_public:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Profile is private",
-        )
 
     image_bytes = generate_echo_card_image(
         title=entry.title,
@@ -205,7 +260,7 @@ async def get_echo_og_image(entry_id: uuid.UUID, db: AsyncSession = Depends(get_
         public_echo=entry.public_echo,
         emotions=[em.emotion_id for em in entry.emotions],
         intensity=entry.intensity,
-        username=user.username,
+        username=user.username if user else "Anonymous",
     )
 
     return Response(content=image_bytes, media_type="image/png")
@@ -213,17 +268,14 @@ async def get_echo_og_image(entry_id: uuid.UUID, db: AsyncSession = Depends(get_
 @router.get("/shared/{token}")
 async def get_shared_card(token: str, db: AsyncSession = Depends(get_db)):
     """
-    Get a DNA profile via a secure token. 
-    Bypasses the 'is_public' check since the link acts as a key.
+    Get DNA profile via secure token. 
+    The primary way for users to share their full profile now.
     """
     result = await db.execute(select(User).where(User.share_token == token))
     user = result.scalar_one_or_none()
 
     if not user:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, 
-            detail="Link invalid or expired"
-        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Link invalid or expired")
 
     result = await db.execute(
         select(BookEntry)
