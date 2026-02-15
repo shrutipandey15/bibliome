@@ -158,8 +158,10 @@ async def update_entry(
 
         await db.flush()
 
-    # Expire to clear cached relationships, then reload fresh
-    await db.refresh(entry, attribute_names=["emotions"])
+    # Expire the entry to bust SQLAlchemy's identity map cache,
+    # then reload fresh with eager-loaded emotions
+    db.expire(entry)
+    return await get_entry_by_id(db, entry_id, user_id)
     return entry
 
 

@@ -25,7 +25,7 @@ logger = logging.getLogger("bookdna")
 
 
 def error_response(status_code: int, error: str, detail: str, error_id: str | None = None) -> JSONResponse:
-    """Build a consistent error JSON response."""
+    """Build a consistent error JSON response with CORS headers."""
     body = {
         "error": error,
         "detail": detail,
@@ -33,7 +33,14 @@ def error_response(status_code: int, error: str, detail: str, error_id: str | No
     }
     if error_id:
         body["error_id"] = error_id
-    return JSONResponse(status_code=status_code, content=body)
+    return JSONResponse(
+        status_code=status_code,
+        content=body,
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Credentials": "true",
+        },
+    )
 
 
 def register_error_handlers(app: FastAPI) -> None:

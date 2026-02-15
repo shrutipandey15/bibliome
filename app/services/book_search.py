@@ -35,62 +35,71 @@ async def search_books(query: str, max_results: int = 8) -> list[BookResult]:
         except Exception:
             return []
 
-    items = data.get("items", [])
-    results = []
-    seen_titles = set()
+        items = data.get("items", [])
+        results = []
+        seen_titles = set()
 
-    for item in items:
-        info = item.get("volumeInfo", {})
-        title = info.get("title", "").strip()
-        if not title:
-            continue
+        for item in items:
+            info = item.get("volumeInfo", {})
+            title = info.get("title", "").strip()
+            if not title:
+                continue
 
-        # Deduplicate by lowercase title
-        title_key = title.lower()
-        if title_key in seen_titles:
-            continue
-        seen_titles.add(title_key)
+            # Deduplicate by lowercase title
+            title_key = title.lower()
+            if title_key in seen_titles:
+                continue
+            seen_titles.add(title_key)
 
-        # Get best author
-        authors = info.get("authors", [])
-        author = authors[0] if authors else None
+            # Get best author
+            authors = info.get("authors", [])
+            author = authors[0] if authors else None
 
-        # Get cover — prefer larger images
-        images = info.get("imageLinks", {})
-        cover_url = (
-            images.get("thumbnail")
-            or images.get("smallThumbnail")
-        )
-        # Upgrade to https and larger size
-        if cover_url:
-            cover_url = cover_url.replace("http://", "https://")
-            cover_url = cover_url.replace("zoom=1", "zoom=2")
+            # Get cover — prefer larger images
+            images = info.get("imageLinks", {})
+            cover_url = (
+                images.get("thumbnail")
+                or images.get("smallThumbnail")
+            )
+            # Upgrade to https and larger size
+            if cover_url:
+                cover_url = cover_url.replace("http://", "https://")
+                cover_url = cover_url.replace("zoom=1", "zoom=2")
 
-        # Get ISBN (prefer ISBN_13)
-        isbn = None
-        for identifier in info.get("industryIdentifiers", []):
-            if identifier.get("type") == "ISBN_13":
-                isbn = identifier.get("identifier")
-                break
-            elif identifier.get("type") == "ISBN_10" and not isbn:
-                isbn = identifier.get("identifier")
+                # Verify cover is actually an image (not a text placeholder)
+                try:
+                    head = await client.head(cover_url, timeout=3.0, follow_redirects=True)
+                    content_type = head.headers.get("content-type", "")
+                    if not content_type.startswith("image/"):
+                        cover_url = None
+                except Exception:
+                    pass  # keep the URL if we can't verify
 
-        # Get year
-        published = info.get("publishedDate", "")
-        year = published[:4] if len(published) >= 4 else None
+            # Get ISBN (prefer ISBN_13)
+            isbn = None
+            for identifier in info.get("industryIdentifiers", []):
+                if identifier.get("type") == "ISBN_13":
+                    isbn = identifier.get("identifier")
+                    break
+                elif identifier.get("type") == "ISBN_10" and not isbn:
+                    isbn = identifier.get("identifier")
 
-        # Get short description
-        desc = info.get("description", "")
-        if len(desc) > 200:
-            desc = desc[:197] + "..."
+            # Get year
+            published = info.get("publishedDate", "")
+            year = published[:4] if len(published) >= 4 else None
 
-        results.append(BookResult(
-            title=title,
-            author=author,
-            cover_url=cover_url,
-            isbn=isbn,
-            published_year=year,
-            description=desc or None,
-        ))
+            # Get short description
+            desc = info.get("description", "")
+            if len(desc) > 200:
+                desc = desc[:197] + "..."
+
+            results.append(BookResult(
+                title=title,
+                author=author,
+                cover_url=cover_url,
+                isbn=isbn,
+                published_year=year,
+                description=desc or None,
+            ))
 
     return results
