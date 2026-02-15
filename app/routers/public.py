@@ -1,4 +1,5 @@
 import uuid
+import httpx
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import Response
@@ -11,7 +12,7 @@ from app.models.book_entry import BookEntry
 from app.models.user import User
 from app.schemas.public import PublicCardResponse, PublicEcho, PublicEchoesResponse
 from app.services.dna_engine import calculate_personality
-from app.services.og_image import generate_dna_card_image, generate_echo_card_image
+from app.services.og_image import generate_dna_card_image, generate_echo_card_image, generate_story_image # <--- IMPORTED
 
 router = APIRouter(prefix="/public", tags=["public"])
 
@@ -238,8 +239,7 @@ async def get_shared_token_og_image(token: str, db: AsyncSession = Depends(get_d
 @router.get("/echo/{entry_id}/og")
 async def get_echo_og_image(entry_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
     """
-    Generate OG Image for a single ECHO.
-    Publicly accessible for all valid echoes.
+    Generate OG Image for a single ECHO (Horizontal).
     """
     result = await db.execute(
         select(BookEntry)
@@ -261,6 +261,46 @@ async def get_echo_og_image(entry_id: uuid.UUID, db: AsyncSession = Depends(get_
         emotions=[em.emotion_id for em in entry.emotions],
         intensity=entry.intensity,
         username=user.username if user else "Anonymous",
+    )
+
+    return Response(content=image_bytes, media_type="image/png")
+
+@router.get("/echo/{entry_id}/story")
+async def get_echo_story_image(entry_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+    """
+    Generate a Vertical (9:16) Story Image for Instagram/TikTok.
+    """
+    result = await db.execute(
+        select(BookEntry)
+        .options(selectinload(BookEntry.emotions))
+        .where(BookEntry.id == entry_id)
+    )
+    entry = result.scalar_one_or_none()
+
+    if not entry or not entry.public_echo:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Echo not found")
+
+    user_result = await db.execute(select(User).where(User.id == entry.user_id))
+    user = user_result.scalar_one_or_none()
+
+    cover_bytes = None
+    if entry.cover_url:
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(entry.cover_url, timeout=5.0)
+                if resp.status_code == 200:
+                    cover_bytes = resp.content
+        except Exception as e:
+            print(f"Failed to fetch cover: {e}") 
+
+    image_bytes = generate_story_image(
+        title=entry.title,
+        author=entry.author or "Unknown",
+        public_echo=entry.public_echo,
+        emotions=[em.emotion_id for em in entry.emotions],
+        intensity=entry.intensity,
+        username=user.username if user else "Anonymous",
+        cover_bytes=cover_bytes
     )
 
     return Response(content=image_bytes, media_type="image/png")
