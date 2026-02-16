@@ -1,6 +1,7 @@
+import asyncio
 import uuid
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
@@ -83,7 +84,6 @@ async def get_entries(
 @router.post("", response_model=EntryResponse, status_code=status.HTTP_201_CREATED)
 async def create_new_entry(
     data: EntryCreate,
-    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -91,7 +91,8 @@ async def create_new_entry(
     entry = await create_entry(db, current_user.id, data)
     current_user.dna_dirty = True
     await db.flush()
-    background_tasks.add_task(recalculate_dna, current_user.id)
+    # Fire-and-forget: runs after response is sent, doesn't block
+    asyncio.create_task(recalculate_dna(current_user.id))
     return _entry_to_response(entry)
 
 
@@ -112,7 +113,6 @@ async def get_single_entry(
 async def update_existing_entry(
     entry_id: uuid.UUID,
     data: EntryUpdate,
-    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -122,14 +122,13 @@ async def update_existing_entry(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Entry not found")
     current_user.dna_dirty = True
     await db.flush()
-    background_tasks.add_task(recalculate_dna, current_user.id)
+    asyncio.create_task(recalculate_dna(current_user.id))
     return _entry_to_response(entry)
 
 
 @router.delete("/{entry_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_existing_entry(
     entry_id: uuid.UUID,
-    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -139,4 +138,4 @@ async def delete_existing_entry(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Entry not found")
     current_user.dna_dirty = True
     await db.flush()
-    background_tasks.add_task(recalculate_dna, current_user.id)
+    asyncio.create_task(recalculate_dna(current_user.id))

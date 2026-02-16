@@ -1,3 +1,8 @@
+import asyncio
+import logging
+import time
+from collections import defaultdict
+
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -21,40 +26,90 @@ from app.services.auth_service import (
     validate_refresh_token,
 )
 
+logger = logging.getLogger("bookdna.auth")
 router = APIRouter(prefix="/auth", tags=["auth"])
+
+_failed_attempts: dict[str, list[float]] = defaultdict(list)
+LOCKOUT_THRESHOLD = 5
+LOCKOUT_WINDOW = 900  # 15 minutes
+
+
+def _check_lockout(email: str) -> None:
+    """Check if account is locked due to too many failed login attempts."""
+    now = time.monotonic()
+    key = email.lower().strip()
+    _failed_attempts[key] = [t for t in _failed_attempts[key] if now - t < LOCKOUT_WINDOW]
+    if len(_failed_attempts[key]) >= LOCKOUT_THRESHOLD:
+        remaining = int(LOCKOUT_WINDOW - (now - _failed_attempts[key][0]))
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"Too many failed attempts. Try again in {remaining // 60} minutes.",
+        )
+
+
+def _record_failed(email: str) -> None:
+    _failed_attempts[email.lower().strip()].append(time.monotonic())
+
+
+def _clear_failed(email: str) -> None:
+    _failed_attempts.pop(email.lower().strip(), None)
+
+
+from app.middleware.rate_limit import RateLimiter
+register_limiter = RateLimiter(max_requests=3, window_seconds=3600, prefix="register")
 
 
 @router.post("/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
 async def register(data: RegisterRequest, request: Request, db: AsyncSession = Depends(get_db)):
     """Register a new user."""
     auth_limiter.check(request)
+    register_limiter.check(request)
+    email = data.email.lower().strip()
+    username = data.username.strip()
+
+    disposable_domains = {"tempmail", "throwaway", "mailinator", "guerrilla", "yopmail", "10minutemail"}
+    email_domain = email.split("@")[1].split(".")[0] if "@" in email else ""
+    if email_domain in disposable_domains:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Please use a real email address")
+
     try:
-        user = await register_user(
-            db,
-            email=data.email,
-            username=data.username,
-            password=data.password,
-            display_name=data.display_name,
-        )
+        user = await register_user(db, email=email, username=username, password=data.password, display_name=data.display_name)
+        logger.info("New registration: %s (%s)", username, email)
         return user
     except ValueError as e:
+        await asyncio.sleep(0.1)
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
 
 
 @router.post("/login", response_model=TokenResponse)
 async def login(data: LoginRequest, request: Request, db: AsyncSession = Depends(get_db)):
     """Authenticate and return tokens."""
-    auth_limiter.check(request)
-    user = await authenticate_user(db, data.email, data.password)
+    await auth_limiter.check(request)
+
+    email = data.email.lower().strip()
+
+    _check_lockout(email)
+
+    user = await authenticate_user(db, email, data.password)
     if not user:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid email or password",
-        )
+        _record_failed(email)
+        failed_count = len(_failed_attempts.get(email, []))
+        remaining = LOCKOUT_THRESHOLD - failed_count
+
+        logger.warning("Failed login for %s (%d/%d attempts)", email, failed_count, LOCKOUT_THRESHOLD)
+
+        await asyncio.sleep(0.3)
+
+        detail = "Invalid email or password"
+        if 0 < remaining <= 2:
+            detail = f"Invalid email or password. {remaining} attempts remaining before lockout."
+
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=detail)
+
+    _clear_failed(email)
 
     access_token = create_access_token(user.id)
     refresh_token, expires_at = create_refresh_token_str(user.id)
-
     await save_refresh_token(db, user.id, refresh_token, expires_at)
 
     return TokenResponse(access_token=access_token, refresh_token=refresh_token)
@@ -72,7 +127,6 @@ async def refresh(data: RefreshRequest, db: AsyncSession = Depends(get_db)):
 
     access_token = create_access_token(user.id)
     new_refresh, expires_at = create_refresh_token_str(user.id)
-
     await save_refresh_token(db, user.id, new_refresh, expires_at)
 
     return TokenResponse(access_token=access_token, refresh_token=new_refresh)
