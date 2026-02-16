@@ -127,6 +127,8 @@ def calculate_personality(entries: list[dict]) -> dict:
             "top_emotions": [],
             "blind_spots": [],
             "comfort_tropes": [],
+            "avoided_emotions": [],
+            "co_occurrence": {},
         }
 
     # === 1. Count emotion frequency ===
@@ -251,7 +253,10 @@ def generate_stats(entries: list[dict]) -> dict:
             "avg_intensity": 0,
             "highest_intensity_book": None,
             "most_common_emotion": None,
+            "most_common_emotion_count": 0,
             "emotion_diversity": 0,
+            "unique_emotions_used": 0,
+            "total_emotions_possible": len(VALID_EMOTION_IDS),
             "books_per_month": 0,
         }
 

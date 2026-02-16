@@ -33,6 +33,7 @@ class UserResponse(BaseModel):
     display_name: str | None
     personality_type: str | None
     is_public: bool
+    is_admin: bool = False
     created_at: datetime
 
     model_config = {"from_attributes": True}
