@@ -1,10 +1,11 @@
 import asyncio
+import logging
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.database import get_db
+from app.database import get_db, async_session
 from app.middleware.auth import get_current_user
 from app.models.user import User
 from app.schemas.entry import (
@@ -22,6 +23,19 @@ from app.services.entry_service import (
     update_entry,
 )
 from app.services.background import recalculate_dna
+from app.services.book_search import bump_popularity
+
+logger = logging.getLogger("bookdna.entries")
+
+async def _feed_catalog(title: str, author: str | None, cover_url: str | None, isbn: str | None):
+    """Background task: add/update book in catalog using its own db session."""
+    try:
+        async with async_session() as db:
+            await bump_popularity(db, title, author, cover_url, isbn)
+            await db.commit()
+    except Exception as e:
+        logger.debug("Catalog feed failed (non-critical): %s", e)
+
 
 router = APIRouter(prefix="/entries", tags=["entries"])
 
@@ -91,7 +105,8 @@ async def create_new_entry(
     entry = await create_entry(db, current_user.id, data)
     current_user.dna_dirty = True
     await db.flush()
-    # Fire-and-forget: runs after response is sent, doesn't block
+    # Background: feed catalog + recalculate DNA (separate sessions, can't break entry)
+    asyncio.create_task(_feed_catalog(entry.title, entry.author, entry.cover_url, entry.isbn))
     asyncio.create_task(recalculate_dna(current_user.id))
     return _entry_to_response(entry)
 

@@ -1,6 +1,8 @@
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.database import get_db
 from app.middleware.auth import get_current_user
 from app.models.user import User
 from app.services.book_search import search_books
@@ -25,14 +27,14 @@ class BookSearchResponse(BaseModel):
 @router.get("/search", response_model=BookSearchResponse)
 async def search(
     q: str = Query(min_length=2, max_length=200),
+    db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """
-    Search for books by title or author.
-    Returns title, author, cover URL, ISBN.
-    Used by the frontend for autocomplete when adding entries.
+    Smart book search: local catalog first, then external APIs.
+    Results are merged, deduplicated, and ranked by relevance.
     """
-    results = await search_books(q)
+    results = await search_books(q, db=db)
     return BookSearchResponse(
         results=[
             BookSearchResult(
