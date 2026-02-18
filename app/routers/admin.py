@@ -13,6 +13,7 @@ from sqlalchemy.orm import selectinload
 
 from app.database import get_db
 from app.middleware.auth import get_current_user
+from app.models.book import Book
 from app.models.book_entry import BookEntry
 from app.models.dna_snapshot import DNASnapshot
 from app.models.refresh_token import RefreshToken
@@ -20,10 +21,16 @@ from app.models.user import User
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
+
+# ── Admin guard ──
+
 async def require_admin(current_user: User = Depends(get_current_user)) -> User:
     if not current_user.is_admin:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin access required")
     return current_user
+
+
+# ── Schemas ──
 
 class DashboardStats(BaseModel):
     total_users: int
@@ -34,6 +41,7 @@ class DashboardStats(BaseModel):
     entries_last_7d: int
     db_size_mb: float
     expired_refresh_tokens: int
+    catalog_books: int
 
 
 class AdminUser(BaseModel):
@@ -55,6 +63,8 @@ class AdminUserDetail(AdminUser):
     entries: list[dict]
 
 
+# ── Dashboard ──
+
 @router.get("/dashboard", response_model=DashboardStats)
 async def dashboard(
     db: AsyncSession = Depends(get_db),
@@ -75,6 +85,12 @@ async def dashboard(
     entries_7d = (await db.execute(
         select(func.count(BookEntry.id)).where(BookEntry.created_at >= week_ago)
     )).scalar_one()
+
+    # Catalog size
+    try:
+        catalog_books = (await db.execute(select(func.count(Book.id)))).scalar_one()
+    except Exception:
+        catalog_books = 0
 
     # DB size
     try:
@@ -101,8 +117,11 @@ async def dashboard(
         entries_last_7d=entries_7d,
         db_size_mb=db_size,
         expired_refresh_tokens=expired,
+        catalog_books=catalog_books,
     )
 
+
+# ── Users ──
 
 @router.get("/users", response_model=list[AdminUser])
 async def list_users(
@@ -202,6 +221,8 @@ async def delete_user(
     return {"message": f"User {user.username} deleted"}
 
 
+# ── Maintenance ──
+
 @router.post("/cleanup-tokens")
 async def cleanup_tokens(
     db: AsyncSession = Depends(get_db),
@@ -246,3 +267,134 @@ async def db_health(
         }
     except Exception as e:
         return {"status": "unhealthy", "error": str(e)}
+
+
+# ── Book Catalog ──
+
+class AdminBook(BaseModel):
+    id: str
+    title: str
+    author: str | None
+    cover_url: str | None
+    isbn_13: str | None
+    isbn_10: str | None
+    published_year: str | None
+    source: str
+    popularity: int
+    cover_verified: bool
+    created_at: datetime
+
+
+class CatalogStats(BaseModel):
+    total_books: int
+    with_covers: int
+    with_isbn: int
+    verified_covers: int
+    avg_popularity: float
+    top_sources: dict[str, int]
+
+
+@router.get("/catalog/stats", response_model=CatalogStats)
+async def catalog_stats(
+    db: AsyncSession = Depends(get_db),
+    admin: User = Depends(require_admin),
+):
+    """Get book catalog statistics."""
+    total = (await db.execute(select(func.count(Book.id)))).scalar_one()
+    with_covers = (await db.execute(
+        select(func.count(Book.id)).where(Book.cover_url.isnot(None))
+    )).scalar_one()
+    with_isbn = (await db.execute(
+        select(func.count(Book.id)).where(
+            (Book.isbn_13.isnot(None)) | (Book.isbn_10.isnot(None))
+        )
+    )).scalar_one()
+    verified = (await db.execute(
+        select(func.count(Book.id)).where(Book.cover_verified == True)
+    )).scalar_one()
+    avg_pop = (await db.execute(
+        select(func.coalesce(func.avg(Book.popularity), 0))
+    )).scalar_one()
+
+    # Source breakdown
+    source_result = await db.execute(
+        select(Book.source, func.count(Book.id))
+        .group_by(Book.source)
+    )
+    top_sources = {row[0]: row[1] for row in source_result.fetchall()}
+
+    return CatalogStats(
+        total_books=total,
+        with_covers=with_covers,
+        with_isbn=with_isbn,
+        verified_covers=verified,
+        avg_popularity=round(float(avg_pop), 1),
+        top_sources=top_sources,
+    )
+
+
+@router.get("/catalog/books", response_model=list[AdminBook])
+async def catalog_books(
+    q: str | None = None,
+    sort: str = "popular",  # popular, recent, title
+    limit: int = 50,
+    offset: int = 0,
+    db: AsyncSession = Depends(get_db),
+    admin: User = Depends(require_admin),
+):
+    """Browse the book catalog with optional search and sorting."""
+    stmt = select(Book)
+
+    if q:
+        pattern = f"%{q.lower()}%"
+        stmt = stmt.where(
+            (func.lower(Book.title).like(pattern))
+            | (func.lower(Book.author).like(pattern))
+            | (Book.isbn_13.like(f"%{q}%"))
+        )
+
+    if sort == "popular":
+        stmt = stmt.order_by(Book.popularity.desc(), Book.title)
+    elif sort == "recent":
+        stmt = stmt.order_by(Book.created_at.desc())
+    elif sort == "title":
+        stmt = stmt.order_by(Book.title)
+    else:
+        stmt = stmt.order_by(Book.popularity.desc())
+
+    stmt = stmt.offset(offset).limit(limit)
+    result = await db.execute(stmt)
+    books = result.scalars().all()
+
+    return [
+        AdminBook(
+            id=str(b.id),
+            title=b.title,
+            author=b.author,
+            cover_url=b.cover_url,
+            isbn_13=b.isbn_13,
+            isbn_10=b.isbn_10,
+            published_year=b.published_year,
+            source=b.source,
+            popularity=b.popularity,
+            cover_verified=b.cover_verified,
+            created_at=b.created_at,
+        )
+        for b in books
+    ]
+
+
+@router.delete("/catalog/books/{book_id}")
+async def delete_catalog_book(
+    book_id: str,
+    db: AsyncSession = Depends(get_db),
+    admin: User = Depends(require_admin),
+):
+    """Remove a book from the catalog."""
+    result = await db.execute(select(Book).where(Book.id == book_id))
+    book = result.scalar_one_or_none()
+    if not book:
+        raise HTTPException(status_code=404, detail="Book not found")
+    await db.delete(book)
+    await db.flush()
+    return {"message": f"'{book.title}' removed from catalog"}
