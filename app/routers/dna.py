@@ -28,6 +28,7 @@ from app.services.dna_engine import (
     generate_recap,
     generate_stats,
 )
+from app.utils.cache import dna_cache
 
 router = APIRouter(prefix="/dna", tags=["dna"])
 
@@ -137,6 +138,9 @@ async def generate_dna(
 
     await db.flush()
 
+    dna_cache.invalidate_prefix(f"heatmap:{current_user.id}")
+    dna_cache.invalidate_prefix(f"stats:{current_user.id}")
+
     return DNAGenerateResponse(
         snapshot=DNASnapshotResponse(
             id=snapshot.id,
@@ -156,8 +160,16 @@ async def get_heatmap(
     current_user: User = Depends(get_current_user),
 ):
     """Get the emotion x book heatmap matrix data."""
+    cache_key = f"heatmap:{current_user.id}"
+    if not current_user.dna_dirty:
+        cached = dna_cache.get(cache_key)
+        if cached:
+            return cached
+
     entries = await _get_user_entries(db, current_user.id)
-    return build_heatmap_data(entries)
+    result = build_heatmap_data(entries)
+    dna_cache.set(cache_key, result)
+    return result
 
 
 @router.get("/stats", response_model=StatsResponse)
@@ -166,8 +178,16 @@ async def get_stats(
     current_user: User = Depends(get_current_user),
 ):
     """Get reading statistics."""
+    cache_key = f"stats:{current_user.id}"
+    if not current_user.dna_dirty:
+        cached = dna_cache.get(cache_key)
+        if cached:
+            return cached
+
     entries = await _get_user_entries(db, current_user.id)
-    return generate_stats(entries)
+    result = generate_stats(entries)
+    dna_cache.set(cache_key, result)
+    return result
 
 
 @router.get("/history", response_model=list[DNASnapshotResponse])

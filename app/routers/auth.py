@@ -2,8 +2,10 @@ import asyncio
 import logging
 import time
 from collections import defaultdict
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
@@ -16,6 +18,8 @@ from app.schemas.auth import (
     RegisterRequest,
     TokenResponse,
     UserResponse,
+    ForgotPasswordRequest,
+    ResetPasswordRequest,
 )
 from app.services.auth_service import (
     authenticate_user,
@@ -24,14 +28,16 @@ from app.services.auth_service import (
     register_user,
     save_refresh_token,
     validate_refresh_token,
+    hash_password,
 )
+from app.services.email_service import send_reset_email, _generate_token
 
 logger = logging.getLogger("bookdna.auth")
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 _failed_attempts: dict[str, list[float]] = defaultdict(list)
 LOCKOUT_THRESHOLD = 5
-LOCKOUT_WINDOW = 900  # 15 minutes
+LOCKOUT_WINDOW = 900
 
 
 def _check_lockout(email: str) -> None:
@@ -81,10 +87,55 @@ async def register(data: RegisterRequest, request: Request, db: AsyncSession = D
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
 
 
+@router.post("/forgot-password")
+async def forgot_password(data: ForgotPasswordRequest, request: Request, db: AsyncSession = Depends(get_db)):
+    """Request a password reset email."""
+    auth_limiter.check(request)
+
+    email = data.email.lower().strip()
+    result = await db.execute(select(User).where(User.email == email))
+    user = result.scalar_one_or_none()
+
+    if not user:
+        await asyncio.sleep(0.3)
+        return {"message": "If that email exists, a reset link has been sent"}
+
+    token = _generate_token()
+    user.reset_token = token
+    user.reset_token_expires = datetime.now(timezone.utc) + timedelta(hours=1)
+    await db.flush()
+    await send_reset_email(email, user.username, token)
+
+    return {"message": "If that email exists, a reset link has been sent"}
+
+
+@router.post("/reset-password")
+async def reset_password(data: ResetPasswordRequest, db: AsyncSession = Depends(get_db)):
+    """Reset password using the token from the reset email."""
+    result = await db.execute(
+        select(User).where(User.reset_token == data.token)
+    )
+    user = result.scalar_one_or_none()
+
+    if not user:
+        raise HTTPException(status_code=400, detail="Invalid reset token")
+
+    if user.reset_token_expires and user.reset_token_expires.replace(tzinfo=timezone.utc) < datetime.now(timezone.utc):
+        raise HTTPException(status_code=400, detail="Reset link has expired. Please request a new one.")
+
+    user.password_hash = hash_password(data.new_password)
+    user.reset_token = None
+    user.reset_token_expires = None
+    await db.flush()
+
+    logger.info("Password reset for %s", user.email)
+    return {"message": "Password updated successfully"}
+
+
 @router.post("/login", response_model=TokenResponse)
 async def login(data: LoginRequest, request: Request, db: AsyncSession = Depends(get_db)):
     """Authenticate and return tokens."""
-    await auth_limiter.check(request)
+    auth_limiter.check(request)
 
     email = data.email.lower().strip()
 

@@ -24,6 +24,18 @@ class Settings(BaseSettings):
     APP_NAME: str = "Book DNA"
     API_V1_PREFIX: str = "/api"
 
+    # Email (SMTP)
+    SMTP_HOST: str | None = None
+    SMTP_PORT: int = 587
+    SMTP_USER: str | None = None
+    SMTP_PASSWORD: str | None = None
+    SMTP_FROM: str = "noreply@bookdna.app"
+    FRONTEND_URL: str = "http://localhost:3000"
+
+    @property
+    def email_enabled(self) -> bool:
+        return bool(self.SMTP_HOST and self.SMTP_USER and self.SMTP_PASSWORD)
+
     @property
     def cors_origins_list(self) -> list[str]:
         return [origin.strip() for origin in self.CORS_ORIGINS.split(",")]
