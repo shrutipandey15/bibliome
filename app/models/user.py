@@ -27,6 +27,9 @@ class User(Base):
     is_admin: Mapped[bool] = mapped_column(Boolean, default=False)
     share_token: Mapped[str | None] = mapped_column(String(50), unique=True, index=True, nullable=True)
 
+    reset_token: Mapped[str | None] = mapped_column(String(100), unique=True, nullable=True)
+    reset_token_expires: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
     # DNA caching — dirty flag flips true on entry create/update/delete
     dna_dirty: Mapped[bool] = mapped_column(Boolean, default=True)
     cached_dna_profile: Mapped[dict | None] = mapped_column(JSONB, nullable=True)

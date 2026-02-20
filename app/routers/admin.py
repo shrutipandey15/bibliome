@@ -13,6 +13,7 @@ from sqlalchemy.orm import selectinload
 
 from app.database import get_db
 from app.middleware.auth import get_current_user
+from app.models.audit_log import AuditLog
 from app.models.book import Book
 from app.models.book_entry import BookEntry
 from app.models.dna_snapshot import DNASnapshot
@@ -29,9 +30,25 @@ async def require_admin(current_user: User = Depends(get_current_user)) -> User:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin access required")
     return current_user
 
-
-# ── Schemas ──
-
+async def _audit(
+    db: AsyncSession,
+    admin: User,
+    action: str,
+    target_type: str,
+    target_id: str | None = None,
+    detail: str | None = None,
+) -> None:
+    """Log an admin action."""
+    log = AuditLog(
+        admin_id=admin.id,
+        admin_username=admin.username,
+        action=action,
+        target_type=target_type,
+        target_id=target_id,
+        detail=detail,
+    )
+    db.add(log)
+    await db.flush()
 class DashboardStats(BaseModel):
     total_users: int
     total_entries: int
@@ -216,6 +233,7 @@ async def delete_user(
     if user.is_admin:
         raise HTTPException(status_code=400, detail="Cannot delete admin user")
 
+    await _audit(db, admin, "delete_user", "user", str(user.id), f"Deleted user '{user.username}' ({user.email})")
     await db.delete(user)
     await db.flush()
     return {"message": f"User {user.username} deleted"}
@@ -236,6 +254,7 @@ async def cleanup_tokens(
         )
     )
     count = result.rowcount
+    await _audit(db, admin, "cleanup_tokens", "tokens", None, f"Deleted {count} expired/revoked tokens")
     await db.flush()
     return {"deleted": count}
 
@@ -395,6 +414,42 @@ async def delete_catalog_book(
     book = result.scalar_one_or_none()
     if not book:
         raise HTTPException(status_code=404, detail="Book not found")
+    await _audit(db, admin, "delete_catalog_book", "book", str(book.id), f"Removed '{book.title}' from catalog")
     await db.delete(book)
     await db.flush()
     return {"message": f"'{book.title}' removed from catalog"}
+class AuditLogEntry(BaseModel):
+    id: str
+    admin_username: str
+    action: str
+    target_type: str
+    target_id: str | None
+    detail: str | None
+    created_at: datetime
+
+
+@router.get("/audit-log", response_model=list[AuditLogEntry])
+async def get_audit_log(
+    limit: int = 50,
+    db: AsyncSession = Depends(get_db),
+    admin: User = Depends(require_admin),
+):
+    """View recent admin actions."""
+    result = await db.execute(
+        select(AuditLog)
+        .order_by(AuditLog.created_at.desc())
+        .limit(limit)
+    )
+    logs = result.scalars().all()
+    return [
+        AuditLogEntry(
+            id=str(log.id),
+            admin_username=log.admin_username,
+            action=log.action,
+            target_type=log.target_type,
+            target_id=log.target_id,
+            detail=log.detail,
+            created_at=log.created_at,
+        )
+        for log in logs
+    ]

@@ -1,230 +1,193 @@
-# Book DNA API
+# 📖 Book DNA
 
-Backend API for logging book entries with emotion tags and generating a reading "DNA" profile.
+**Your reading leaves fingerprints. This maps them.**
 
-This README reflects the current implementation and operational constraints.
+Book DNA is a reading personality engine. You log books with the emotions they made you feel — not star ratings, not "liked it" — and the system builds a psychological profile of who you are as a reader.
 
-## What It Does
+Are you a Grief Romantic? A Control-Seeking Intellectual? A Soft Masochist who keeps picking up books that destroy you? Book DNA will tell you.
 
-- User accounts with JWT auth (access + refresh tokens)
-- Book entry CRUD per user
-- Emotion tagging per entry (`entry_emotions`)
-- Rule-based personality calculation from emotion history
-- Cached DNA profile on `users.cached_dna_profile`
-- DNA snapshots stored in `dna_snapshots`
-- Public profile endpoints (echoes + card data + OG images)
-- Book search endpoint backed by Google Books data, with request/response contract exposed via OpenAPI docs
+🔗 **Live:** [bookdna.fdev31.space](https://bookdna.fdev31.space)  
+🎨 **Frontend repo:** [bookDNA-frontend](https://github.com/shrutipandey15/bookDNA-frontend)
+
+---
+
+## How It Works
+
+```
+You read a book.
+You felt something.
+You tell Book DNA what.
+      ↓
+24 emotions × intensity scoring × recency weighting
+      ↓
+Personality type + emotional profile + shareable DNA card
+```
+
+The engine tracks emotion frequency, co-occurrence, intensity patterns, and what you *avoid* feeling. Three books and you get your first reading DNA. The more you add, the sharper the portrait.
+
+---
+
+## What's Under the Hood
+
+### Smart Book Search
+
+Not your average title lookup. Three-layer architecture that learns:
+
+```
+Layer 1 → Local catalog    (< 5ms)   PostgreSQL trigram fuzzy matching
+Layer 2 → Google Books + Open Library  (parallel, ~300ms)
+Layer 3 → Merge, deduplicate, score, rank
+```
+
+Every search teaches the system. Every book a user adds makes the next search faster. Typo in "forth wing"? Trigram index still finds *Fourth Wing*. The catalog starts empty and grows organically — the more people use it, the smarter it gets.
+
+### DNA Engine
+
+Rule-based personality calculator. No ML, no black boxes — deterministic and explainable.
+
+Inputs: emotion frequency, average intensity, recency weighting, co-occurrence patterns, anti-emotion penalties.
+
+Output: one of 8 personality archetypes, score breakdown, top emotions, avoided emotions, co-occurrence map.
+
+The algorithm is opinionated by design. It doesn't just count what you read — it weighs *how recently* you felt something, *how strongly*, and *what you consistently avoid*.
+
+### Auth Hardening
+
+- 5 failed logins → 15-minute lockout
+- Registration rate limiting (3/hour per IP)
+- Timing-safe responses (constant delay defeats enumeration)
+- Disposable email blocking
+- Password strength enforcement with real-time feedback
+
+### Admin Dashboard
+
+Stats, user management, book catalog browser (searchable, sortable by popularity/recency/title), database health monitoring, token cleanup. Everything you need to run a small-scale literary observatory.
+
+---
 
 ## Stack
 
-- Python / FastAPI
-- SQLAlchemy async + PostgreSQL (`asyncpg`)
-- Alembic migrations
-- JWT via `python-jose`
-- Password hashing via `bcrypt`
-- Pillow for OG image generation
-- Optional Redis-backed rate limiting (falls back to in-memory)
+| Layer | Tech |
+|-------|------|
+| API | Python 3.11+, FastAPI, async everywhere |
+| Database | PostgreSQL + asyncpg, pg_trgm for fuzzy search |
+| Migrations | Alembic |
+| Auth | JWT (python-jose) + bcrypt |
+| External | Google Books API, Open Library API (parallel via httpx) |
+| Images | Pillow for OG card generation |
+| Rate limiting | Redis (optional, falls back to in-memory) |
 
-## API Surface
+---
 
-Base prefix: `/api` (configurable via `API_V1_PREFIX`).
+## API
 
-Health:
-- `GET /health`
+Base: `/api`
 
-Auth:
-- `POST /api/auth/register`
-- `POST /api/auth/login`
-- `POST /api/auth/refresh`
-- `GET /api/auth/me`
+| Group | Endpoints | Auth |
+|-------|-----------|------|
+| **Auth** | register, login, refresh, me | Public |
+| **Entries** | CRUD with cursor pagination | JWT |
+| **DNA** | profile, generate, heatmap, stats, history, recap, twin | JWT |
+| **Books** | search (smart multi-source) | JWT |
+| **User** | settings (get/patch) | JWT |
+| **Public** | echoes, card data, OG images | None |
+| **Admin** | dashboard, users, catalog, db-health, cleanup | Admin |
 
-Entries:
-- `GET /api/entries`
-- `POST /api/entries`
-- `GET /api/entries/{entry_id}`
-- `PUT /api/entries/{entry_id}`
-- `DELETE /api/entries/{entry_id}`
+Full OpenAPI docs at `/docs` when running locally.
 
-DNA:
-- `GET /api/dna/profile`
-- `POST /api/dna/generate`
-- `GET /api/dna/heatmap`
-- `GET /api/dna/stats`
-- `GET /api/dna/history`
-- `GET /api/dna/recap?month=YYYY-MM`
-- `GET /api/dna/twin`
-
-User:
-- `GET /api/user/settings`
-- `PATCH /api/user/settings`
-
-Public (no auth):
-- `GET /api/public/echoes/{username}`
-- `GET /api/public/card/{username}`
-- `GET /api/public/card/{username}/og`
-- `GET /api/public/echo/{entry_id}/og`
-
-Books:
-- `GET /api/books/search?q=...` (auth required)
+---
 
 ## Data Model
 
-Tables:
-- `users`
-- `book_entries`
-- `entry_emotions`
-- `dna_snapshots`
-- `refresh_tokens`
+```
+users ──────────┐
+  cached_dna    │
+  is_admin      │
+  dna_dirty     │
+                │
+book_entries ───┤ (user_id FK)
+  title, author │
+  intensity 1-10│
+  quote, echo   │
+                │
+entry_emotions ─┘ (entry_id FK)
+  emotion_id
+  strength 1-10
 
-Important fields:
-- `users.dna_dirty` + `users.cached_dna_profile` for profile caching
-- `book_entries.intensity` constrained to `1..10`
-- `entry_emotions.strength` constrained to `1..10`
-- unique constraint on `(entry_id, emotion_id)`
+books ──────────── self-growing catalog
+  title_normalized  (trigram GIN index)
+  isbn_13, isbn_10  (unique indexes)
+  popularity        (bumped on user add)
+  source            (google / openlibrary / user)
 
-## DNA Engine (Current Behavior)
-
-The personality engine in `app/services/dna_engine.py` is rule-based.
-
-It uses:
-- Emotion frequency
-- Average emotion intensity
-- Recency weighting
-- Emotion co-occurrence
-- Penalties for anti-emotions
-
-Returns:
-- winning personality type (8 predefined types)
-- score breakdown
-- top emotions
-- avoided emotions
-- co-occurrence summary
-
-`POST /api/dna/generate` and `GET /api/dna/twin` require at least 3 entries.
-
-## Rate Limiting
-
-Defined in `app/middleware/rate_limit.py`:
-- Auth limiter: 10 requests / 60s per IP
-- DNA generate limiter: 5 requests / 300s per IP
-
-Behavior:
-- Uses Redis sorted sets if `REDIS_URL` is configured and reachable
-- Falls back to in-memory limiter if Redis is unavailable
-
-## Project Layout
-
-```text
-app/
-  main.py
-  config.py
-  database.py
-  middleware/
-    auth.py
-    error_handlers.py
-    rate_limit.py
-  models/
-    user.py
-    book_entry.py
-    dna_snapshot.py
-    refresh_token.py
-  routers/
-    auth.py
-    entries.py
-    dna.py
-    user.py
-    public.py
-    books.py
-  schemas/
-    auth.py
-    entry.py
-    dna.py
-    public.py
-    user.py
-  services/
-    auth_service.py
-    entry_service.py
-    dna_engine.py
-    background.py
-    book_search.py
-    og_image.py
-  utils/
-    emotions.py
-alembic/
-  versions/
+dna_snapshots ──── historical profiles
+refresh_tokens ─── JWT tracking
 ```
 
-## Local Setup
+---
 
-### 1. Install dependencies
+## Run Locally
 
 ```bash
-python -m venv venv
-source venv/bin/activate
+python -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
-```
-
-### 2. Configure environment
-
-```bash
-cp .env.example .env
-```
-
-Set at minimum:
-- `DATABASE_URL`
-- `SECRET_KEY`
-
-### 3. Run migrations
-
-```bash
+cp .env.example .env          # set DATABASE_URL + SECRET_KEY
 alembic upgrade head
+uvicorn app.main:app --reload # → localhost:8000/docs
 ```
 
-### 4. Start API
+### Environment
+
+| Variable | Required | Default |
+|----------|----------|---------|
+| `DATABASE_URL` | Yes | `postgresql+asyncpg://...localhost.../bookdna` |
+| `SECRET_KEY` | Yes | — |
+| `CORS_ORIGINS` | For frontend | — |
+| `REDIS_URL` | No | Falls back to in-memory |
+| `ENVIRONMENT` | No | `development` |
+
+---
+
+## Deploy
+
+Production: nginx → uvicorn (127.0.0.1:8100) → PostgreSQL
 
 ```bash
-uvicorn app.main:app --reload
+git pull
+alembic upgrade head
+sudo systemctl restart bookdna
 ```
 
-Docs:
-- Swagger UI: `http://localhost:8000/docs`
-- OpenAPI JSON: `http://localhost:8000/openapi.json`
+---
 
-## Docker
+## Project Structure
 
-```bash
-docker build -t book-dna-api .
-docker run --rm -p 8000:8000 --env-file .env book-dna-api
+```
+app/
+├── main.py, config.py, database.py
+├── middleware/    auth · rate_limit · error_handlers
+├── models/       user · book_entry · book · dna_snapshot · refresh_token
+├── routers/      auth · entries · dna · user · public · books · admin
+├── schemas/      auth · entry · dna · public · user
+├── services/     auth_service · entry_service · dna_engine
+│                 book_search · background · og_image
+└── utils/        emotions (24 emotions, colors, icons)
 ```
 
-The container command runs:
-- `uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 4`
+---
 
-## Environment Variables
+## What's Next
 
-From `app/config.py`:
+See [ROADMAP.md](./ROADMAP.md) for bugs, gaps, and planned features — from Goodreads import to AI-generated reading personality narratives.
 
-- `DATABASE_URL` (default: `postgresql+asyncpg://postgres:postgres@localhost:5432/bookdna`)
-- `SECRET_KEY` (must be changed for production)
-- `ALGORITHM` (default: `HS256`)
-- `ACCESS_TOKEN_EXPIRE_MINUTES` (default: `15`)
-- `REFRESH_TOKEN_EXPIRE_DAYS` (default: `7`)
-- `CORS_ORIGINS` (comma-separated)
-- `REDIS_URL` (optional)
-- `ENVIRONMENT` (`development` / `production`)
-- `APP_NAME` (default: `Book DNA`)
-- `API_V1_PREFIX` (default: `/api`)
-
-## Current Limitations (Honest Snapshot)
-
-- Automated tests are not yet included in this repository.
-- Background DNA recalculation currently runs as in-process FastAPI background work rather than a separate job queue.
-- Book search relies on external API availability (Google Books) and network access; endpoint behavior is documented via OpenAPI.
-- The personality algorithm is currently deterministic and rule-based, rather than trained on user outcome data.
-- Redis rate limiting is optional; if Redis is absent, limiting falls back to per-process memory.
+---
 
 ## License
 
-Public repository. No explicit license file is currently included in this repo.
+MIT
 
-*Because the books that change you deserve more than a star rating.*
+---
+
+*"A reader lives a thousand lives before he dies. The man who never reads lives only one."* — George R.R. Martin
+
+*Book DNA remembers all of them.*
