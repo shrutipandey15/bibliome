@@ -19,12 +19,20 @@ from app.services.dna_engine import calculate_personality
 
 logger = logging.getLogger("bookdna.background")
 
+# Track in-flight recalculations per user — prevents redundant concurrent DB work
+_recalc_running: set[uuid.UUID] = set()
+
 
 async def recalculate_dna(user_id: uuid.UUID) -> None:
     """
     Recalculate and cache DNA profile for a user.
     Runs in background — uses its own DB session.
+    Deduplicates: if a recalculation is already running for this user, skips.
     """
+    if user_id in _recalc_running:
+        logger.debug("DNA recalc already running for user %s, skipping duplicate", user_id)
+        return
+    _recalc_running.add(user_id)
     try:
         async with async_session() as db:
             async with db.begin():
@@ -66,13 +74,21 @@ async def recalculate_dna(user_id: uuid.UUID) -> None:
                 user.cached_dna_profile = result
                 user.dna_dirty = False
 
-                if result.get("personality"):
-                    user.personality_type = result["personality"]["name"]
+                user.personality_type = (
+                    result["personality"]["name"] if result.get("personality") else None
+                )
 
                 logger.debug(
                     "Recalculated DNA for user %s (%d books)",
                     user.username, len(entry_dicts),
                 )
 
+
+        from app.utils.cache import dna_cache
+        await dna_cache.invalidate_prefix(f"heatmap:{user_id}")
+        await dna_cache.invalidate_prefix(f"stats:{user_id}")
+
     except Exception as e:
         logger.error("Background DNA recalculation failed for user %s: %s", user_id, e)
+    finally:
+        _recalc_running.discard(user_id)
