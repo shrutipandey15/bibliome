@@ -1,7 +1,9 @@
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import text
 
 from app.config import get_settings
 from app.middleware.error_handlers import register_error_handlers, setup_logging
@@ -9,14 +11,24 @@ from app.routers import auth, entries, dna, public, user, books, admin
 
 settings = get_settings()
 setup_logging(settings.ENVIRONMENT)
+logger = logging.getLogger("bookdna.main")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup and shutdown events."""
-    print(f"Starting {settings.APP_NAME} API ({settings.ENVIRONMENT})")
+    from app.database import engine
+
+    # Verify DB is reachable before accepting traffic
+    async with engine.begin() as conn:
+        await conn.execute(text("SELECT 1"))
+    logger.info("Starting %s API (%s) — DB connection verified", settings.APP_NAME, settings.ENVIRONMENT)
+
     yield
-    print(f"Shutting down {settings.APP_NAME} API")
+
+    # Release DB pool cleanly on shutdown
+    await engine.dispose()
+    logger.info("Shutting down %s API — DB pool closed", settings.APP_NAME)
 
 
 app = FastAPI(

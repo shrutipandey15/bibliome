@@ -118,7 +118,7 @@ def calculate_personality(entries: list[dict]) -> dict:
     Returns:
         Dict with personality info, scores, and analytics.
     """
-    if not entries:
+    if len(entries) < 3:
         return {
             "personality": None,
             "scores": {},

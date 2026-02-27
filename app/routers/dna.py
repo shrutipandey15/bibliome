@@ -1,3 +1,4 @@
+import uuid
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
@@ -5,9 +6,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.database import get_db
-from app.middleware.auth import get_current_user
-from app.middleware.rate_limit import generate_limiter
+from app.database import async_session, get_db
+from app.middleware.auth import get_current_user, get_current_user_id
+from app.middleware.rate_limit import RateLimiter, generate_limiter
+
+dna_read_limiter = RateLimiter(max_requests=30, window_seconds=60, prefix="dna_read")
 from app.models.book_entry import BookEntry
 from app.models.dna_snapshot import DNASnapshot
 from app.models.user import User
@@ -138,8 +141,8 @@ async def generate_dna(
 
     await db.flush()
 
-    dna_cache.invalidate_prefix(f"heatmap:{current_user.id}")
-    dna_cache.invalidate_prefix(f"stats:{current_user.id}")
+    await dna_cache.invalidate_prefix(f"heatmap:{current_user.id}")
+    await dna_cache.invalidate_prefix(f"stats:{current_user.id}")
 
     return DNAGenerateResponse(
         snapshot=DNASnapshotResponse(
@@ -156,37 +159,45 @@ async def generate_dna(
 
 @router.get("/heatmap", response_model=HeatmapResponse)
 async def get_heatmap(
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    request: Request,
+    user_id: uuid.UUID = Depends(get_current_user_id),
 ):
     """Get the emotion x book heatmap matrix data."""
-    cache_key = f"heatmap:{current_user.id}"
-    if not current_user.dna_dirty:
-        cached = dna_cache.get(cache_key)
-        if cached:
-            return cached
+    await dna_read_limiter.check(request)
+    cache_key = f"heatmap:{user_id}"
 
-    entries = await _get_user_entries(db, current_user.id)
+    # Cache hit: zero DB connections needed
+    cached = await dna_cache.get(cache_key)
+    if cached:
+        return cached
+
+    # Cache miss: open DB only when necessary
+    async with async_session() as db:
+        entries = await _get_user_entries(db, user_id)
     result = build_heatmap_data(entries)
-    dna_cache.set(cache_key, result)
+    await dna_cache.set(cache_key, result)
     return result
 
 
 @router.get("/stats", response_model=StatsResponse)
 async def get_stats(
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    request: Request,
+    user_id: uuid.UUID = Depends(get_current_user_id),
 ):
     """Get reading statistics."""
-    cache_key = f"stats:{current_user.id}"
-    if not current_user.dna_dirty:
-        cached = dna_cache.get(cache_key)
-        if cached:
-            return cached
+    await dna_read_limiter.check(request)
+    cache_key = f"stats:{user_id}"
 
-    entries = await _get_user_entries(db, current_user.id)
+    # Cache hit: zero DB connections needed
+    cached = await dna_cache.get(cache_key)
+    if cached:
+        return cached
+
+    # Cache miss: open DB only when necessary
+    async with async_session() as db:
+        entries = await _get_user_entries(db, user_id)
     result = generate_stats(entries)
-    dna_cache.set(cache_key, result)
+    await dna_cache.set(cache_key, result)
     return result
 
 
