@@ -3,6 +3,7 @@ import logging
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db, async_session
@@ -10,6 +11,7 @@ from app.middleware.auth import get_current_user
 from app.middleware.rate_limit import RateLimiter
 
 entries_limiter = RateLimiter(max_requests=60, window_seconds=60, prefix="entries")
+from app.models.book_entry import BookEntry, EntryEmotion
 from app.models.user import User
 from app.schemas.entry import (
     EntryCreate,
@@ -27,6 +29,7 @@ from app.services.entry_service import (
 )
 from app.services.background import recalculate_dna
 from app.services.book_search import bump_popularity
+from app.services.room_decorations import compute_unlocks
 
 logger = logging.getLogger("bookdna.entries")
 
@@ -110,10 +113,45 @@ async def create_new_entry(
     entry = await create_entry(db, current_user.id, data)
     current_user.dna_dirty = True
     await db.flush()
+
+    # Piggyback: check for new room decoration unlocks
+    room_unlocks_new = []
+    if current_user.room_unlocks is not None:
+        old_set = set(current_user.room_unlocks)
+        r = await db.execute(
+            select(func.count(BookEntry.id)).where(BookEntry.user_id == current_user.id)
+        )
+        entry_count = r.scalar() or 0
+
+        has_i10 = data.intensity == 10
+        has_2am = any(e.emotion_id == "2am" for e in data.emotions)
+
+        if not has_i10:
+            r2 = await db.execute(
+                select(func.count(BookEntry.id)).where(
+                    BookEntry.user_id == current_user.id, BookEntry.intensity == 10
+                )
+            )
+            has_i10 = (r2.scalar() or 0) > 0
+        if not has_2am:
+            r3 = await db.execute(
+                select(func.count(EntryEmotion.id))
+                .join(BookEntry, EntryEmotion.entry_id == BookEntry.id)
+                .where(BookEntry.user_id == current_user.id, EntryEmotion.emotion_id == "2am")
+            )
+            has_2am = (r3.scalar() or 0) > 0
+
+        updated = compute_unlocks(current_user, entry_count, has_i10, has_2am)
+        room_unlocks_new = [u for u in updated if u not in old_set]
+        if room_unlocks_new:
+            current_user.room_unlocks = updated
+
     # Background: feed catalog + recalculate DNA (separate sessions, can't break entry)
     asyncio.create_task(_feed_catalog(entry.title, entry.author, entry.cover_url, entry.isbn))
     asyncio.create_task(recalculate_dna(current_user.id))
-    return _entry_to_response(entry)
+    response = _entry_to_response(entry)
+    response.room_unlocks_new = room_unlocks_new
+    return response
 
 
 @router.get("/{entry_id}", response_model=EntryResponse)

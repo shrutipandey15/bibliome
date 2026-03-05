@@ -158,3 +158,4 @@ class RedisDNACache:
 
 
 dna_cache = RedisDNACache(ttl_seconds=600)
+room_cache = RedisDNACache(ttl_seconds=300, namespace="bookdna:room")

@@ -65,6 +65,7 @@ class EntryResponse(BaseModel):
     finished_at: date | None
     created_at: datetime
     updated_at: datetime
+    room_unlocks_new: list[str] = Field(default_factory=list)
 
     model_config = {"from_attributes": True}
 

@@ -1,5 +1,6 @@
 import uuid
 import httpx
+import asyncio
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import Response
@@ -13,6 +14,7 @@ from app.models.user import User
 from app.schemas.public import PublicCardResponse, PublicEcho, PublicEchoesResponse
 from app.services.dna_engine import calculate_personality
 from app.services.og_image import generate_dna_card_image, generate_echo_card_image, generate_story_image # <--- IMPORTED
+from app.utils.cache import room_cache
 
 router = APIRouter(prefix="/public", tags=["public"])
 
@@ -198,7 +200,8 @@ async def _generate_card_image_for_user(user: User, db: AsyncSession):
             detail="No DNA profile generated yet",
         )
 
-    image_bytes = generate_dna_card_image(
+    image_bytes = await asyncio.to_thread(
+        generate_dna_card_image,
         personality_name=personality["name"],
         personality_description=personality["description"],
         personality_color=personality["color"],
@@ -254,7 +257,8 @@ async def get_echo_og_image(entry_id: uuid.UUID, db: AsyncSession = Depends(get_
     user_result = await db.execute(select(User).where(User.id == entry.user_id))
     user = user_result.scalar_one_or_none()
 
-    image_bytes = generate_echo_card_image(
+    image_bytes = await asyncio.to_thread(
+        generate_echo_card_image,
         title=entry.title,
         author=entry.author or "Unknown",
         public_echo=entry.public_echo,
@@ -293,7 +297,8 @@ async def get_echo_story_image(entry_id: uuid.UUID, db: AsyncSession = Depends(g
         except Exception as e:
             print(f"Failed to fetch cover: {e}") 
 
-    image_bytes = generate_story_image(
+    image_bytes = await asyncio.to_thread(
+        generate_story_image,
         title=entry.title,
         author=entry.author or "Unknown",
         public_echo=entry.public_echo,
@@ -304,6 +309,71 @@ async def get_echo_story_image(entry_id: uuid.UUID, db: AsyncSession = Depends(g
     )
 
     return Response(content=image_bytes, media_type="image/png")
+
+@router.get("/{username}/room")
+async def get_public_room(username: str, db: AsyncSession = Depends(get_db)):
+    """Public room view. Redis-cached 5 min."""
+    cache_key = f"public:{username}"
+    cached = await room_cache.get(cache_key)
+    if cached is not None:
+        return cached
+
+    user = await _get_strict_public_user(db, username)
+
+    if not user.room_layout:
+        result = {"layout": None, "entries": {}}
+        await room_cache.set(cache_key, result)
+        return result
+
+    # Collect book IDs from layout
+    entry_ids = []
+    for shelf in (user.room_layout.get("shelves") or []):
+        for item in shelf:
+            if item.get("type") == "book":
+                entry_ids.append(item["id"])
+
+    # Fetch entry data for 3D rendering
+    entry_map = {}
+    if entry_ids:
+        valid_uuids = []
+        for eid in entry_ids:
+            try:
+                valid_uuids.append(uuid.UUID(eid))
+            except ValueError:
+                continue
+
+        result = await db.execute(
+            select(BookEntry)
+            .options(selectinload(BookEntry.emotions))
+            .where(
+                BookEntry.user_id == user.id,
+                BookEntry.id.in_(valid_uuids),
+            )
+        )
+        entries = result.scalars().all()
+        entry_map = {
+            str(e.id): {
+                "id": str(e.id),
+                "title": e.title,
+                "author": e.author,
+                "cover_url": e.cover_url,
+                "intensity": e.intensity,
+                "emotions": [em.emotion_id for em in e.emotions],
+            }
+            for e in entries
+        }
+
+    response = {
+        "layout": user.room_layout,
+        "entries": entry_map,
+        "personality_type": user.personality_type,
+        "username": user.username,
+        "display_name": user.display_name,
+    }
+
+    await room_cache.set(cache_key, response)
+    return response
+
 
 @router.get("/shared/{token}")
 async def get_shared_card(token: str, db: AsyncSession = Depends(get_db)):
