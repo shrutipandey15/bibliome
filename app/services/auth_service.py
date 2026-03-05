@@ -1,3 +1,4 @@
+import asyncio
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -13,12 +14,16 @@ from app.models.user import User
 settings = get_settings()
 
 
-def hash_password(password: str) -> str:
-    return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+async def hash_password(password: str) -> str:
+    def _hash():
+        return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+    return await asyncio.to_thread(_hash)
 
 
-def verify_password(plain: str, hashed: str) -> bool:
-    return bcrypt.checkpw(plain.encode("utf-8"), hashed.encode("utf-8"))
+async def verify_password(plain: str, hashed: str) -> bool:
+    def _verify():
+        return bcrypt.checkpw(plain.encode("utf-8"), hashed.encode("utf-8"))
+    return await asyncio.to_thread(_verify)
 
 
 def create_access_token(user_id: uuid.UUID) -> str:
@@ -66,10 +71,11 @@ async def register_user(
     if result.scalar_one_or_none():
         raise ValueError("Username already taken")
 
+    hashed_pw = await hash_password(password)
     user = User(
         email=email,
         username=username,
-        password_hash=hash_password(password),
+        password_hash=hashed_pw,
         display_name=display_name or username,
     )
     db.add(user)
@@ -81,7 +87,7 @@ async def authenticate_user(db: AsyncSession, email: str, password: str) -> User
     """Verify credentials. Returns User or None."""
     result = await db.execute(select(User).where(User.email == email))
     user = result.scalar_one_or_none()
-    if not user or not verify_password(password, user.password_hash):
+    if not user or not await verify_password(password, user.password_hash):
         return None
     return user
 

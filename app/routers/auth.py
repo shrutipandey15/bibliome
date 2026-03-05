@@ -123,7 +123,7 @@ async def reset_password(data: ResetPasswordRequest, db: AsyncSession = Depends(
     if user.reset_token_expires and user.reset_token_expires.replace(tzinfo=timezone.utc) < datetime.now(timezone.utc):
         raise HTTPException(status_code=400, detail="Reset link has expired. Please request a new one.")
 
-    user.password_hash = hash_password(data.new_password)
+    user.password_hash = await hash_password(data.new_password)
     user.reset_token = None
     user.reset_token_expires = None
     await db.flush()

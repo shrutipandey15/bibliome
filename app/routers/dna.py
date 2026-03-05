@@ -31,6 +31,7 @@ from app.services.dna_engine import (
     generate_recap,
     generate_stats,
 )
+from app.services.room_decorations import compute_unlocks
 from app.utils.cache import dna_cache
 
 router = APIRouter(prefix="/dna", tags=["dna"])
@@ -144,6 +145,29 @@ async def generate_dna(
     await dna_cache.invalidate_prefix(f"heatmap:{current_user.id}")
     await dna_cache.invalidate_prefix(f"stats:{current_user.id}")
 
+    # Piggyback: check for new room decoration unlocks (glyph_figurine unlocks on first DNA gen)
+    room_unlocks_new = []
+    if current_user.room_unlocks is not None:
+        old_set = set(current_user.room_unlocks)
+        from sqlalchemy import func, select
+        from app.models.book_entry import BookEntry, EntryEmotion
+        r_i10 = await db.execute(
+            select(func.count(BookEntry.id)).where(
+                BookEntry.user_id == current_user.id, BookEntry.intensity == 10
+            )
+        )
+        has_i10 = (r_i10.scalar() or 0) > 0
+        r_2am = await db.execute(
+            select(func.count(EntryEmotion.id))
+            .join(BookEntry, EntryEmotion.entry_id == BookEntry.id)
+            .where(BookEntry.user_id == current_user.id, EntryEmotion.emotion_id == "2am")
+        )
+        has_2am = (r_2am.scalar() or 0) > 0
+        updated = compute_unlocks(current_user, len(entries), has_i10, has_2am)
+        room_unlocks_new = [u for u in updated if u not in old_set]
+        if room_unlocks_new:
+            current_user.room_unlocks = updated
+
     return DNAGenerateResponse(
         snapshot=DNASnapshotResponse(
             id=snapshot.id,
@@ -154,6 +178,7 @@ async def generate_dna(
             generated_at=snapshot.generated_at or now,
         ),
         personality=PersonalityInfo(**personality),
+        room_unlocks_new=room_unlocks_new,
     )
 
 

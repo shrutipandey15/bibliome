@@ -34,6 +34,10 @@ class User(Base):
     dna_dirty: Mapped[bool] = mapped_column(Boolean, default=True)
     cached_dna_profile: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
+    # Reading Room
+    room_layout: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    room_unlocks: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

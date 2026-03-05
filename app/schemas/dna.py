@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class PersonalityInfo(BaseModel):
@@ -44,6 +44,7 @@ class DNASnapshotResponse(BaseModel):
 class DNAGenerateResponse(BaseModel):
     snapshot: DNASnapshotResponse
     personality: PersonalityInfo
+    room_unlocks_new: list[str] = Field(default_factory=list)
 
 
 class StatsResponse(BaseModel):
