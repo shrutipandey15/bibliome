@@ -14,6 +14,7 @@ Usage:
 
 import logging
 import time
+import uuid
 from collections import defaultdict
 
 import redis.asyncio as redis
@@ -150,6 +151,76 @@ class RateLimiter:
             self._check_memory(request)
 
 
+class FailedAttemptTracker:
+    """Sliding-window counter for failed auth attempts (account lockout).
+
+    Backed by the same Redis instance as the rate limiter so lockout state is
+    shared across workers; falls back to per-process memory when Redis is
+    unavailable. Keyed by an arbitrary identifier (e.g. a lowercased email).
+    """
+
+    def __init__(self, threshold: int, window_seconds: int, prefix: str = "lockout"):
+        self.threshold = threshold
+        self.window = window_seconds
+        self.prefix = prefix
+        self._hits: dict[str, list[float]] = defaultdict(list)
+
+    def _key(self, ident: str) -> str:
+        return f"bookdna:{self.prefix}:{ident}"
+
+    async def _now_and_scores(self, ident: str):
+        """Return (redis_or_None, now, sorted_timestamps_in_window)."""
+        r = await get_redis()
+        if r is not None:
+            now = time.time()
+            key = self._key(ident)
+            pipe = r.pipeline()
+            pipe.zremrangebyscore(key, 0, now - self.window)
+            pipe.zrange(key, 0, -1, withscores=True)
+            results = await pipe.execute()
+            scores = sorted(score for _, score in results[1])
+            return r, now, scores
+        now = time.monotonic()
+        cutoff = now - self.window
+        self._hits[ident] = [t for t in self._hits[ident] if t > cutoff]
+        return None, now, self._hits[ident]
+
+    async def check_locked(self, ident: str) -> None:
+        """Raise 429 if the identifier is currently locked out."""
+        _, now, scores = await self._now_and_scores(ident)
+        if len(scores) >= self.threshold:
+            retry_after = int(scores[0] + self.window - now)
+            minutes = max(retry_after // 60, 0) + 1
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail=f"Too many failed attempts. Try again in {minutes} minutes.",
+            )
+
+    async def record(self, ident: str) -> int:
+        """Record one failed attempt; return the count within the window."""
+        r, now, scores = await self._now_and_scores(ident)
+        if r is not None:
+            key = self._key(ident)
+            pipe = r.pipeline()
+            pipe.zadd(key, {f"{now}:{uuid.uuid4().hex}": now})
+            pipe.expire(key, self.window + 1)
+            await pipe.execute()
+            return len(scores) + 1
+        self._hits[ident].append(now)
+        return len(self._hits[ident])
+
+    async def clear(self, ident: str) -> None:
+        """Reset the counter (e.g. on successful login)."""
+        r = await get_redis()
+        if r is not None:
+            try:
+                await r.delete(self._key(ident))
+            except Exception:
+                pass
+        self._hits.pop(ident, None)
+
+
 # ── Pre-configured limiters ──
 auth_limiter = RateLimiter(max_requests=10, window_seconds=60, prefix="auth")
 generate_limiter = RateLimiter(max_requests=5, window_seconds=300, prefix="dna_gen")
+login_lockout = FailedAttemptTracker(threshold=5, window_seconds=900, prefix="lockout")
