@@ -22,6 +22,7 @@ class DNASnapshot(Base):
         index=True,
     )
     personality_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    dna_type_slug: Mapped[str | None] = mapped_column(String(50))
     emotion_data: Mapped[dict] = mapped_column(JSONB, nullable=False)
     book_count: Mapped[int] = mapped_column(Integer, nullable=False)
     year: Mapped[int | None] = mapped_column(Integer)

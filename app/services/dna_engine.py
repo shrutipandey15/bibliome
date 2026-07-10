@@ -13,6 +13,33 @@ from datetime import datetime, timezone
 
 from app.utils.emotions import VALID_EMOTION_IDS
 
+# Maps the engine's internal personality ids → the 8 canonical "bible" slugs.
+# The engine currently recognises 8 types; this mapping assigns each one a stable
+# bible slug. Some matches are judgment calls — update if the product team
+# clarifies the intent of a specific mapping.
+DNA_TYPE_SLUG_MAP: dict[str, str] = {
+    "grief_romantic":          "grief_romantic",
+    "control_intellectual":    "chaos_cartographer",
+    "soft_masochist":          "soft_masochist",
+    "comfort_architect":       "comfort_architect",
+    "midnight_arsonist":       "rage_archivist",
+    "quiet_witness":           "tender_witness",
+    "obsessive_romantic":      "two_am_scholar",
+    "emotional_archaeologist": "awe_chaser",
+}
+
+BIBLE_DNA_SLUGS = frozenset({
+    "grief_romantic", "chaos_cartographer", "soft_masochist", "awe_chaser",
+    "comfort_architect", "rage_archivist", "tender_witness", "two_am_scholar",
+})
+
+
+def dna_type_slug_for(engine_id: str | None) -> str | None:
+    if not engine_id:
+        return None
+    return DNA_TYPE_SLUG_MAP.get(engine_id)
+
+
 PERSONALITY_TYPES = [
     {
         "id": "grief_romantic",
@@ -231,6 +258,7 @@ def calculate_personality(entries: list[dict]) -> dict:
             "blind_spots": personality["blind_spots"],
             "comfort_tropes": personality["comfort_tropes"],
         },
+        "dna_type_slug": dna_type_slug_for(personality["id"]),
         "scores": scores,
         "emotion_frequency": dict(emotion_freq),
         "emotion_intensity": {k: round(v, 1) for k, v in avg_intensity.items()},

@@ -15,18 +15,23 @@ from app.models.book_entry import BookEntry
 from app.models.dna_snapshot import DNASnapshot
 from app.models.user import User
 from app.schemas.dna import (
+    BlindSpotsResponse,
     DNAGenerateResponse,
     DNAProfileResponse,
     DNASnapshotResponse,
+    EmotionalCalendarResponse,
     HeatmapResponse,
     PersonalityInfo,
     RecapResponse,
     StatsResponse,
     TwinResponse,
 )
+from app.services.blind_spots_service import get_blind_spots
+from app.services.calendar_service import get_emotional_calendar
 from app.services.dna_engine import (
     build_heatmap_data,
     calculate_personality,
+    dna_type_slug_for,
     find_twins,
     generate_recap,
     generate_stats,
@@ -121,6 +126,7 @@ async def generate_dna(
     snapshot = DNASnapshot(
         user_id=current_user.id,
         personality_type=personality["name"],
+        dna_type_slug=dna_type_slug_for(personality["id"]),
         emotion_data={
             "frequency": result["emotion_frequency"],
             "intensity": result["emotion_intensity"],
@@ -355,3 +361,22 @@ async def get_reading_twin(
         your_top_emotions=user_top,
         total_public_users_searched=len(candidates),
     )
+
+
+@router.get("/emotional-calendar", response_model=EmotionalCalendarResponse)
+async def emotional_calendar(
+    months: int = Query(default=6, ge=1, le=36),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Per-month emotion distribution over the last N months. Weights sum to 1.0 per month."""
+    return await get_emotional_calendar(db, current_user.id, months)
+
+
+@router.get("/blind-spots", response_model=BlindSpotsResponse)
+async def blind_spots(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Up to 3 emotions the user under-tags or has never tagged. Requires >=5 entries."""
+    return await get_blind_spots(db, current_user.id)

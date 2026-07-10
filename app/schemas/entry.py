@@ -1,9 +1,12 @@
 import uuid
 from datetime import date, datetime
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
 from app.utils.emotions import VALID_EMOTION_IDS
+
+EntryStatus = Literal["want_to_read", "reading", "finished"]
 
 
 class EmotionIn(BaseModel):
@@ -34,6 +37,7 @@ class EntryCreate(BaseModel):
     emotions: list[EmotionIn] = Field(default_factory=list)
     started_at: date | None = None
     finished_at: date | None = None
+    status: EntryStatus | None = None
 
 
 class EntryUpdate(BaseModel):
@@ -48,6 +52,7 @@ class EntryUpdate(BaseModel):
     emotions: list[EmotionIn] | None = None
     started_at: date | None = None
     finished_at: date | None = None
+    status: EntryStatus | None = None
 
 
 class EntryResponse(BaseModel):
@@ -65,9 +70,22 @@ class EntryResponse(BaseModel):
     finished_at: date | None
     created_at: datetime
     updated_at: datetime
+    status: EntryStatus = "finished"
+    arc_start_emotion_id: str | None = None
+    arc_middle_emotion_id: str | None = None
+    arc_end_emotion_id: str | None = None
+    finish_thought: str | None = None
     room_unlocks_new: list[str] = Field(default_factory=list)
 
     model_config = {"from_attributes": True}
+
+
+class EntryFinish(BaseModel):
+    start_emotion_slug: str
+    middle_emotion_slug: str
+    end_emotion_slug: str
+    thought: str | None = Field(default=None, max_length=120)
+    intensity: int = Field(ge=1, le=10)
 
 
 class EntryListResponse(BaseModel):
