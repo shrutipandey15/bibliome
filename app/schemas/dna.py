@@ -4,6 +4,41 @@ from datetime import datetime
 from pydantic import BaseModel, Field
 
 
+class CalendarEmotion(BaseModel):
+    slug: str
+    color: str
+
+
+class CalendarSegment(BaseModel):
+    emotion: CalendarEmotion
+    weight: float
+
+
+class CalendarMonth(BaseModel):
+    month_key: str
+    label: str
+    segments: list[CalendarSegment]
+
+
+class EmotionalCalendarResponse(BaseModel):
+    months: list[CalendarMonth]
+
+
+class BlindSpotEmotion(BaseModel):
+    slug: str
+    name: str
+    symbol: str
+
+
+class BlindSpotItem(BaseModel):
+    emotion: BlindSpotEmotion
+    observation: str
+    prevalence: float
+
+
+BlindSpotsResponse = list[BlindSpotItem]
+
+
 class PersonalityInfo(BaseModel):
     id: str
     name: str
@@ -21,6 +56,7 @@ class TopEmotion(BaseModel):
 
 class DNAProfileResponse(BaseModel):
     personality: PersonalityInfo | None
+    dna_type_slug: str | None = None
     scores: dict[str, float]
     emotion_frequency: dict[str, int]
     emotion_intensity: dict[str, float]

@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, String, func
+from sqlalchemy import Boolean, DateTime, String, Text, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -37,6 +37,12 @@ class User(Base):
     # Reading Room
     room_layout: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     room_unlocks: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+
+    # Mirror insight cache
+    cached_insight: Mapped[str | None] = mapped_column(Text, nullable=True)
+    cached_insight_week: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    cached_weekly_memory: Mapped[str | None] = mapped_column(Text, nullable=True)
+    cached_weekly_memory_week: Mapped[str | None] = mapped_column(String(10), nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()

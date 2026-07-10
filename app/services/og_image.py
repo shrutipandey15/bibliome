@@ -460,6 +460,154 @@ def generate_echo_card_image(
     return buffer.getvalue()
 
 
+def generate_arc_card_image(
+    title: str,
+    author: str | None,
+    dna_type: str | None,
+    arc: list[dict],  # [{slug, symbol, color, label}]
+    intensity: int,
+    thought: str | None,
+    username: str,
+) -> bytes:
+    """Generate a 1200x630 OG image for a book's emotional arc card."""
+    W, H = 1200, 630
+    BG = (8, 8, 10)
+
+    accent_hex = arc[0]["color"] if arc else "#B8964E"
+    accent = _hex_to_rgb(accent_hex)
+    accent_dim = tuple(int(c * 0.12) for c in accent)
+
+    img = Image.new("RGB", (W, H), BG)
+    draw = ImageDraw.Draw(img)
+
+    # Vertical gradient wash
+    for y in range(H):
+        t = y / H
+        alpha = int((1 - t) * 8)
+        color = tuple(min(255, c + alpha) for c in accent_dim)
+        draw.line([(0, y), (W, y)], fill=color)
+
+    # Top label
+    font_label = _load_font(FONT_MONO, 13)
+    draw.text((60, 45), "BOOK DNA™ · EMOTIONAL ARC", font=font_label, fill=(100, 96, 108))
+
+    if dna_type:
+        draw.text(
+            (W - 60 - int(font_label.getlength(dna_type.upper())), 45),
+            dna_type.upper(),
+            font=font_label,
+            fill=(*accent, 180) if len(accent) == 3 else accent,
+        )
+
+    # Title + author
+    font_title = _load_font(FONT_SERIF_BOLD, 42)
+    title_lines = _wrap_text(title, font_title, W - 120)
+    y = 95
+    for line in title_lines[:2]:
+        draw.text((60, y), line, font=font_title, fill=(240, 236, 228))
+        y += 48
+
+    if author:
+        font_author = _load_font(FONT_ITALIC, 22)
+        draw.text((60, y + 4), f"by {author}", font=font_author, fill=(138, 134, 144))
+        y += 34
+
+    # Arc row — pills spaced evenly across the width
+    arc_y = 290
+    pill_w = 150
+    pill_h = 74
+    count = max(1, len(arc))
+    total_pill_width = count * pill_w
+    gap = (W - 120 - total_pill_width) // max(1, count - 1) if count > 1 else 0
+
+    font_symbol = _load_font(FONT_SERIF_BOLD, 30)
+    font_pill_label = _load_font(FONT_MONO, 11)
+    font_slug = _load_font(FONT_BOLD, 14)
+
+    # Connective line behind pills
+    if count > 1:
+        line_y = arc_y + pill_h // 2
+        for x in range(60, W - 60):
+            draw.point((x, line_y), fill=(*accent_dim, 255))
+
+    for i, beat in enumerate(arc):
+        px = 60 + i * (pill_w + gap)
+        py = arc_y
+        bc = _hex_to_rgb(beat["color"])
+        # Glow
+        for g in range(6, 0, -1):
+            _draw_rounded_rect(
+                draw,
+                (px - g, py - g, px + pill_w + g, py + pill_h + g),
+                18,
+                fill=None,
+                outline=(*bc, max(2, 40 - g * 6)),
+                width=1,
+            )
+        _draw_rounded_rect(draw, (px, py, px + pill_w, py + pill_h), 16, fill=(17, 17, 22))
+        _draw_rounded_rect(
+            draw, (px, py, px + pill_w, py + pill_h), 16, fill=None, outline=bc, width=2
+        )
+
+        # Symbol (emoji may not render on all systems but Pillow falls back)
+        draw.text((px + 14, py + 18), beat["symbol"], font=font_symbol, fill=bc)
+        # Slug text
+        slug_label = beat["slug"].replace("_", " ").upper()
+        draw.text((px + 62, py + 18), slug_label, font=font_slug, fill=(240, 236, 228))
+        draw.text(
+            (px + 62, py + 42),
+            beat["label"].upper(),
+            font=font_pill_label,
+            fill=(138, 134, 144),
+        )
+
+    # Intensity bar
+    bar_y = 410
+    draw.text((60, bar_y), "INTENSITY", font=font_label, fill=(138, 134, 144))
+    bar_x = 180
+    bar_w = 360
+    bar_h = 10
+    _draw_rounded_rect(
+        draw, (bar_x, bar_y + 2, bar_x + bar_w, bar_y + 2 + bar_h), 4, fill=(22, 22, 28)
+    )
+    fill_w = int((intensity / 10) * bar_w)
+    if fill_w > 0:
+        _draw_rounded_rect(
+            draw, (bar_x, bar_y + 2, bar_x + fill_w, bar_y + 2 + bar_h), 4, fill=accent
+        )
+    draw.text(
+        (bar_x + bar_w + 16, bar_y),
+        f"{intensity}/10",
+        font=font_label,
+        fill=(138, 134, 144),
+    )
+
+    # Finish thought (quote)
+    if thought:
+        font_thought = _load_font(FONT_ITALIC, 22)
+        thought_lines = _wrap_text(f"\u201C{thought}\u201D", font_thought, W - 120)
+        ty = 465
+        for line in thought_lines[:2]:
+            draw.text((60, ty), line, font=font_thought, fill=(210, 205, 198))
+            ty += 30
+
+    # Footer
+    footer_y = H - 45
+    font_footer = _load_font(FONT_MONO, 11)
+    draw.text((60, footer_y), "bookdna.app", font=font_footer, fill=(78, 75, 84))
+    draw.text(
+        (W - 60 - int(font_footer.getlength(f"@{username}")), footer_y),
+        f"@{username}",
+        font=font_footer,
+        fill=(78, 75, 84),
+    )
+
+    buffer = BytesIO()
+    img.save(buffer, format="PNG", quality=95)
+    buffer.seek(0)
+    return buffer.getvalue()
+
+
 def generate_story_image(
     title: str,
     author: str,

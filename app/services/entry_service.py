@@ -165,6 +165,40 @@ async def update_entry(
     return entry
 
 
+async def finish_entry(
+    db: AsyncSession,
+    entry_id: uuid.UUID,
+    user_id: uuid.UUID,
+    start_slug: str,
+    middle_slug: str,
+    end_slug: str,
+    thought: str | None,
+    intensity: int,
+) -> BookEntry | None:
+    """Mark an entry finished: populate arc, thought, intensity; upsert arc emotions."""
+    entry = await get_entry_by_id(db, entry_id, user_id)
+    if not entry:
+        return None
+
+    entry.status = "finished"
+    entry.arc_start_emotion_id = start_slug
+    entry.arc_middle_emotion_id = middle_slug
+    entry.arc_end_emotion_id = end_slug
+    entry.finish_thought = thought
+    entry.intensity = intensity
+
+    existing_by_slug = {e.emotion_id: e for e in entry.emotions}
+    for slug in {start_slug, middle_slug, end_slug}:
+        if slug in existing_by_slug:
+            existing_by_slug[slug].strength = intensity
+        else:
+            db.add(EntryEmotion(entry_id=entry.id, emotion_id=slug, strength=intensity))
+
+    await db.flush()
+    db.expire(entry)
+    return await get_entry_by_id(db, entry_id, user_id)
+
+
 async def delete_entry(db: AsyncSession, entry_id: uuid.UUID, user_id: uuid.UUID) -> bool:
     """Delete an entry. Returns True if deleted, False if not found."""
     entry = await get_entry_by_id(db, entry_id, user_id)

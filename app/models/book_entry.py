@@ -46,14 +46,28 @@ class BookEntry(Base):
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
 
+    status: Mapped[str] = mapped_column(String(20), nullable=False, server_default="finished")
+    arc_start_emotion_id: Mapped[str | None] = mapped_column(String(30))
+    arc_middle_emotion_id: Mapped[str | None] = mapped_column(String(30))
+    arc_end_emotion_id: Mapped[str | None] = mapped_column(String(30))
+    finish_thought: Mapped[str | None] = mapped_column(String(120))
+    shelf_position: Mapped[int | None] = mapped_column(Integer)
+
     __table_args__ = (
         CheckConstraint("intensity >= 1 AND intensity <= 10", name="check_intensity_range"),
+        CheckConstraint(
+            "status IN ('want_to_read','reading','finished')",
+            name="check_entry_status",
+        ),
     )
 
     # Relationships
     user: Mapped["User"] = relationship("User", back_populates="entries")
     emotions: Mapped[list["EntryEmotion"]] = relationship(
         "EntryEmotion", back_populates="entry", cascade="all, delete-orphan"
+    )
+    checkins: Mapped[list["EntryCheckin"]] = relationship(
+        "EntryCheckin", back_populates="entry", cascade="all, delete-orphan"
     )
 
 

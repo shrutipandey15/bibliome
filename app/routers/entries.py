@@ -3,6 +3,7 @@ import logging
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi.responses import Response
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -15,21 +16,34 @@ from app.models.book_entry import BookEntry, EntryEmotion
 from app.models.user import User
 from app.schemas.entry import (
     EntryCreate,
+    EntryFinish,
     EntryListResponse,
     EntryResponse,
     EntryUpdate,
     EmotionOut,
 )
+from app.schemas.arc import ArcCardResponse
+from app.schemas.checkin import CheckinCreate, CheckinResponse, StatusUpdate
+from app.schemas.room import ShelfPositionUpdate
+from app.services.arc_card_service import get_arc_card
+from app.services.og_image import generate_arc_card_image
 from app.services.entry_service import (
     create_entry,
     delete_entry,
+    finish_entry,
     get_entry_by_id,
     list_entries,
     update_entry,
 )
+from app.services.checkin_service import (
+    create_checkin,
+    get_owned_entry,
+    update_status,
+)
 from app.services.background import recalculate_dna
 from app.services.book_search import bump_popularity
 from app.services.room_decorations import compute_unlocks
+from app.utils.emotions import VALID_SLUGS
 
 logger = logging.getLogger("bookdna.entries")
 
@@ -66,6 +80,11 @@ def _entry_to_response(entry) -> EntryResponse:
         finished_at=entry.finished_at,
         created_at=entry.created_at,
         updated_at=entry.updated_at,
+        status=entry.status,
+        arc_start_emotion_id=entry.arc_start_emotion_id,
+        arc_middle_emotion_id=entry.arc_middle_emotion_id,
+        arc_end_emotion_id=entry.arc_end_emotion_id,
+        finish_thought=entry.finish_thought,
     )
 
 
@@ -201,3 +220,154 @@ async def delete_existing_entry(
     current_user.dna_dirty = True
     await db.flush()
     asyncio.create_task(recalculate_dna(current_user.id))
+
+
+@router.get("/{entry_id}/arc-card", response_model=ArcCardResponse)
+async def get_entry_arc_card(
+    entry_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Arc card data: title/author, dna_type, ordered arc beats, intensity, thought."""
+    card = await get_arc_card(db, entry_id, current_user.id)
+    if card is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Entry not found")
+    return card
+
+
+@router.get("/{entry_id}/arc-card/og")
+async def get_entry_arc_card_og(
+    entry_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Render the arc card as a 1200x630 PNG for sharing."""
+    card = await get_arc_card(db, entry_id, current_user.id)
+    if card is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Entry not found")
+
+    png = generate_arc_card_image(
+        title=card.title,
+        author=card.author,
+        dna_type=card.dna_type,
+        arc=[b.model_dump() for b in card.arc],
+        intensity=card.intensity,
+        thought=card.thought,
+        username=current_user.username,
+    )
+    return Response(content=png, media_type="image/png")
+
+
+@router.post("/{entry_id}/finish", response_model=EntryResponse)
+async def finish_existing_entry(
+    request: Request,
+    entry_id: uuid.UUID,
+    data: EntryFinish,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Mark an entry finished with a three-beat emotional arc."""
+    await entries_limiter.check(request)
+
+    slugs = {data.start_emotion_slug, data.middle_emotion_slug, data.end_emotion_slug}
+    invalid = [s for s in slugs if s not in VALID_SLUGS]
+    if invalid:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid emotion slug(s): {invalid}",
+        )
+
+    entry = await finish_entry(
+        db,
+        entry_id,
+        current_user.id,
+        data.start_emotion_slug,
+        data.middle_emotion_slug,
+        data.end_emotion_slug,
+        data.thought,
+        data.intensity,
+    )
+    if entry is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Entry not found")
+
+    current_user.dna_dirty = True
+    await db.flush()
+    asyncio.create_task(recalculate_dna(current_user.id))
+    return _entry_to_response(entry)
+
+
+@router.post(
+    "/{entry_id}/checkins",
+    response_model=CheckinResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_entry_checkin(
+    request: Request,
+    entry_id: uuid.UUID,
+    data: CheckinCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Record a mid-read emotional check-in against an entry."""
+    await entries_limiter.check(request)
+
+    if data.emotion_slug not in VALID_SLUGS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid emotion_slug '{data.emotion_slug}'",
+        )
+
+    entry = await get_owned_entry(db, entry_id, current_user.id)
+    if entry is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Entry not found")
+
+    checkin = await create_checkin(db, entry.id, data.emotion_slug, data.note)
+    return CheckinResponse(
+        id=checkin.id,
+        entry_id=checkin.entry_id,
+        emotion_slug=checkin.emotion_id,
+        note=checkin.note,
+        created_at=checkin.created_at,
+    )
+
+
+@router.patch("/{entry_id}/shelf-position", response_model=EntryResponse)
+async def patch_entry_shelf_position(
+    request: Request,
+    entry_id: uuid.UUID,
+    data: ShelfPositionUpdate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Set the user-arranged shelf position for this entry."""
+    await entries_limiter.check(request)
+
+    entry = await get_owned_entry(db, entry_id, current_user.id)
+    if entry is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Entry not found")
+
+    entry.shelf_position = data.shelf_position
+    await db.flush()
+    await db.refresh(entry, attribute_names=["emotions"])
+    return _entry_to_response(entry)
+
+
+@router.patch("/{entry_id}/status", response_model=EntryResponse)
+async def patch_entry_status(
+    request: Request,
+    entry_id: uuid.UUID,
+    data: StatusUpdate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Change an entry's reading status (want_to_read / reading / finished)."""
+    await entries_limiter.check(request)
+
+    entry = await get_owned_entry(db, entry_id, current_user.id)
+    if entry is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Entry not found")
+
+    await update_status(db, entry, data.status)
+    # Ensure emotions relationship is loaded for the response serializer
+    await db.refresh(entry, attribute_names=["emotions"])
+    return _entry_to_response(entry)
