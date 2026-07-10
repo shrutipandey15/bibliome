@@ -41,7 +41,7 @@ async def search(
     Results are merged, deduplicated, and ranked by relevance.
     Cached for 5 minutes per unique query.
     """
-    search_limiter.check(request)
+    await search_limiter.check(request)
     cache_key = f"search:{q.lower().strip()}"
     cached = search_cache.get(cache_key)
     if cached:

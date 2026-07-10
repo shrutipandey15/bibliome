@@ -11,7 +11,23 @@ import math
 from collections import Counter
 from datetime import datetime, timezone
 
-from app.utils.emotions import VALID_EMOTION_IDS
+from app.utils.emotions import VALID_EMOTION_IDS, canonicalize
+
+
+def _canonical_emotions(emotions) -> list[str]:
+    """Map a list of raw emotion slugs to canonical slugs, dropping unknowns.
+
+    Legacy pre-cutover slugs (e.g. ``healing``, ``2am``) are remapped via
+    ``canonicalize`` so historical rows still count toward DNA scoring instead of
+    being silently dropped — this is what keeps the engine in agreement with the
+    Mirror/calendar services that already canonicalize.
+    """
+    out = []
+    for emo in emotions or []:
+        canon = canonicalize(emo)
+        if canon is not None:
+            out.append(canon)
+    return out
 
 # Maps the engine's internal personality ids → the 8 canonical "bible" slugs.
 # The engine currently recognises 8 types; this mapping assigns each one a stable
@@ -40,13 +56,23 @@ def dna_type_slug_for(engine_id: str | None) -> str | None:
     return DNA_TYPE_SLUG_MAP.get(engine_id)
 
 
+# Personality "fingerprints" over the canonical 13-emotion vocabulary.
+#
+# INVARIANT: every slug in primary_emotions / anti_emotions MUST be a canonical
+# VALID_SLUGS value (see tests/test_dna_engine.py::test_personality_slugs_are_canonical).
+# The lists below were migrated off the pre-cutover vocabulary:
+#   healing→catharsis, seen→tenderness, obsession→desire, nostalgia→longing, 2am→two_am.
+# The old "nothing" (numbness) slug has no canonical equivalent and was removed;
+# where a list needed a replacement, the closest canonical fit for that type's
+# character was chosen (noted inline). `devastation` — previously in no type —
+# now anchors the soft_masochist, so all 13 canonical emotions are represented.
 PERSONALITY_TYPES = [
     {
         "id": "grief_romantic",
         "name": "The Grief Romantic",
         "description": "You seek books that break your heart because feeling deeply is how you know you're alive. Loss isn't your enemy — numbness is.",
-        "primary_emotions": ["grief", "healing", "seen"],
-        "anti_emotions": ["nothing", "wit"],
+        "primary_emotions": ["grief", "catharsis", "tenderness"],
+        "anti_emotions": ["comfort", "wit"],  # was ["nothing", "wit"] — nothing→comfort (they reject safe comfort)
         "blind_spots": ["You avoid books with neat happy endings", "You mistake emotional pain for depth"],
         "comfort_tropes": ["Unrequited love", "Beautiful suffering", "Bittersweet endings"],
         "color": "#3A5A6B",
@@ -56,8 +82,8 @@ PERSONALITY_TYPES = [
         "id": "control_intellectual",
         "name": "The Control-Seeking Intellectual",
         "description": "You read to master the chaos. Understanding is your armor, and every book is a new piece of territory mapped.",
-        "primary_emotions": ["wit", "dread", "nothing"],
-        "anti_emotions": ["comfort", "healing"],
+        "primary_emotions": ["wit", "dread", "chaos"],  # was [..., "nothing"] — nothing→chaos (the chaos they map)
+        "anti_emotions": ["comfort", "catharsis"],
         "blind_spots": ["You intellectualize emotions instead of feeling them", "You abandon books that make you vulnerable"],
         "comfort_tropes": ["Unreliable narrators", "Philosophical fiction", "Systems and structures"],
         "color": "#5A5A8A",
@@ -67,8 +93,8 @@ PERSONALITY_TYPES = [
         "id": "soft_masochist",
         "name": "The Soft Masochist",
         "description": "You choose pain on purpose because you trust books that hurt you more than ones that comfort you.",
-        "primary_emotions": ["rage", "grief", "obsession"],
-        "anti_emotions": ["nothing", "comfort"],
+        "primary_emotions": ["rage", "grief", "devastation"],  # was [..., "obsession"] — devastation anchors this type
+        "anti_emotions": ["comfort", "wit"],  # was ["nothing", "comfort"] — nothing→wit
         "blind_spots": ["You equate suffering with authenticity", "You distrust books that feel too safe"],
         "comfort_tropes": ["Tragic love", "Moral ambiguity", "Devastating plot twists"],
         "color": "#6B3A5D",
@@ -78,7 +104,7 @@ PERSONALITY_TYPES = [
         "id": "comfort_architect",
         "name": "The Comfort Architect",
         "description": "You build emotional safety through stories. Your bookshelf isn't a collection — it's a home you can always return to.",
-        "primary_emotions": ["comfort", "nostalgia", "seen"],
+        "primary_emotions": ["comfort", "longing", "tenderness"],
         "anti_emotions": ["rage", "chaos", "dread"],
         "blind_spots": ["You avoid books that might destabilize you", "You re-read instead of risking new things"],
         "comfort_tropes": ["Found family", "Slow-burn romance", "Cozy settings"],
@@ -90,7 +116,7 @@ PERSONALITY_TYPES = [
         "name": "The Midnight Arsonist",
         "description": "You read like you're setting fire to your own beliefs. Comfort zones are for people who haven't found the right book yet.",
         "primary_emotions": ["chaos", "awe", "rage"],
-        "anti_emotions": ["comfort", "nothing", "nostalgia"],
+        "anti_emotions": ["comfort", "longing"],  # was ["comfort", "nothing", "nostalgia"] — nothing dropped
         "blind_spots": ["You conflate discomfort with growth", "You dismiss gentle books as boring"],
         "comfort_tropes": ["Boundary-pushing fiction", "Experimental structure", "Provocative themes"],
         "color": "#C47A3A",
@@ -100,7 +126,7 @@ PERSONALITY_TYPES = [
         "id": "quiet_witness",
         "name": "The Quiet Witness",
         "description": "You absorb everything and process in silence. Books are your confessional — the only place you don't perform.",
-        "primary_emotions": ["seen", "awe", "dread"],
+        "primary_emotions": ["tenderness", "awe", "dread"],
         "anti_emotions": ["rage", "chaos"],
         "blind_spots": ["You observe more than you feel", "You use reading to avoid confrontation"],
         "comfort_tropes": ["Introspective narrators", "Literary fiction", "Quiet revelations"],
@@ -111,8 +137,8 @@ PERSONALITY_TYPES = [
         "id": "obsessive_romantic",
         "name": "The Obsessive Romantic",
         "description": "You don't read books — you fall into them. Every story is a love affair, and you don't do casual.",
-        "primary_emotions": ["obsession", "comfort", "2am"],
-        "anti_emotions": ["nothing", "dread", "wit"],
+        "primary_emotions": ["desire", "comfort", "two_am"],
+        "anti_emotions": ["dread", "wit"],  # was ["nothing", "dread", "wit"] — nothing dropped
         "blind_spots": ["You abandon books you can't fall in love with", "You chase the high of a new obsession"],
         "comfort_tropes": ["Consuming love stories", "Immersive worlds", "Characters you'd die for"],
         "color": "#C4553A",
@@ -122,8 +148,8 @@ PERSONALITY_TYPES = [
         "id": "emotional_archaeologist",
         "name": "The Emotional Archaeologist",
         "description": "You dig into stories looking for buried parts of yourself. Every book is an excavation site.",
-        "primary_emotions": ["nostalgia", "seen", "healing"],
-        "anti_emotions": ["nothing", "2am"],
+        "primary_emotions": ["longing", "tenderness", "catharsis"],
+        "anti_emotions": ["two_am"],  # was ["nothing", "2am"] — nothing dropped, 2am→two_am
         "blind_spots": ["You over-analyze what you read", "You search for meaning even when there's none"],
         "comfort_tropes": ["Psychological depth", "Identity exploration", "Hidden truths"],
         "color": "#7A5A9B",
@@ -161,19 +187,17 @@ def calculate_personality(entries: list[dict]) -> dict:
     # === 1. Count emotion frequency ===
     emotion_freq = Counter()
     for entry in entries:
-        for emo in entry["emotions"]:
-            if emo in VALID_EMOTION_IDS:
-                emotion_freq[emo] += 1
+        for emo in _canonical_emotions(entry["emotions"]):
+            emotion_freq[emo] += 1
 
     # === 2. Calculate intensity-weighted emotions ===
     emotion_intensity = {}
     emotion_counts = {}
     for entry in entries:
         intensity = entry.get("intensity", 5)
-        for emo in entry["emotions"]:
-            if emo in VALID_EMOTION_IDS:
-                emotion_intensity[emo] = emotion_intensity.get(emo, 0) + intensity
-                emotion_counts[emo] = emotion_counts.get(emo, 0) + 1
+        for emo in _canonical_emotions(entry["emotions"]):
+            emotion_intensity[emo] = emotion_intensity.get(emo, 0) + intensity
+            emotion_counts[emo] = emotion_counts.get(emo, 0) + 1
 
     # Average intensity per emotion
     avg_intensity = {
@@ -187,15 +211,14 @@ def calculate_personality(entries: list[dict]) -> dict:
     sorted_entries = sorted(entries, key=lambda e: e.get("created_at", now))
     for i, entry in enumerate(sorted_entries):
         weight = 0.5 + (i / max(len(entries) - 1, 1)) * 0.5  # 0.5 to 1.0
-        for emo in entry["emotions"]:
-            if emo in VALID_EMOTION_IDS:
-                recency_weights[emo] = recency_weights.get(emo, 0) + weight
+        for emo in _canonical_emotions(entry["emotions"]):
+            recency_weights[emo] = recency_weights.get(emo, 0) + weight
 
     # === 4. Build co-occurrence matrix ===
     co_occurrence = Counter()
     for entry in entries:
-        # Filter for valid emotions only
-        emos = sorted([e for e in entry["emotions"] if e in VALID_EMOTION_IDS])
+        # Canonical, de-duplicated emotions per entry
+        emos = sorted(set(_canonical_emotions(entry["emotions"])))
         for i in range(len(emos)):
             for j in range(i + 1, len(emos)):
                 co_occurrence[(emos[i], emos[j])] += 1
@@ -300,9 +323,8 @@ def generate_stats(entries: list[dict]) -> dict:
     # Most common emotion
     all_emotions = []
     for e in entries:
-        # Only consider valid emotions for stats
-        valid_entry_emotions = [em for em in e["emotions"] if em in VALID_EMOTION_IDS]
-        all_emotions.extend(valid_entry_emotions)
+        # Canonicalize so legacy slugs still count toward stats
+        all_emotions.extend(_canonical_emotions(e["emotions"]))
     
     emotion_counter = Counter(all_emotions)
     most_common = emotion_counter.most_common(1)
@@ -424,14 +446,13 @@ def build_heatmap_data(entries: list[dict]) -> dict:
     cells = []
     active_emotions = set()
     for e in entries:
-        for emo in e["emotions"]:
-            if emo in VALID_EMOTION_IDS:
-                active_emotions.add(emo)
-                cells.append({
-                    "entry_id": e["id"],
-                    "emotion_id": emo,
-                    "intensity": e.get("intensity", 5),
-                })
+        for emo in _canonical_emotions(e["emotions"]):
+            active_emotions.add(emo)
+            cells.append({
+                "entry_id": e["id"],
+                "emotion_id": emo,
+                "intensity": e.get("intensity", 5),
+            })
 
     return {
         "books": books,
@@ -494,9 +515,8 @@ def generate_recap(
     # Emotion frequency for this month
     month_freq = Counter()
     for e in month_entries:
-        for emo in e["emotions"]:
-            if emo in VALID_EMOTION_IDS:
-                month_freq[emo] += 1
+        for emo in _canonical_emotions(e["emotions"]):
+            month_freq[emo] += 1
 
     top_emotions = [
         {"emotion_id": emo, "count": count}
@@ -508,9 +528,8 @@ def generate_recap(
     # New emotions — tagged this month but never before
     prior_emotions = set()
     for e in prior_entries:
-        for emo in e["emotions"]:
-            if emo in VALID_EMOTION_IDS:
-                prior_emotions.add(emo)
+        for emo in _canonical_emotions(e["emotions"]):
+            prior_emotions.add(emo)
 
     month_emotions = set(month_freq.keys())
     new_emotions = sorted(month_emotions - prior_emotions)

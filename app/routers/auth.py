@@ -1,7 +1,5 @@
 import asyncio
 import logging
-import time
-from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -10,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.middleware.auth import get_current_user
-from app.middleware.rate_limit import auth_limiter
+from app.middleware.rate_limit import auth_limiter, login_lockout, RateLimiter
 from app.models.user import User
 from app.schemas.auth import (
     LoginRequest,
@@ -35,41 +33,16 @@ from app.services.email_service import send_reset_email, _generate_token
 logger = logging.getLogger("bookdna.auth")
 router = APIRouter(prefix="/auth", tags=["auth"])
 
-_failed_attempts: dict[str, list[float]] = defaultdict(list)
-LOCKOUT_THRESHOLD = 5
-LOCKOUT_WINDOW = 900
+LOCKOUT_THRESHOLD = login_lockout.threshold
 
-
-def _check_lockout(email: str) -> None:
-    """Check if account is locked due to too many failed login attempts."""
-    now = time.monotonic()
-    key = email.lower().strip()
-    _failed_attempts[key] = [t for t in _failed_attempts[key] if now - t < LOCKOUT_WINDOW]
-    if len(_failed_attempts[key]) >= LOCKOUT_THRESHOLD:
-        remaining = int(LOCKOUT_WINDOW - (now - _failed_attempts[key][0]))
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail=f"Too many failed attempts. Try again in {remaining // 60} minutes.",
-        )
-
-
-def _record_failed(email: str) -> None:
-    _failed_attempts[email.lower().strip()].append(time.monotonic())
-
-
-def _clear_failed(email: str) -> None:
-    _failed_attempts.pop(email.lower().strip(), None)
-
-
-from app.middleware.rate_limit import RateLimiter
 register_limiter = RateLimiter(max_requests=3, window_seconds=3600, prefix="register")
 
 
 @router.post("/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
 async def register(data: RegisterRequest, request: Request, db: AsyncSession = Depends(get_db)):
     """Register a new user."""
-    auth_limiter.check(request)
-    register_limiter.check(request)
+    await auth_limiter.check(request)
+    await register_limiter.check(request)
     email = data.email.lower().strip()
     username = data.username.strip()
 
@@ -90,7 +63,7 @@ async def register(data: RegisterRequest, request: Request, db: AsyncSession = D
 @router.post("/forgot-password")
 async def forgot_password(data: ForgotPasswordRequest, request: Request, db: AsyncSession = Depends(get_db)):
     """Request a password reset email."""
-    auth_limiter.check(request)
+    await auth_limiter.check(request)
 
     email = data.email.lower().strip()
     result = await db.execute(select(User).where(User.email == email))
@@ -135,16 +108,15 @@ async def reset_password(data: ResetPasswordRequest, db: AsyncSession = Depends(
 @router.post("/login", response_model=TokenResponse)
 async def login(data: LoginRequest, request: Request, db: AsyncSession = Depends(get_db)):
     """Authenticate and return tokens."""
-    auth_limiter.check(request)
+    await auth_limiter.check(request)
 
     email = data.email.lower().strip()
 
-    _check_lockout(email)
+    await login_lockout.check_locked(email)
 
     user = await authenticate_user(db, email, data.password)
     if not user:
-        _record_failed(email)
-        failed_count = len(_failed_attempts.get(email, []))
+        failed_count = await login_lockout.record(email)
         remaining = LOCKOUT_THRESHOLD - failed_count
 
         logger.warning("Failed login for %s (%d/%d attempts)", email, failed_count, LOCKOUT_THRESHOLD)
@@ -157,7 +129,7 @@ async def login(data: LoginRequest, request: Request, db: AsyncSession = Depends
 
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=detail)
 
-    _clear_failed(email)
+    await login_lockout.clear(email)
 
     access_token = create_access_token(user.id)
     refresh_token, expires_at = create_refresh_token_str(user.id)
