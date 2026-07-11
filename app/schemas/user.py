@@ -1,8 +1,13 @@
+from typing import Literal
+
 from pydantic import BaseModel, Field, model_validator
+
+Visibility = Literal["private", "community", "public"]
 
 
 class UserSettingsUpdate(BaseModel):
     display_name: str | None = Field(default=None, max_length=100)
+    profile_visibility: Visibility | None = None
 
 class PasswordChangeRequest(BaseModel):
     current_password: str = Field(min_length=1)
@@ -11,7 +16,8 @@ class PasswordChangeRequest(BaseModel):
 
 class UserSettingsResponse(BaseModel):
     display_name: str | None
-    is_public: bool
+    profile_visibility: Visibility
+    is_public: bool  # derived (profile_visibility == "public"); kept for back-compat
     personality_type: str | None
     username: str
     email: str

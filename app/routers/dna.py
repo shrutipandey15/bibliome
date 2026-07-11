@@ -170,9 +170,10 @@ async def generate_dna(
         )
         has_2am = (r_2am.scalar() or 0) > 0
         updated = compute_unlocks(current_user, len(entries), has_i10, has_2am)
-        room_unlocks_new = [u for u in updated if u not in old_set]
+        merged = old_set | set(updated)
+        room_unlocks_new = sorted(merged - old_set)
         if room_unlocks_new:
-            current_user.room_unlocks = updated
+            current_user.room_unlocks = sorted(merged)
 
     return DNAGenerateResponse(
         snapshot=DNASnapshotResponse(
@@ -331,7 +332,7 @@ async def get_reading_twin(
     # Fetch all public users (excluding self) who have entries
     public_users_result = await db.execute(
         select(User)
-        .where(User.is_public == True, User.id != current_user.id)
+        .where(User.profile_visibility == "public", User.id != current_user.id)
     )
     public_users = public_users_result.scalars().all()
 

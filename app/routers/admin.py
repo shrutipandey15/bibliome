@@ -74,9 +74,9 @@ class AdminUser(BaseModel):
 
 
 class AdminUserDetail(AdminUser):
+    profile_visibility: str
     is_public: bool
     dna_dirty: bool
-    share_token: str | None
     entries: list[dict]
 
 
@@ -199,9 +199,9 @@ async def get_user_detail(
         display_name=user.display_name,
         personality_type=user.personality_type,
         is_admin=user.is_admin,
+        profile_visibility=user.profile_visibility,
         is_public=user.is_public,
         dna_dirty=user.dna_dirty,
-        share_token=user.share_token,
         book_count=len(entries),
         created_at=user.created_at,
         last_active=user.updated_at,

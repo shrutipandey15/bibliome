@@ -168,9 +168,12 @@ async def create_new_entry(
             has_2am = (r3.scalar() or 0) > 0
 
         updated = compute_unlocks(current_user, entry_count, has_i10, has_2am)
-        room_unlocks_new = [u for u in updated if u not in old_set]
+        # Union, never replace: recomputes here don't know has_share_token and must
+        # not drop an already-earned unlock (e.g. mini_dna_frame).
+        merged = old_set | set(updated)
+        room_unlocks_new = sorted(merged - old_set)
         if room_unlocks_new:
-            current_user.room_unlocks = updated
+            current_user.room_unlocks = sorted(merged)
 
     # Background (post-commit, once get_db has committed this request's transaction):
     # feed the catalog and refresh DNA caches from the now-durable entry.

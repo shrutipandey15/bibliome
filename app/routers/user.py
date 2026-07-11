@@ -1,4 +1,3 @@
-import secrets
 import uuid as uuid_mod
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
@@ -23,6 +22,11 @@ from app.services.room_decorations import (
     VALID_DECO_IDS,
     build_decoration_catalog,
     compute_unlocks,
+)
+from app.services.visibility import (
+    create_share_token,
+    revoke_share_tokens,
+    user_has_share_token,
 )
 from app.utils.cache import room_cache
 from app.utils.cookies import clear_refresh_cookie
@@ -120,16 +124,21 @@ async def _clean_stale_books(db: AsyncSession, user_id, layout: dict | None) -> 
     return layout
 
 
+def _settings_response(user: User) -> UserSettingsResponse:
+    return UserSettingsResponse(
+        display_name=user.display_name,
+        profile_visibility=user.profile_visibility,
+        is_public=user.is_public,
+        personality_type=user.personality_type,
+        username=user.username,
+        email=user.email,
+    )
+
+
 @router.get("/settings", response_model=UserSettingsResponse)
 async def get_settings(current_user: User = Depends(get_current_user)):
     """Get current user settings."""
-    return UserSettingsResponse(
-        display_name=current_user.display_name,
-        is_public=current_user.is_public,
-        personality_type=current_user.personality_type,
-        username=current_user.username,
-        email=current_user.email,
-    )
+    return _settings_response(current_user)
 
 
 @router.patch("/settings", response_model=UserSettingsResponse)
@@ -138,21 +147,14 @@ async def update_settings(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Update user settings (display name)."""
+    """Update user settings (display name, profile visibility)."""
     update_data = data.model_dump(exclude_unset=True)
     for field, value in update_data.items():
         if hasattr(current_user, field):
             setattr(current_user, field, value)
 
     await db.flush()
-
-    return UserSettingsResponse(
-        display_name=current_user.display_name,
-        is_public=current_user.is_public,
-        personality_type=current_user.personality_type,
-        username=current_user.username,
-        email=current_user.email,
-    )
+    return _settings_response(current_user)
 
 
 @router.post("/change-password")
@@ -183,23 +185,35 @@ async def generate_share_token(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Generate (or reset) a secure share token for the current user."""
-    token = secrets.token_urlsafe(16)
-    current_user.share_token = token
+    """Mint a new revocable share link (capability link) for the current user."""
+    token = await create_share_token(db, current_user.id)
 
-    # Piggyback: check for new room unlocks (mini_dna_frame unlocks on first share)
+    # Piggyback: mini_dna_frame unlocks on first share.
     room_unlocks_new = []
     if current_user.room_unlocks is not None:
         old_set = set(current_user.room_unlocks)
         entry_count = await _count_entries(db, current_user.id)
         has_i10, has_2am = await _check_special_unlocks(db, current_user.id)
-        updated = compute_unlocks(current_user, entry_count, has_i10, has_2am)
-        room_unlocks_new = [u for u in updated if u not in old_set]
+        updated = compute_unlocks(
+            current_user, entry_count, has_i10, has_2am, has_share_token=True
+        )
+        merged = old_set | set(updated)
+        room_unlocks_new = sorted(merged - old_set)
         if room_unlocks_new:
-            current_user.room_unlocks = updated
+            current_user.room_unlocks = sorted(merged)
 
     await db.commit()
     return {"share_token": token, "room_unlocks_new": room_unlocks_new}
+
+
+@router.delete("/share-token", status_code=status.HTTP_204_NO_CONTENT)
+async def revoke_share_token(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Revoke all of the current user's active share links."""
+    await revoke_share_tokens(db, current_user.id)
+    await db.flush()
 
 
 @router.get("/room", response_model=RoomResponse)
@@ -223,7 +237,10 @@ async def get_room(
     if unlocks is None:
         entry_count = await _count_entries(db, current_user.id)
         has_i10, has_2am = await _check_special_unlocks(db, current_user.id)
-        unlocks = compute_unlocks(current_user, entry_count, has_i10, has_2am)
+        has_share = await user_has_share_token(db, current_user.id)
+        unlocks = compute_unlocks(
+            current_user, entry_count, has_i10, has_2am, has_share_token=has_share
+        )
 
     # Migrate + prune stale books for the response only (pure, no writes).
     layout = migrate_room_layout(current_user.room_layout)
