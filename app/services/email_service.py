@@ -77,8 +77,13 @@ def _build_reset_email(username: str, token: str) -> tuple[str, str]:
 async def send_email(to_email: str, subject: str, html_body: str) -> bool:
     """
     Send an email via SMTP.
-    Returns True if sent, False if failed.
-    Falls back to console logging if SMTP not configured.
+    Returns True if sent, False if it failed to send.
+
+    If SMTP is intentionally not configured (dev), the email is logged and this
+    returns True. But if SMTP *is* configured and the send fails for any reason
+    — including the aiosmtplib dependency being missing — this returns False and
+    logs at error level. It must never report a message as "sent" when it wasn't
+    (P0-4): that made broken production delivery undiagnosable from the outside.
     """
     if not settings.email_enabled:
         logger.info("EMAIL (dev mode — SMTP not configured):\n  To: %s\n  Subject: %s\n  Body: [HTML email]", to_email, subject)
@@ -104,9 +109,12 @@ async def send_email(to_email: str, subject: str, html_body: str) -> bool:
         logger.info("Email sent to %s: %s", to_email, subject)
         return True
     except ImportError:
-        logger.warning("aiosmtplib not installed — email logged to console instead")
-        logger.info("EMAIL:\n  To: %s\n  Subject: %s", to_email, subject)
-        return True
+        # SMTP is configured but the dependency is missing — a real deploy fault.
+        logger.error(
+            "SMTP is configured but aiosmtplib is not installed; email to %s NOT sent. "
+            "Add aiosmtplib to the environment.", to_email,
+        )
+        return False
     except Exception as e:
         logger.error("Failed to send email to %s: %s", to_email, e)
         return False

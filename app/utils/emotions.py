@@ -19,6 +19,10 @@ EMOTIONS_13 = [
 EMOTIONS_BY_SLUG = {e["slug"]: e for e in EMOTIONS_13}
 VALID_SLUGS = set(EMOTIONS_BY_SLUG.keys())
 
+# Canonical slug + its legacy variants, for the "2am" room unlock (moon_lamp).
+# Matching both means the unlock fires for new (two_am) and pre-cutover (2am) rows.
+TWO_AM_SLUGS = ("two_am", "2am")
+
 # Populated after running scripts/audit_emotions.py — maps old slugs → canonical slugs
 LEGACY_EMOTION_MAP: dict[str, str] = {
     "healing":   "catharsis",

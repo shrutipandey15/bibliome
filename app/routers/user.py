@@ -25,6 +25,7 @@ from app.services.room_decorations import (
     compute_unlocks,
 )
 from app.utils.cache import room_cache
+from app.utils.emotions import TWO_AM_SLUGS
 
 router = APIRouter(prefix="/user", tags=["user"])
 
@@ -40,9 +41,9 @@ def migrate_room_layout(layout: dict | None) -> dict | None:
     v = layout.get("version", 0)
     if v == CURRENT_ROOM_VERSION:
         return layout
-    # Future: add per-version migration logic here
-    layout["version"] = CURRENT_ROOM_VERSION
-    return layout
+    # Future: add per-version migration logic here.
+    # Return a copy so callers can treat this as pure (no side effects on read).
+    return {**layout, "version": CURRENT_ROOM_VERSION}
 
 
 async def _count_entries(db: AsyncSession, user_id) -> int:
@@ -65,7 +66,7 @@ async def _check_special_unlocks(db: AsyncSession, user_id) -> tuple[bool, bool]
     am = await db.execute(
         select(func.count(EntryEmotion.id))
         .join(BookEntry, EntryEmotion.entry_id == BookEntry.id)
-        .where(BookEntry.user_id == user_id, EntryEmotion.emotion_id == "2am")
+        .where(BookEntry.user_id == user_id, EntryEmotion.emotion_id.in_(TWO_AM_SLUGS))
     )
     has_2am = (am.scalar() or 0) > 0
 
@@ -202,36 +203,33 @@ async def get_room(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Get the user's reading room layout and decoration unlocks."""
+    """Get the user's reading room layout and decoration unlocks.
+
+    Read-only: unlock init, layout migration, and stale-book pruning are all
+    computed in-memory for the response but never written here (B1.5). The
+    persisted state is refreshed by the write endpoints that recompute unlocks
+    (POST /entries, POST /dna/generate, POST /user/share-token) and by PATCH
+    /user/room, which stamps the current layout version.
+    """
     await room_limiter.check(request)
 
-    # Initialize unlocks on first access
-    if current_user.room_unlocks is None:
+    # Compute unlocks in-memory if never initialized (do not persist on read).
+    unlocks = current_user.room_unlocks
+    if unlocks is None:
         entry_count = await _count_entries(db, current_user.id)
         has_i10, has_2am = await _check_special_unlocks(db, current_user.id)
-        current_user.room_unlocks = compute_unlocks(
-            current_user, entry_count, has_i10, has_2am
-        )
-        await db.flush()
+        unlocks = compute_unlocks(current_user, entry_count, has_i10, has_2am)
 
-    # Migrate layout if version is old
+    # Migrate + prune stale books for the response only (pure, no writes).
     layout = migrate_room_layout(current_user.room_layout)
-    if layout != current_user.room_layout:
-        current_user.room_layout = layout
-        await db.flush()
-
-    # Clean stale book references from layout
     layout = await _clean_stale_books(db, current_user.id, layout)
-    if layout != current_user.room_layout:
-        current_user.room_layout = layout
-        await db.flush()
 
-    catalog = build_decoration_catalog(current_user.room_unlocks)
+    catalog = build_decoration_catalog(unlocks)
 
     return RoomResponse(
         version=CURRENT_ROOM_VERSION,
         layout=layout,
-        unlocks=current_user.room_unlocks or [],
+        unlocks=unlocks or [],
         decorations=catalog,
     )
 

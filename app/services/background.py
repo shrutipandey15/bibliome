@@ -1,8 +1,11 @@
 """
 Background DNA recalculation.
 
-Triggered after entry create/update/delete so the cached profile
-is always fresh and /profile never has to recalculate on-demand.
+Scheduled via FastAPI ``BackgroundTasks`` so it runs *after* the request's
+transaction has committed (B1.6 / P2-1). Because it opens its own session only
+once the triggering entry is durably committed, it always reads the post-write
+state — it can no longer cache a profile that excludes the entry that triggered
+it. Cache invalidation goes through the single ``invalidate_dna`` helper (B1.3).
 """
 
 import logging
@@ -84,9 +87,8 @@ async def recalculate_dna(user_id: uuid.UUID) -> None:
                 )
 
 
-        from app.utils.cache import dna_cache
-        await dna_cache.invalidate_prefix(f"heatmap:{user_id}")
-        await dna_cache.invalidate_prefix(f"stats:{user_id}")
+        from app.utils.cache import invalidate_dna
+        await invalidate_dna(user_id)
 
     except Exception as e:
         logger.error("Background DNA recalculation failed for user %s: %s", user_id, e)

@@ -37,7 +37,8 @@ from app.services.dna_engine import (
     generate_stats,
 )
 from app.services.room_decorations import compute_unlocks
-from app.utils.cache import dna_cache
+from app.utils.cache import dna_cache, invalidate_dna
+from app.utils.emotions import TWO_AM_SLUGS
 
 router = APIRouter(prefix="/dna", tags=["dna"])
 
@@ -148,8 +149,7 @@ async def generate_dna(
 
     await db.flush()
 
-    await dna_cache.invalidate_prefix(f"heatmap:{current_user.id}")
-    await dna_cache.invalidate_prefix(f"stats:{current_user.id}")
+    await invalidate_dna(current_user.id)
 
     # Piggyback: check for new room decoration unlocks (glyph_figurine unlocks on first DNA gen)
     room_unlocks_new = []
@@ -166,7 +166,7 @@ async def generate_dna(
         r_2am = await db.execute(
             select(func.count(EntryEmotion.id))
             .join(BookEntry, EntryEmotion.entry_id == BookEntry.id)
-            .where(BookEntry.user_id == current_user.id, EntryEmotion.emotion_id == "2am")
+            .where(BookEntry.user_id == current_user.id, EntryEmotion.emotion_id.in_(TWO_AM_SLUGS))
         )
         has_2am = (r_2am.scalar() or 0) > 0
         updated = compute_unlocks(current_user, len(entries), has_i10, has_2am)

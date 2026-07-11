@@ -159,3 +159,17 @@ class RedisDNACache:
 
 dna_cache = RedisDNACache(ttl_seconds=600)
 room_cache = RedisDNACache(ttl_seconds=300, namespace="bookdna:room")
+
+
+async def invalidate_dna(user_id) -> None:
+    """Single invalidation point for a user's out-of-band DNA caches.
+
+    The DB is the source of truth. The `/profile` cache lives on the user row and
+    is invalidated inside the writing transaction via the ``dna_dirty`` flag; the
+    heatmap and stats caches live in ``dna_cache`` and are cleared here. Every DNA
+    write path (entry create/update/delete/finish, /dna/generate, and the
+    post-commit recalc) routes through this one helper so invalidation stays
+    consistent across the three regimes (P2-5 / B1.3).
+    """
+    await dna_cache.invalidate_prefix(f"heatmap:{user_id}")
+    await dna_cache.invalidate_prefix(f"stats:{user_id}")

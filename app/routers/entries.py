@@ -1,8 +1,7 @@
-import asyncio
 import logging
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, status
 from fastapi.responses import Response
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -28,6 +27,7 @@ from app.schemas.room import ShelfPositionUpdate
 from app.services.arc_card_service import get_arc_card
 from app.services.og_image import generate_arc_card_image
 from app.services.entry_service import (
+    InvalidCursor,
     create_entry,
     delete_entry,
     finish_entry,
@@ -43,7 +43,7 @@ from app.services.checkin_service import (
 from app.services.background import recalculate_dna
 from app.services.book_search import bump_popularity
 from app.services.room_decorations import compute_unlocks
-from app.utils.emotions import VALID_SLUGS
+from app.utils.emotions import VALID_SLUGS, TWO_AM_SLUGS
 
 logger = logging.getLogger("bookdna.entries")
 
@@ -103,13 +103,19 @@ async def get_entries(
     Cursor mode: pass `cursor` from previous response's `next_cursor`.
     Offset mode: pass `page` + `per_page` (backward compat).
     """
-    entries, total, next_cursor = await list_entries(
-        db, current_user.id,
-        limit=limit,
-        cursor=cursor,
-        page=page,
-        per_page=per_page,
-    )
+    try:
+        entries, total, next_cursor = await list_entries(
+            db, current_user.id,
+            limit=limit,
+            cursor=cursor,
+            page=page,
+            per_page=per_page,
+        )
+    except InvalidCursor:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid pagination cursor.",
+        )
     return EntryListResponse(
         entries=[_entry_to_response(e) for e in entries],
         total=total,
@@ -124,6 +130,7 @@ async def get_entries(
 async def create_new_entry(
     request: Request,
     data: EntryCreate,
+    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -143,7 +150,7 @@ async def create_new_entry(
         entry_count = r.scalar() or 0
 
         has_i10 = data.intensity == 10
-        has_2am = any(e.emotion_id == "2am" for e in data.emotions)
+        has_2am = any(e.emotion_id in TWO_AM_SLUGS for e in data.emotions)
 
         if not has_i10:
             r2 = await db.execute(
@@ -156,7 +163,7 @@ async def create_new_entry(
             r3 = await db.execute(
                 select(func.count(EntryEmotion.id))
                 .join(BookEntry, EntryEmotion.entry_id == BookEntry.id)
-                .where(BookEntry.user_id == current_user.id, EntryEmotion.emotion_id == "2am")
+                .where(BookEntry.user_id == current_user.id, EntryEmotion.emotion_id.in_(TWO_AM_SLUGS))
             )
             has_2am = (r3.scalar() or 0) > 0
 
@@ -165,9 +172,10 @@ async def create_new_entry(
         if room_unlocks_new:
             current_user.room_unlocks = updated
 
-    # Background: feed catalog + recalculate DNA (separate sessions, can't break entry)
-    asyncio.create_task(_feed_catalog(entry.title, entry.author, entry.cover_url, entry.isbn))
-    asyncio.create_task(recalculate_dna(current_user.id))
+    # Background (post-commit, once get_db has committed this request's transaction):
+    # feed the catalog and refresh DNA caches from the now-durable entry.
+    background_tasks.add_task(_feed_catalog, entry.title, entry.author, entry.cover_url, entry.isbn)
+    background_tasks.add_task(recalculate_dna, current_user.id)
     response = _entry_to_response(entry)
     response.room_unlocks_new = room_unlocks_new
     return response
@@ -191,6 +199,7 @@ async def update_existing_entry(
     request: Request,
     entry_id: uuid.UUID,
     data: EntryUpdate,
+    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -201,7 +210,7 @@ async def update_existing_entry(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Entry not found")
     current_user.dna_dirty = True
     await db.flush()
-    asyncio.create_task(recalculate_dna(current_user.id))
+    background_tasks.add_task(recalculate_dna, current_user.id)
     return _entry_to_response(entry)
 
 
@@ -209,6 +218,7 @@ async def update_existing_entry(
 async def delete_existing_entry(
     request: Request,
     entry_id: uuid.UUID,
+    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -219,7 +229,7 @@ async def delete_existing_entry(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Entry not found")
     current_user.dna_dirty = True
     await db.flush()
-    asyncio.create_task(recalculate_dna(current_user.id))
+    background_tasks.add_task(recalculate_dna, current_user.id)
 
 
 @router.get("/{entry_id}/arc-card", response_model=ArcCardResponse)
@@ -263,6 +273,7 @@ async def finish_existing_entry(
     request: Request,
     entry_id: uuid.UUID,
     data: EntryFinish,
+    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -292,7 +303,7 @@ async def finish_existing_entry(
 
     current_user.dna_dirty = True
     await db.flush()
-    asyncio.create_task(recalculate_dna(current_user.id))
+    background_tasks.add_task(recalculate_dna, current_user.id)
     return _entry_to_response(entry)
 
 
