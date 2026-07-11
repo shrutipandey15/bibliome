@@ -90,14 +90,24 @@ def _database():
 
 
 def _reset_limiters():
-    """Clear in-memory limiter/lockout state so per-IP budgets don't bleed across
-    tests (register_limiter is only 3/hour)."""
+    """Clear in-memory limiter/lockout state and relax per-IP caps for tests.
+
+    All test requests share one synthetic IP, so the production per-IP caps
+    (e.g. register_limiter = 3/hour) would bite when a single test creates
+    several users. We raise those caps but leave login_lockout untouched so the
+    lockout tests still assert the real threshold."""
     from app.middleware import rate_limit
     from app.routers import auth as auth_router
     from app.routers import entries as entries_router
-    for lim in (rate_limit.auth_limiter, rate_limit.generate_limiter,
-                auth_router.register_limiter, entries_router.entries_limiter):
+    from app.routers import echo as echo_router
+    relaxed = (
+        rate_limit.auth_limiter, rate_limit.generate_limiter,
+        auth_router.register_limiter, entries_router.entries_limiter,
+        echo_router.echo_write_limiter,
+    )
+    for lim in relaxed:
         lim._hits.clear()
+        lim.max_requests = 100000
     rate_limit.login_lockout._hits.clear()
 
 
