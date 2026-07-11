@@ -3,6 +3,7 @@ Admin endpoints — protected by is_admin flag.
 Provides: dashboard stats, user list, user management, DB health.
 """
 
+import uuid
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -13,6 +14,7 @@ from sqlalchemy.orm import selectinload
 
 from app.database import get_db
 from app.middleware.auth import get_current_user
+from app.services.moderation import list_open_reports, resolve_target
 from app.models.audit_log import AuditLog
 from app.models.book import Book
 from app.models.book_entry import BookEntry
@@ -237,6 +239,40 @@ async def delete_user(
     await db.delete(user)
     await db.flush()
     return {"message": f"User {user.username} deleted"}
+
+
+# ── Moderation queue (B3.7) ──
+
+class ResolveReportRequest(BaseModel):
+    target_type: str
+    target_id: uuid.UUID
+    action: str  # "remove" | "dismiss"
+
+
+@router.get("/moderation/queue")
+async def moderation_queue(
+    db: AsyncSession = Depends(get_db),
+    admin: User = Depends(require_admin),
+):
+    """Open reports grouped by target, most-reported first."""
+    return await list_open_reports(db)
+
+
+@router.post("/moderation/resolve")
+async def moderation_resolve(
+    data: ResolveReportRequest,
+    db: AsyncSession = Depends(get_db),
+    admin: User = Depends(require_admin),
+):
+    """Resolve a reported target: remove it, or dismiss the reports (restoring a held item)."""
+    if data.action not in ("remove", "dismiss"):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="action must be 'remove' or 'dismiss'")
+    ok = await resolve_target(db, admin.id, data.target_type, data.target_id, data.action)
+    if not ok:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Target not found")
+    await _audit(db, admin, f"moderation_{data.action}", data.target_type, str(data.target_id), None)
+    await db.flush()
+    return {"status": data.action}
 
 
 # ── Maintenance ──

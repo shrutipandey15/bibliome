@@ -80,6 +80,7 @@ async def register_user(
     user = User(
         email=email,
         username=username,
+        handle=username,  # public handle defaults to the username (Phase 3)
         password_hash=hashed_pw,
         display_name=display_name or username,
     )

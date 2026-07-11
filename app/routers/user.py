@@ -10,6 +10,7 @@ from app.middleware.auth import get_current_user
 from app.middleware.rate_limit import RateLimiter
 from app.models.book_entry import BookEntry, EntryEmotion
 from app.models.user import User
+from app.schemas.echo import HandleChangeRequest
 from app.schemas.user import (
     PasswordChangeRequest,
     RoomLayoutUpdate,
@@ -17,6 +18,7 @@ from app.schemas.user import (
     UserSettingsResponse,
     UserSettingsUpdate,
 )
+from app.services.handle_service import HandleError, change_handle
 from app.services.auth_service import hash_password, verify_password, revoke_all_refresh_tokens
 from app.services.room_decorations import (
     VALID_DECO_IDS,
@@ -155,6 +157,21 @@ async def update_settings(
 
     await db.flush()
     return _settings_response(current_user)
+
+
+@router.patch("/handle")
+async def change_user_handle(
+    data: HandleChangeRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Change the pseudonymous public handle (rate-limited; old handle enters a
+    grace window before it can be reused)."""
+    try:
+        await change_handle(db, current_user, data.handle)
+    except HandleError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    return {"handle": current_user.handle}
 
 
 @router.post("/change-password")

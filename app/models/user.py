@@ -27,6 +27,10 @@ class User(Base):
     display_name: Mapped[str | None] = mapped_column(String(100))
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
     personality_type: Mapped[str | None] = mapped_column(String(100))
+    # Pseudonymous public handle (Phase 3). Defaults to the username; changeable,
+    # rate-limited, with old handles kept in handle_history for a grace window.
+    handle: Mapped[str] = mapped_column(String(50), unique=True, index=True, nullable=False)
+    handle_changed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # Visibility spine (§2.3): private (default) / community / public.
     profile_visibility: Mapped[str] = mapped_column(
         String(20), nullable=False, server_default="private"
