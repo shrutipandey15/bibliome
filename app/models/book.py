@@ -6,7 +6,7 @@ Used as the primary search source; external APIs are fallback for unknown books.
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Integer, String, Text, func
+from sqlalchemy import Boolean, DateTime, Integer, String, Text, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -15,6 +15,9 @@ from app.database import Base
 
 class Book(Base):
     __tablename__ = "books"
+    __table_args__ = (
+        UniqueConstraint("title_normalized", "author_normalized", name="uq_books_title_author"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
@@ -27,9 +30,11 @@ class Book(Base):
     published_year: Mapped[str | None] = mapped_column(String(4))
     description: Mapped[str | None] = mapped_column(Text)
 
-    # Normalized fields for fast search (lowercase, stripped punctuation)
+    # Normalized fields for fast search (lowercase, stripped punctuation).
+    # author_normalized is NOT NULL ("" when unknown) so the unique constraint
+    # below actually dedupes author-less books (NULLs would compare distinct).
     title_normalized: Mapped[str] = mapped_column(String(300), nullable=False, index=True)
-    author_normalized: Mapped[str | None] = mapped_column(String(200))
+    author_normalized: Mapped[str] = mapped_column(String(200), nullable=False, server_default="")
 
     # Identifiers
     isbn_13: Mapped[str | None] = mapped_column(String(13), unique=True, index=True)

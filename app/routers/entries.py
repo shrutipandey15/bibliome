@@ -1,7 +1,17 @@
 import logging
 import uuid
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, status
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    File,
+    HTTPException,
+    Query,
+    Request,
+    UploadFile,
+    status,
+)
 from fastapi.responses import Response
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -20,7 +30,9 @@ from app.schemas.entry import (
     EntryResponse,
     EntryUpdate,
     EmotionOut,
+    ImportResponse,
 )
+from app.services.import_service import MAX_IMPORT_BYTES, import_entries, parse_import_csv
 from app.schemas.arc import ArcCardResponse
 from app.schemas.checkin import CheckinCreate, CheckinResponse, StatusUpdate
 from app.schemas.room import ShelfPositionUpdate
@@ -38,6 +50,7 @@ from app.services.entry_service import (
 from app.services.checkin_service import (
     create_checkin,
     get_owned_entry,
+    list_checkins,
     update_status,
 )
 from app.services.background import recalculate_dna
@@ -90,15 +103,18 @@ def _entry_to_response(entry) -> EntryResponse:
 
 @router.get("", response_model=EntryListResponse)
 async def get_entries(
-    cursor: str | None = Query(default=None, description="ISO timestamp cursor from previous next_cursor"),
+    cursor: str | None = Query(default=None, description="Opaque cursor from previous next_cursor"),
     limit: int = Query(default=20, ge=1, le=100),
     page: int | None = Query(default=None, ge=1, description="Legacy offset pagination"),
     per_page: int | None = Query(default=None, ge=1, le=100, description="Legacy offset pagination"),
+    q: str | None = Query(default=None, max_length=200, description="Filter by title/author substring"),
+    emotion: str | None = Query(default=None, max_length=30, description="Filter by tagged emotion slug"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """
-    List book entries. Supports cursor-based (preferred) and offset-based (legacy) pagination.
+    List book entries. Supports cursor-based (preferred) and offset-based (legacy) pagination,
+    plus optional in-library `q` (title/author) and `emotion` filters.
 
     Cursor mode: pass `cursor` from previous response's `next_cursor`.
     Offset mode: pass `page` + `per_page` (backward compat).
@@ -110,6 +126,8 @@ async def get_entries(
             cursor=cursor,
             page=page,
             per_page=per_page,
+            q=q,
+            emotion=emotion,
         )
     except InvalidCursor:
         raise HTTPException(
@@ -182,6 +200,44 @@ async def create_new_entry(
     response = _entry_to_response(entry)
     response.room_unlocks_new = room_unlocks_new
     return response
+
+
+@router.post("/import", response_model=ImportResponse)
+async def import_library(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Import a Goodreads / StoryGraph CSV export into the library (B2.7).
+
+    Deduped against the existing shelf. Imported books carry no emotions.
+    """
+    await entries_limiter.check(request)
+
+    raw = await file.read()
+    if len(raw) > MAX_IMPORT_BYTES:
+        raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="File too large")
+    try:
+        content = raw.decode("utf-8-sig")  # tolerate a BOM
+    except UnicodeDecodeError:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="File must be UTF-8 CSV")
+
+    books, errors = parse_import_csv(content)
+    imported, skipped = await import_entries(db, current_user.id, books)
+
+    if imported:
+        current_user.dna_dirty = True
+        await db.flush()
+        background_tasks.add_task(recalculate_dna, current_user.id)
+
+    return ImportResponse(
+        parsed=len(books),
+        imported=imported,
+        skipped=skipped,
+        errors=errors[:50],
+    )
 
 
 @router.get("/{entry_id}", response_model=EntryResponse)
@@ -345,6 +401,30 @@ async def create_entry_checkin(
     )
 
 
+@router.get("/{entry_id}/checkins", response_model=list[CheckinResponse])
+async def list_entry_checkins(
+    entry_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """List an entry's mid-read check-ins (oldest first). Owner only."""
+    entry = await get_owned_entry(db, entry_id, current_user.id)
+    if entry is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Entry not found")
+
+    checkins = await list_checkins(db, entry.id)
+    return [
+        CheckinResponse(
+            id=c.id,
+            entry_id=c.entry_id,
+            emotion_slug=c.emotion_id,
+            note=c.note,
+            created_at=c.created_at,
+        )
+        for c in checkins
+    ]
+
+
 @router.patch("/{entry_id}/shelf-position", response_model=EntryResponse)
 async def patch_entry_shelf_position(
     request: Request,
@@ -362,7 +442,7 @@ async def patch_entry_shelf_position(
 
     entry.shelf_position = data.shelf_position
     await db.flush()
-    await db.refresh(entry, attribute_names=["emotions"])
+    entry = await get_entry_by_id(db, entry_id, current_user.id)
     return _entry_to_response(entry)
 
 
@@ -382,6 +462,6 @@ async def patch_entry_status(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Entry not found")
 
     await update_status(db, entry, data.status)
-    # Ensure emotions relationship is loaded for the response serializer
-    await db.refresh(entry, attribute_names=["emotions"])
+    # Reload via the eager path so emotions are loaded for the serializer.
+    entry = await get_entry_by_id(db, entry_id, current_user.id)
     return _entry_to_response(entry)

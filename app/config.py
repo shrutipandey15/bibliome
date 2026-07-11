@@ -24,6 +24,10 @@ class Settings(BaseSettings):
     # Redis (rate limiting — optional, falls back to in-memory)
     REDIS_URL: str | None = None
 
+    # Google Books API key — raises the anonymous shared-quota ceiling that 429s
+    # under real traffic (P4-5). Optional; search still works (rate-limited) without it.
+    GOOGLE_BOOKS_API_KEY: str | None = None
+
     # Number of trusted reverse proxies in front of the app (e.g. 1 for a single
     # nginx). Controls how X-Forwarded-For is interpreted for rate limiting: only
     # this many rightmost hops are trusted, so a client cannot spoof its IP by
