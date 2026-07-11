@@ -68,6 +68,25 @@ async def get_redis() -> redis.Redis | None:
         return None
 
 
+def get_client_ip(request: Request) -> str:
+    """Extract the client IP, trusting only proxies we actually run behind.
+
+    X-Forwarded-For is client-controllable up to the trusted-proxy boundary:
+    nginx *appends* the real peer, so only the rightmost TRUSTED_PROXY_COUNT
+    hops are trustworthy. We take the hop added by the outermost trusted proxy;
+    anything a client injects sits further left and is ignored. With
+    TRUSTED_PROXY_COUNT=0 we ignore XFF entirely and use the socket peer.
+    """
+    count = get_settings().TRUSTED_PROXY_COUNT
+    if count > 0:
+        forwarded = request.headers.get("x-forwarded-for")
+        if forwarded:
+            parts = [p.strip() for p in forwarded.split(",") if p.strip()]
+            if len(parts) >= count:
+                return parts[-count]
+    return request.client.host if request.client else "unknown"
+
+
 class RateLimiter:
     def __init__(self, max_requests: int, window_seconds: int, prefix: str = "rl"):
         self.max_requests = max_requests
@@ -78,11 +97,7 @@ class RateLimiter:
         self._last_cleanup = time.monotonic()
 
     def _get_ip(self, request: Request) -> str:
-        """Extract client IP, respecting proxy headers."""
-        forwarded = request.headers.get("x-forwarded-for")
-        if forwarded:
-            return forwarded.split(",")[0].strip()
-        return request.client.host if request.client else "unknown"
+        return get_client_ip(request)
 
     def _redis_key(self, ip: str) -> str:
         return f"bookdna:{self.prefix}:{ip}"

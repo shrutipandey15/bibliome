@@ -1,5 +1,5 @@
 import uuid
-import httpx
+from app.utils.url_safety import fetch_cover_safely
 import asyncio
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -89,7 +89,10 @@ async def get_user_echoes(username: str, db: AsyncSession = Depends(get_db)):
     user = result.scalar_one_or_none()
 
     if not user:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+        # Don't 404 on unknown usernames — that turns this endpoint into a
+        # username-existence oracle (P1-3). Return the same empty shape a real
+        # user with no public echoes would produce, so the two are indistinguishable.
+        return PublicEchoesResponse(username=username, display_name=None, echoes=[], total=0)
 
     result = await db.execute(
         select(BookEntry)
@@ -287,15 +290,8 @@ async def get_echo_story_image(entry_id: uuid.UUID, db: AsyncSession = Depends(g
     user_result = await db.execute(select(User).where(User.id == entry.user_id))
     user = user_result.scalar_one_or_none()
 
-    cover_bytes = None
-    if entry.cover_url:
-        try:
-            async with httpx.AsyncClient() as client:
-                resp = await client.get(entry.cover_url, timeout=5.0)
-                if resp.status_code == 200:
-                    cover_bytes = resp.content
-        except Exception as e:
-            print(f"Failed to fetch cover: {e}") 
+    # SSRF-hardened: allowlisted host, no redirects, size cap, image-only (B1.8).
+    cover_bytes = await fetch_cover_safely(entry.cover_url)
 
     image_bytes = await asyncio.to_thread(
         generate_story_image,

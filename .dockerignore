@@ -1,0 +1,36 @@
+# Never ship secrets or local state into the image
+.env
+.env.*
+*.env
+
+# VCS / CI
+.git
+.github
+.gitignore
+
+# Python caches / virtualenvs
+__pycache__/
+*.pyc
+*.pyo
+venv/
+.venv/
+env/
+
+# Tests & tooling
+tests/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Editor / OS cruft
+.vscode/
+.idea/
+.claude/
+*.swp
+.DS_Store
+
+# Docs / working documents (not needed at runtime)
+audit.md
+blueprint.md
+ROADMAP.md
+readme.md

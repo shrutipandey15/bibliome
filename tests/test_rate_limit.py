@@ -11,15 +11,36 @@ from starlette.requests import Request
 from app.middleware.rate_limit import RateLimiter, FailedAttemptTracker
 
 
-def _request(ip="1.2.3.4"):
+def _request(ip="1.2.3.4", xff=None):
+    headers = []
+    if xff is not None:
+        headers.append((b"x-forwarded-for", xff.encode()))
     scope = {
         "type": "http",
         "method": "GET",
         "path": "/",
-        "headers": [],
+        "headers": headers,
         "client": (ip, 12345),
     }
     return Request(scope)
+
+
+def test_xff_is_ignored_when_no_trusted_proxy(monkeypatch):
+    # Default TRUSTED_PROXY_COUNT=0: a client-supplied X-Forwarded-For must NOT
+    # override the socket peer, else rate limits are trivially spoofable (P1-5).
+    limiter = RateLimiter(max_requests=5, window_seconds=60, prefix="xff")
+    ip = limiter._get_ip(_request(ip="9.9.9.9", xff="1.1.1.1, 2.2.2.2"))
+    assert ip == "9.9.9.9"
+
+
+def test_xff_uses_outermost_trusted_hop(monkeypatch):
+    from app import config
+    limiter = RateLimiter(max_requests=5, window_seconds=60, prefix="xff2")
+    # Pretend we run behind exactly one trusted proxy that appends the real peer.
+    monkeypatch.setattr(config.get_settings(), "TRUSTED_PROXY_COUNT", 1)
+    # Client spoofs "6.6.6.6"; our proxy appends the true peer "3.3.3.3".
+    ip = limiter._get_ip(_request(ip="10.0.0.1", xff="6.6.6.6, 3.3.3.3"))
+    assert ip == "3.3.3.3"
 
 
 async def test_rate_limiter_blocks_after_max_requests():

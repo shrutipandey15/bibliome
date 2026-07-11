@@ -18,7 +18,7 @@ from app.schemas.user import (
     UserSettingsResponse,
     UserSettingsUpdate,
 )
-from app.services.auth_service import hash_password, verify_password
+from app.services.auth_service import hash_password, verify_password, revoke_all_refresh_tokens
 from app.services.room_decorations import (
     VALID_DECO_IDS,
     build_decoration_catalog,
@@ -168,6 +168,8 @@ async def change_password(
         )
 
     current_user.password_hash = await hash_password(data.new_password)
+    # Changing the password revokes all other sessions (P1-1).
+    await revoke_all_refresh_tokens(db, current_user.id)
     await db.flush()
 
     return {"message": "Password updated"}

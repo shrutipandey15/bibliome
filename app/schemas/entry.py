@@ -2,11 +2,17 @@ import uuid
 from datetime import date, datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from app.utils.emotions import VALID_EMOTION_IDS
+from app.utils.url_safety import validate_cover_url
 
 EntryStatus = Literal["want_to_read", "reading", "finished"]
+
+
+def _validate_cover(v: str | None) -> str | None:
+    """Reject cover URLs that aren't https + an allowlisted host (SSRF guard, B1.8)."""
+    return validate_cover_url(v)
 
 
 class EmotionIn(BaseModel):
@@ -39,6 +45,8 @@ class EntryCreate(BaseModel):
     finished_at: date | None = None
     status: EntryStatus | None = None
 
+    _check_cover = field_validator("cover_url")(_validate_cover)
+
 
 class EntryUpdate(BaseModel):
     title: str | None = Field(default=None, min_length=1, max_length=300)
@@ -53,6 +61,8 @@ class EntryUpdate(BaseModel):
     started_at: date | None = None
     finished_at: date | None = None
     status: EntryStatus | None = None
+
+    _check_cover = field_validator("cover_url")(_validate_cover)
 
 
 class EntryResponse(BaseModel):

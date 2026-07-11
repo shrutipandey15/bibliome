@@ -1,3 +1,11 @@
+"""PARKED (B1.18): the GET /api/room endpoint and schemas/room.py::RoomResponse.
+
+This is the second of two overlapping "room" APIs (the live one is
+GET /api/user/room in routers/user.py). It is intentionally NOT mounted in
+app/main.py — kept only so no data/logic is lost while the Reading Room feature
+is deferred. Do not wire it back up without collapsing the duplicate contracts.
+"""
+
 from fastapi import APIRouter, Depends
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession

@@ -80,10 +80,9 @@ def register_error_handlers(app: FastAPI) -> None:
 
         if "uq_entry_emotion" in err_str:
             detail = "Duplicate emotion on this entry"
-        elif "users_email_key" in err_str or "ix_users_email" in err_str:
-            detail = "This email is already registered"
-        elif "users_username_key" in err_str or "ix_users_username" in err_str:
-            detail = "This username is already taken"
+        elif any(k in err_str for k in ("users_email_key", "ix_users_email", "users_username_key", "ix_users_username")):
+            # Generic: distinct email vs username messages were an enumeration oracle (P1-3).
+            detail = "That email or username is not available."
 
         logger.warning(
             "Integrity error on %s %s: %s",
