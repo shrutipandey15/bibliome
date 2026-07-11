@@ -3,9 +3,13 @@ from datetime import datetime
 
 from sqlalchemy import Boolean, DateTime, String, Text, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy.ext.hybrid import hybrid_property
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
+
+# Single source of truth for who can see a profile (blueprint §2.3, B2.1).
+VISIBILITY_VALUES = ("private", "community", "public")
 
 
 class User(Base):
@@ -23,9 +27,11 @@ class User(Base):
     display_name: Mapped[str | None] = mapped_column(String(100))
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
     personality_type: Mapped[str | None] = mapped_column(String(100))
-    is_public: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Visibility spine (§2.3): private (default) / community / public.
+    profile_visibility: Mapped[str] = mapped_column(
+        String(20), nullable=False, server_default="private"
+    )
     is_admin: Mapped[bool] = mapped_column(Boolean, default=False)
-    share_token: Mapped[str | None] = mapped_column(String(50), unique=True, index=True, nullable=True)
 
     reset_token: Mapped[str | None] = mapped_column(String(100), unique=True, nullable=True)
     reset_token_expires: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -61,3 +67,15 @@ class User(Base):
     refresh_tokens: Mapped[list["RefreshToken"]] = relationship(
         "RefreshToken", back_populates="user", cascade="all, delete-orphan"
     )
+    share_tokens: Mapped[list["ShareToken"]] = relationship(
+        "ShareToken", back_populates="user", cascade="all, delete-orphan"
+    )
+
+    @hybrid_property
+    def is_public(self) -> bool:
+        """Back-compat derived flag — the real control is profile_visibility."""
+        return self.profile_visibility == "public"
+
+    @is_public.expression
+    def is_public(cls):
+        return cls.profile_visibility == "public"

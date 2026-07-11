@@ -44,7 +44,8 @@ class UserResponse(BaseModel):
     username: str
     display_name: str | None
     personality_type: str | None
-    is_public: bool
+    profile_visibility: str
+    is_public: bool  # derived from profile_visibility; kept for back-compat
     is_admin: bool = False
     created_at: datetime
 

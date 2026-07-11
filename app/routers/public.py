@@ -14,22 +14,25 @@ from app.models.user import User
 from app.schemas.public import PublicCardResponse, PublicEcho, PublicEchoesResponse
 from app.services.dna_engine import calculate_personality
 from app.services.og_image import generate_dna_card_image, generate_echo_card_image, generate_story_image # <--- IMPORTED
+from app.services.visibility import resolve_share_token
 from app.utils.cache import room_cache
 
 router = APIRouter(prefix="/public", tags=["public"])
 
 
 async def _get_strict_public_user(db: AsyncSession, username: str) -> User:
-    """
-    Get a user by username. STRICTLY enforces public profile.
-    Used ONLY for the full profile card (which is effectively disabled for everyone now).
+    """Get a user by username, requiring `public` visibility.
+
+    Used for crawler-facing OG/card endpoints, which must only ever serve
+    profiles explicitly set to `public` (indexable/shareable) — never `private`
+    or `community`.
     """
     result = await db.execute(select(User).where(User.username == username))
     user = result.scalar_one_or_none()
 
     if not user:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
-    if not user.is_public:
+    if user.profile_visibility != "public":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="This profile is private")
 
     return user
@@ -233,11 +236,9 @@ async def get_shared_token_og_image(token: str, db: AsyncSession = Depends(get_d
     Generate OG Image for a SHARE TOKEN.
     Allows private users to download/share their 'Year in Review'.
     """
-    result = await db.execute(select(User).where(User.share_token == token))
-    user = result.scalar_one_or_none()
-
+    user = await resolve_share_token(db, token)
     if not user:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Invalid token")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Link invalid or expired")
 
     return await _generate_card_image_for_user(user, db)
 
@@ -377,9 +378,7 @@ async def get_shared_card(token: str, db: AsyncSession = Depends(get_db)):
     Get DNA profile via secure token. 
     The primary way for users to share their full profile now.
     """
-    result = await db.execute(select(User).where(User.share_token == token))
-    user = result.scalar_one_or_none()
-
+    user = await resolve_share_token(db, token)
     if not user:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Link invalid or expired")
 
@@ -410,5 +409,5 @@ async def get_shared_card(token: str, db: AsyncSession = Depends(get_db)):
         "personality": dna.get("personality"),
         "stats": dna.get("stats", {}),
         "top_emotions": dna.get("top_emotions", []),
-        "share_token": user.share_token 
+        "share_token": token,
     }

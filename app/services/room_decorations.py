@@ -62,7 +62,7 @@ DECORATIONS = [
         "name": "Mini DNA Frame",
         "description": "Your card, framed and tiny.",
         "unlock_condition": "Share your DNA card",
-        "check": lambda user, count, **kw: user.share_token is not None,
+        "check": lambda user, count, **kw: kw.get("has_share_token", False),
     },
     {
         "id": "crystal_prism",
@@ -94,11 +94,22 @@ DECORATION_MAP = {d["id"]: d for d in DECORATIONS}
 VALID_DECO_IDS = set(DECORATION_MAP.keys())
 
 
-def compute_unlocks(user, entry_count: int, has_intensity_10: bool = False, has_2am_tag: bool = False) -> list[str]:
+def compute_unlocks(
+    user,
+    entry_count: int,
+    has_intensity_10: bool = False,
+    has_2am_tag: bool = False,
+    has_share_token: bool = False,
+) -> list[str]:
     """Compute all decoration IDs a user has earned. Pure function."""
     return [
         d["id"] for d in DECORATIONS
-        if d["check"](user, entry_count, has_intensity_10=has_intensity_10, has_2am_tag=has_2am_tag)
+        if d["check"](
+            user, entry_count,
+            has_intensity_10=has_intensity_10,
+            has_2am_tag=has_2am_tag,
+            has_share_token=has_share_token,
+        )
     ]
 
 
