@@ -1,11 +1,29 @@
 import uuid
+from datetime import datetime
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.models.book_entry import BookEntry, EntryEmotion
 from app.schemas.entry import EntryCreate, EntryUpdate
+
+
+class InvalidCursor(ValueError):
+    """Raised when a pagination cursor cannot be parsed. Router maps this to 400."""
+
+
+def _encode_cursor(entry: BookEntry) -> str:
+    """Opaque keyset cursor: created_at + id, so ties on created_at are stable."""
+    return f"{entry.created_at.isoformat()}|{entry.id}"
+
+
+def _decode_cursor(cursor: str) -> tuple[datetime, uuid.UUID]:
+    try:
+        ts_raw, id_raw = cursor.rsplit("|", 1)
+        return datetime.fromisoformat(ts_raw), uuid.UUID(id_raw)
+    except (ValueError, AttributeError):
+        raise InvalidCursor(f"Malformed pagination cursor: {cursor!r}")
 
 
 async def create_entry(db: AsyncSession, user_id: uuid.UUID, data: EntryCreate) -> BookEntry:
@@ -68,16 +86,20 @@ async def list_entries(
     - Cursor-based (preferred): pass cursor from previous response's next_cursor
     - Offset-based (legacy): pass page + per_page
 
-    Entries are ordered newest-first (created_at DESC).
-    Cursor is the created_at ISO timestamp of the last entry in the batch.
+    Entries are ordered newest-first with a stable tie-break: (created_at, id) DESC.
+    The cursor encodes both fields so entries sharing a timestamp (bulk imports,
+    same-second creates) are neither skipped nor duplicated across pages.
+
+    Raises InvalidCursor on a malformed cursor (router maps to 400) rather than
+    silently restarting from page 1 — that silent restart made clients loop.
     """
-    # Count
+    # One COUNT for the total (part of the response contract / shelf display).
+    # The former second COUNT (has_next) is gone: we over-fetch by one row instead.
     count_result = await db.execute(
         select(func.count(BookEntry.id)).where(BookEntry.user_id == user_id)
     )
     total = count_result.scalar_one()
 
-    # Build query
     query = (
         select(BookEntry)
         .options(selectinload(BookEntry.emotions))
@@ -85,42 +107,28 @@ async def list_entries(
         .order_by(BookEntry.created_at.desc(), BookEntry.id.desc())
     )
 
-    if cursor:
-        # Cursor = ISO timestamp — fetch entries older than this
-        from datetime import datetime, timezone
-        try:
-            cursor_dt = datetime.fromisoformat(cursor)
-        except ValueError:
-            cursor_dt = None
-
-        if cursor_dt:
-            query = query.where(BookEntry.created_at < cursor_dt)
-        query = query.limit(limit)
-    elif page is not None and per_page is not None:
-        # Legacy offset mode
+    legacy_offset = cursor is None and page is not None and per_page is not None
+    if legacy_offset:
+        # Legacy offset mode (kept for backward compat).
         offset = (page - 1) * per_page
-        query = query.offset(offset).limit(per_page)
-    else:
-        query = query.limit(limit)
+        result = await db.execute(query.offset(offset).limit(per_page))
+        entries = list(result.scalars().all())
+        return entries, total, None
 
-    result = await db.execute(query)
-    entries = list(result.scalars().all())
-
-    # Build next cursor from last entry
-    next_cursor = None
-    if entries:
-        last = entries[-1]
-        remaining = total - (len(entries) if not cursor and not page else 0)
-        # Check if there are more entries after this batch
-        has_next_result = await db.execute(
-            select(func.count(BookEntry.id)).where(
-                BookEntry.user_id == user_id,
-                BookEntry.created_at < last.created_at,
-            )
+    if cursor:
+        cursor_ts, cursor_id = _decode_cursor(cursor)
+        # Composite keyset: strictly "older" than the cursor row in (created_at, id).
+        query = query.where(
+            tuple_(BookEntry.created_at, BookEntry.id) < (cursor_ts, cursor_id)
         )
-        has_next = has_next_result.scalar_one() > 0
-        if has_next:
-            next_cursor = last.created_at.isoformat()
+
+    # Over-fetch one row to detect a next page without a second COUNT.
+    result = await db.execute(query.limit(limit + 1))
+    rows = list(result.scalars().all())
+
+    has_next = len(rows) > limit
+    entries = rows[:limit]
+    next_cursor = _encode_cursor(entries[-1]) if has_next and entries else None
 
     return entries, total, next_cursor
 

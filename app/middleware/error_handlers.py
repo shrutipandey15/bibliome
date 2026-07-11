@@ -25,7 +25,14 @@ logger = logging.getLogger("bookdna")
 
 
 def error_response(status_code: int, error: str, detail: str, error_id: str | None = None) -> JSONResponse:
-    """Build a consistent error JSON response with CORS headers."""
+    """Build a consistent error JSON response.
+
+    Deliberately sets no CORS headers (P1-2): the previous ``ACAO: *`` +
+    ``Allow-Credentials: true`` pair is spec-invalid and let any origin read
+    error bodies (e.g. the 409 "email already registered" enumeration oracle),
+    bypassing the CORSMiddleware allowlist. CORS on error responses is left to
+    CORSMiddleware, which reflects only allowlisted origins.
+    """
     body = {
         "error": error,
         "detail": detail,
@@ -36,10 +43,6 @@ def error_response(status_code: int, error: str, detail: str, error_id: str | No
     return JSONResponse(
         status_code=status_code,
         content=body,
-        headers={
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Credentials": "true",
-        },
     )
 
 
