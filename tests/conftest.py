@@ -124,3 +124,11 @@ async def client(db_ready):
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as c:
         yield c
+
+
+@pytest.fixture
+async def db(db_ready):
+    """A raw async session against the test DB (for service-level tests)."""
+    from app.database import async_session
+    async with async_session() as session:
+        yield session

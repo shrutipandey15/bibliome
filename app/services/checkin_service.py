@@ -1,4 +1,5 @@
 import uuid
+from datetime import date
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -16,6 +17,16 @@ async def get_owned_entry(
         )
     )
     return result.scalar_one_or_none()
+
+
+async def list_checkins(db: AsyncSession, entry_id: uuid.UUID) -> list[EntryCheckin]:
+    """All check-ins for an entry, oldest first (the read's emotional timeline)."""
+    result = await db.execute(
+        select(EntryCheckin)
+        .where(EntryCheckin.entry_id == entry_id)
+        .order_by(EntryCheckin.created_at.asc())
+    )
+    return list(result.scalars().all())
 
 
 async def create_checkin(
@@ -39,5 +50,12 @@ async def update_status(
     db: AsyncSession, entry: BookEntry, status: str
 ) -> BookEntry:
     entry.status = status
+    # Keep finished_at consistent so the calendar/mirror key correctly (P5-7):
+    # entering 'finished' stamps today if unset; leaving it drops the date.
+    if status == "finished":
+        if entry.finished_at is None:
+            entry.finished_at = date.today()
+    else:
+        entry.finished_at = None
     await db.flush()
     return entry

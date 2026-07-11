@@ -98,6 +98,13 @@ class EntryFinish(BaseModel):
     intensity: int = Field(ge=1, le=10)
 
 
+class ImportResponse(BaseModel):
+    parsed: int          # rows that parsed into a book
+    imported: int        # new entries created
+    skipped: int         # duplicates skipped
+    errors: list[str]    # per-row parse errors (capped)
+
+
 class EntryListResponse(BaseModel):
     entries: list[EntryResponse]
     total: int

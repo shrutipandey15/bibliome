@@ -7,7 +7,7 @@ from app.middleware.auth import get_current_user
 from app.middleware.rate_limit import RateLimiter
 from app.models.user import User
 from app.services.book_search import search_books
-from app.utils.cache import search_cache
+from app.utils.cache import book_search_cache
 
 router = APIRouter(prefix="/books", tags=["books"])
 
@@ -42,9 +42,9 @@ async def search(
     Cached for 5 minutes per unique query.
     """
     await search_limiter.check(request)
-    cache_key = f"search:{q.lower().strip()}"
-    cached = search_cache.get(cache_key)
-    if cached:
+    cache_key = q.lower().strip()
+    cached = await book_search_cache.get(cache_key)
+    if cached is not None:
         return BookSearchResponse(results=cached, query=q, cached=True)
 
     results = await search_books(q, db=db)
@@ -59,6 +59,6 @@ async def search(
         )
         for r in results
     ]
-    search_cache.set(cache_key, serialized)
+    await book_search_cache.set(cache_key, serialized)
 
     return BookSearchResponse(results=serialized, query=q, cached=False)

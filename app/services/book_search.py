@@ -25,6 +25,7 @@ from time import monotonic
 
 import httpx
 from sqlalchemy import func, or_, select, text
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger("bookdna.search")
@@ -45,8 +46,13 @@ _NOISE_RE = re.compile(r"[^\w\s]", re.UNICODE)
 
 
 def normalize(text: str) -> str:
-    """Lowercase, strip punctuation and extra whitespace."""
-    return _NOISE_RE.sub("", text.lower()).strip()
+    """Lowercase, strip punctuation, collapse whitespace runs to one space.
+
+    Collapsing whitespace matters for catalog dedupe (P4-6): "cormac  mccarthy"
+    and "cormac mccarthy" must map to the same normalized key.
+    """
+    cleaned = _NOISE_RE.sub("", text.lower())
+    return re.sub(r"\s+", " ", cleaned).strip()
 
 
 def _title_similarity(a: str, b: str) -> float:
@@ -186,11 +192,16 @@ async def _search_local(db: AsyncSession, query: str, limit: int = 5) -> list[Bo
 
 async def _search_google(client: httpx.AsyncClient, query: str, limit: int = 8) -> list[BookResult]:
     """Search Google Books with intitle: prefix for better relevance."""
+    from app.config import get_settings
+
     encoded = urllib.parse.quote(f"intitle:{query}")
     url = (
         f"https://www.googleapis.com/books/v1/volumes"
         f"?q={encoded}&maxResults={limit}&printType=books&orderBy=relevance"
     )
+    api_key = get_settings().GOOGLE_BOOKS_API_KEY
+    if api_key:
+        url += f"&key={urllib.parse.quote(api_key)}"
 
     try:
         res = await client.get(url, timeout=5.0)
@@ -369,7 +380,7 @@ async def _store_in_catalog(db: AsyncSession, results: list[BookResult]) -> None
             continue
 
         title_norm = normalize(r.title)
-        author_norm = normalize(r.author) if r.author else None
+        author_norm = normalize(r.author) if r.author else ""
         isbn_13 = r.isbn if r.isbn and len(r.isbn) == 13 else None
         isbn_10 = r._isbn_10 or (r.isbn if r.isbn and len(r.isbn) == 10 else None)
 
@@ -385,11 +396,10 @@ async def _store_in_catalog(db: AsyncSession, results: list[BookResult]) -> None
             existing = result.scalar_one_or_none()
 
         if not existing and title_norm:
-            # Fuzzy match by normalized title
             result = await db.execute(
                 select(Book).where(
                     Book.title_normalized == title_norm,
-                    Book.author_normalized == author_norm if author_norm else True,
+                    Book.author_normalized == author_norm,
                 )
             )
             existing = result.scalar_one_or_none()
@@ -407,26 +417,29 @@ async def _store_in_catalog(db: AsyncSession, results: list[BookResult]) -> None
             if not existing.published_year and r.published_year:
                 existing.published_year = r.published_year
         else:
-            # Insert new book
-            book = Book(
-                title=r.title,
-                author=r.author,
-                cover_url=r.cover_url,
-                title_normalized=title_norm,
-                author_normalized=author_norm,
-                isbn_13=isbn_13,
-                isbn_10=isbn_10,
-                published_year=r.published_year,
-                description=r.description,
-                source=r._source or "google",
+            # Insert new — ON CONFLICT DO NOTHING so a concurrent writer (the
+            # request-triggered catalog feed) racing the same book can't create a
+            # duplicate or blow up this flush (P4-6).
+            stmt = (
+                pg_insert(Book)
+                .values(
+                    title=r.title,
+                    author=r.author,
+                    cover_url=r.cover_url,
+                    title_normalized=title_norm,
+                    author_normalized=author_norm,
+                    isbn_13=isbn_13,
+                    isbn_10=isbn_10,
+                    published_year=r.published_year,
+                    description=r.description,
+                    source=r._source or "google",
+                )
+                .on_conflict_do_nothing(index_elements=["title_normalized", "author_normalized"])
             )
-            db.add(book)
-
-    try:
-        await db.flush()
-    except Exception as e:
-        logger.warning("Catalog store failed (non-critical): %s", e)
-        # Don't rollback — let the caller handle transaction
+            try:
+                await db.execute(stmt)
+            except Exception as e:
+                logger.debug("Catalog insert skipped: %s", e)
 
 
 async def bump_popularity(
@@ -443,13 +456,14 @@ async def bump_popularity(
     from app.models.book import Book
 
     title_norm = normalize(title)
-    author_norm = normalize(author) if author else None
+    author_norm = normalize(author) if author else ""
 
-    stmt = select(Book).where(Book.title_normalized == title_norm)
-    if author_norm:
-        stmt = stmt.where(Book.author_normalized == author_norm)
-
-    result = await db.execute(stmt)
+    result = await db.execute(
+        select(Book).where(
+            Book.title_normalized == title_norm,
+            Book.author_normalized == author_norm,
+        )
+    )
     book = result.scalar_one_or_none()
 
     if book:
@@ -462,21 +476,28 @@ async def bump_popularity(
         if not book.isbn_10 and isbn and len(isbn) == 10:
             book.isbn_10 = isbn
     else:
-        # Create new catalog entry from user's book
+        # Insert, or bump popularity if a concurrent writer created it first (P4-6).
         isbn_13 = isbn if isbn and len(isbn) == 13 else None
         isbn_10 = isbn if isbn and len(isbn) == 10 else None
-        book = Book(
-            title=title,
-            author=author,
-            cover_url=cover_url,
-            title_normalized=title_norm,
-            author_normalized=author_norm,
-            isbn_13=isbn_13,
-            isbn_10=isbn_10,
-            source="user",
-            popularity=1,
+        stmt = (
+            pg_insert(Book)
+            .values(
+                title=title,
+                author=author,
+                cover_url=cover_url,
+                title_normalized=title_norm,
+                author_normalized=author_norm,
+                isbn_13=isbn_13,
+                isbn_10=isbn_10,
+                source="user",
+                popularity=1,
+            )
+            .on_conflict_do_update(
+                index_elements=["title_normalized", "author_normalized"],
+                set_={"popularity": Book.popularity + 1},
+            )
         )
-        db.add(book)
+        await db.execute(stmt)
 
 
 # ═══════════════════════════════════════════

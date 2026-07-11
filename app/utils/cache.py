@@ -62,9 +62,6 @@ class TTLCache:
     def size(self) -> int:
         return len(self._store)
 
-search_cache = TTLCache(ttl_seconds=300, max_size=200)
-
-
 class RedisDNACache:
     """
     Async DNA cache: Redis when available, TTLCache fallback otherwise.
@@ -159,6 +156,9 @@ class RedisDNACache:
 
 dna_cache = RedisDNACache(ttl_seconds=600)
 room_cache = RedisDNACache(ttl_seconds=300, namespace="bookdna:room")
+# Book-search results, shared across workers so a query hits external APIs once
+# for the whole fleet, not once per worker (P4-5).
+book_search_cache = RedisDNACache(ttl_seconds=300, namespace="bookdna:search")
 
 
 async def invalidate_dna(user_id) -> None:
