@@ -1,7 +1,7 @@
 import secrets
 import uuid as uuid_mod
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -25,6 +25,7 @@ from app.services.room_decorations import (
     compute_unlocks,
 )
 from app.utils.cache import room_cache
+from app.utils.cookies import clear_refresh_cookie
 from app.utils.emotions import TWO_AM_SLUGS
 
 router = APIRouter(prefix="/user", tags=["user"])
@@ -157,6 +158,7 @@ async def update_settings(
 @router.post("/change-password")
 async def change_password(
     data: PasswordChangeRequest,
+    response: Response,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -168,9 +170,10 @@ async def change_password(
         )
 
     current_user.password_hash = await hash_password(data.new_password)
-    # Changing the password revokes all other sessions (P1-1).
+    # Changing the password revokes all sessions and clears this browser's cookie (P1-1).
     await revoke_all_refresh_tokens(db, current_user.id)
     await db.flush()
+    clear_refresh_cookie(response)
 
     return {"message": "Password updated"}
 

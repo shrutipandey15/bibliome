@@ -11,7 +11,12 @@ class Settings(BaseSettings):
     SECRET_KEY: str = "change-this-to-a-random-secret-in-production"
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 15
-    REFRESH_TOKEN_EXPIRE_DAYS: int = 7
+    # 30 days per the locked auth-cookie contract (authCookieContract.md).
+    REFRESH_TOKEN_EXPIRE_DAYS: int = 30
+
+    # Refresh-token cookie (httpOnly, SameSite=Strict, scoped to /api/auth).
+    REFRESH_COOKIE_NAME: str = "bookdna_refresh"
+    REFRESH_COOKIE_PATH: str = "/api/auth"
 
     # CORS
     CORS_ORIGINS: str = "http://localhost:3000,http://localhost:5173"
@@ -41,6 +46,11 @@ class Settings(BaseSettings):
     @property
     def email_enabled(self) -> bool:
         return bool(self.SMTP_HOST and self.SMTP_USER and self.SMTP_PASSWORD)
+
+    @property
+    def cookie_secure(self) -> bool:
+        # Secure flag in production; omitted on plain-http localhost dev.
+        return self.ENVIRONMENT == "production"
 
     @property
     def cors_origins_list(self) -> list[str]:
