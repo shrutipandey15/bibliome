@@ -2,13 +2,13 @@ import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.middleware.auth import get_current_user
-from app.middleware.rate_limit import auth_limiter, login_lockout, RateLimiter
+from app.middleware.rate_limit import auth_limiter, get_client_ip, login_lockout, RateLimiter
 from app.models.user import User
 from app.schemas.auth import (
     LoginRequest,
@@ -23,7 +23,9 @@ from app.services.auth_service import (
     authenticate_user,
     create_access_token,
     create_refresh_token_str,
+    hash_token,
     register_user,
+    revoke_all_refresh_tokens,
     save_refresh_token,
     validate_refresh_token,
     hash_password,
@@ -32,8 +34,6 @@ from app.services.email_service import send_reset_email, _generate_token
 
 logger = logging.getLogger("bookdna.auth")
 router = APIRouter(prefix="/auth", tags=["auth"])
-
-LOCKOUT_THRESHOLD = login_lockout.threshold
 
 register_limiter = RateLimiter(max_requests=3, window_seconds=3600, prefix="register")
 
@@ -55,29 +55,42 @@ async def register(data: RegisterRequest, request: Request, db: AsyncSession = D
         user = await register_user(db, email=email, username=username, password=data.password, display_name=data.display_name)
         logger.info("New registration: %s (%s)", username, email)
         return user
-    except ValueError as e:
+    except ValueError:
         await asyncio.sleep(0.1)
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
+        # Generic message: distinct "email taken" vs "username taken" replies were
+        # an account-enumeration oracle (P1-3).
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="That email or username is not available.",
+        )
 
 
 @router.post("/forgot-password")
-async def forgot_password(data: ForgotPasswordRequest, request: Request, db: AsyncSession = Depends(get_db)):
-    """Request a password reset email."""
+async def forgot_password(
+    data: ForgotPasswordRequest,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+):
+    """Request a password reset email.
+
+    Returns the same response and takes ~the same time whether or not the email
+    exists (P1-3): the SMTP round-trip — the dominant timing signal — is deferred
+    to a post-response background task, and the former asymmetric sleep is gone.
+    """
     await auth_limiter.check(request)
 
     email = data.email.lower().strip()
     result = await db.execute(select(User).where(User.email == email))
     user = result.scalar_one_or_none()
 
-    if not user:
-        await asyncio.sleep(0.3)
-        return {"message": "If that email exists, a reset link has been sent"}
-
-    token = _generate_token()
-    user.reset_token = token
-    user.reset_token_expires = datetime.now(timezone.utc) + timedelta(hours=1)
-    await db.flush()
-    await send_reset_email(email, user.username, token)
+    if user:
+        token = _generate_token()
+        # Store only the hash; the plaintext token lives only in the emailed link (P1-1).
+        user.reset_token = hash_token(token)
+        user.reset_token_expires = datetime.now(timezone.utc) + timedelta(hours=1)
+        await db.flush()
+        background_tasks.add_task(send_reset_email, email, user.username, token)
 
     return {"message": "If that email exists, a reset link has been sent"}
 
@@ -86,7 +99,7 @@ async def forgot_password(data: ForgotPasswordRequest, request: Request, db: Asy
 async def reset_password(data: ResetPasswordRequest, db: AsyncSession = Depends(get_db)):
     """Reset password using the token from the reset email."""
     result = await db.execute(
-        select(User).where(User.reset_token == data.token)
+        select(User).where(User.reset_token == hash_token(data.token))
     )
     user = result.scalar_one_or_none()
 
@@ -99,6 +112,8 @@ async def reset_password(data: ResetPasswordRequest, db: AsyncSession = Depends(
     user.password_hash = await hash_password(data.new_password)
     user.reset_token = None
     user.reset_token_expires = None
+    # Recovering the account must log out any existing (possibly attacker) sessions.
+    await revoke_all_refresh_tokens(db, user.id)
     await db.flush()
 
     logger.info("Password reset for %s", user.email)
@@ -112,24 +127,25 @@ async def login(data: LoginRequest, request: Request, db: AsyncSession = Depends
 
     email = data.email.lower().strip()
 
-    await login_lockout.check_locked(email)
+    # Key lockout on (email, client IP), not email alone: a third party failing
+    # logins against a victim's email must not be able to lock the victim out of
+    # their own account (auth-DoS, P1-3). The victim comes from a different IP and
+    # keeps a clean counter; genuine single-source brute force still trips it.
+    lockout_key = f"{email}:{get_client_ip(request)}"
+    await login_lockout.check_locked(lockout_key)
 
     user = await authenticate_user(db, email, data.password)
     if not user:
-        failed_count = await login_lockout.record(email)
-        remaining = LOCKOUT_THRESHOLD - failed_count
-
-        logger.warning("Failed login for %s (%d/%d attempts)", email, failed_count, LOCKOUT_THRESHOLD)
-
+        await login_lockout.record(lockout_key)
+        logger.warning("Failed login for %s", email)
         await asyncio.sleep(0.3)
+        # Generic — no "N attempts remaining", which confirmed the account existed.
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid email or password",
+        )
 
-        detail = "Invalid email or password"
-        if 0 < remaining <= 2:
-            detail = f"Invalid email or password. {remaining} attempts remaining before lockout."
-
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=detail)
-
-    await login_lockout.clear(email)
+    await login_lockout.clear(lockout_key)
 
     access_token = create_access_token(user.id)
     refresh_token, expires_at = create_refresh_token_str(user.id)

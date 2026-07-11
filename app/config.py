@@ -19,6 +19,12 @@ class Settings(BaseSettings):
     # Redis (rate limiting — optional, falls back to in-memory)
     REDIS_URL: str | None = None
 
+    # Number of trusted reverse proxies in front of the app (e.g. 1 for a single
+    # nginx). Controls how X-Forwarded-For is interpreted for rate limiting: only
+    # this many rightmost hops are trusted, so a client cannot spoof its IP by
+    # sending its own X-Forwarded-For (P1-5). 0 = ignore XFF, use the socket peer.
+    TRUSTED_PROXY_COUNT: int = 0
+
     # App
     ENVIRONMENT: str = "development"
     APP_NAME: str = "Book DNA"
@@ -44,7 +50,11 @@ class Settings(BaseSettings):
     @model_validator(mode='after')
     def check_production_security(self):
         if self.ENVIRONMENT == "production":
-            if self.SECRET_KEY.startswith("change-this"):
+            key = self.SECRET_KEY.lower()
+            # Catch both the code default ("change-this…") and the env.production
+            # placeholder ("CHANGE_THIS_TO_RANDOM_64_CHARS"); the old check only
+            # matched the former, so the placeholder shipped to prod unnoticed.
+            if key.startswith("change-this") or key.startswith("change_this") or len(self.SECRET_KEY) < 32:
                 raise ValueError("CRITICAL: You must set a secure SECRET_KEY env var in production!")
         return self
 
