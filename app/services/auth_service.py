@@ -141,6 +141,15 @@ async def validate_refresh_token(db: AsyncSession, token: str) -> User | None:
     return result.scalar_one_or_none()
 
 
+async def revoke_refresh_token(db: AsyncSession, token: str) -> None:
+    """Revoke a single refresh token by its value (used on logout)."""
+    await db.execute(
+        update(RefreshToken)
+        .where(RefreshToken.token == hash_token(token))
+        .values(is_revoked=True)
+    )
+
+
 async def revoke_all_refresh_tokens(db: AsyncSession, user_id: uuid.UUID) -> None:
     """Revoke every active refresh token for a user.
 

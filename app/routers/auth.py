@@ -2,19 +2,21 @@ import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Response, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import get_settings
 from app.database import get_db
 from app.middleware.auth import get_current_user
 from app.middleware.rate_limit import auth_limiter, get_client_ip, login_lockout, RateLimiter
 from app.models.user import User
 from app.schemas.auth import (
+    AccessTokenResponse,
+    AuthResponse,
+    AuthUser,
     LoginRequest,
-    RefreshRequest,
     RegisterRequest,
-    TokenResponse,
     UserResponse,
     ForgotPasswordRequest,
     ResetPasswordRequest,
@@ -26,11 +28,31 @@ from app.services.auth_service import (
     hash_token,
     register_user,
     revoke_all_refresh_tokens,
+    revoke_refresh_token,
     save_refresh_token,
     validate_refresh_token,
     hash_password,
 )
 from app.services.email_service import send_reset_email, _generate_token
+from app.utils.cookies import set_refresh_cookie, clear_refresh_cookie
+
+
+def _access_expiry_seconds() -> int:
+    return get_settings().ACCESS_TOKEN_EXPIRE_MINUTES * 60
+
+
+def _auth_user(user: User) -> AuthUser:
+    # `handle` is the username today; Phase 3 (B3.1) introduces real handles.
+    return AuthUser(id=user.id, handle=user.username, email=user.email)
+
+
+async def _start_session(db: AsyncSession, user: User, response: Response) -> str:
+    """Issue an access token and set a fresh refresh-token cookie. Returns the access token."""
+    access_token = create_access_token(user.id)
+    refresh_token, expires_at = create_refresh_token_str(user.id)
+    await save_refresh_token(db, user.id, refresh_token, expires_at)
+    set_refresh_cookie(response, refresh_token)
+    return access_token
 
 logger = logging.getLogger("bookdna.auth")
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -38,9 +60,14 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 register_limiter = RateLimiter(max_requests=3, window_seconds=3600, prefix="register")
 
 
-@router.post("/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
-async def register(data: RegisterRequest, request: Request, db: AsyncSession = Depends(get_db)):
-    """Register a new user."""
+@router.post("/register", response_model=AuthResponse, status_code=status.HTTP_201_CREATED)
+async def register(
+    data: RegisterRequest,
+    request: Request,
+    response: Response,
+    db: AsyncSession = Depends(get_db),
+):
+    """Register a new user and auto-login (access token + refresh cookie)."""
     await auth_limiter.check(request)
     await register_limiter.check(request)
     email = data.email.lower().strip()
@@ -53,8 +80,6 @@ async def register(data: RegisterRequest, request: Request, db: AsyncSession = D
 
     try:
         user = await register_user(db, email=email, username=username, password=data.password, display_name=data.display_name)
-        logger.info("New registration: %s (%s)", username, email)
-        return user
     except ValueError:
         await asyncio.sleep(0.1)
         # Generic message: distinct "email taken" vs "username taken" replies were
@@ -63,6 +88,10 @@ async def register(data: RegisterRequest, request: Request, db: AsyncSession = D
             status_code=status.HTTP_409_CONFLICT,
             detail="That email or username is not available.",
         )
+
+    logger.info("New registration: %s (%s)", username, email)
+    access_token = await _start_session(db, user, response)
+    return AuthResponse(access_token=access_token, expires_in=_access_expiry_seconds(), user=_auth_user(user))
 
 
 @router.post("/forgot-password")
@@ -96,7 +125,7 @@ async def forgot_password(
 
 
 @router.post("/reset-password")
-async def reset_password(data: ResetPasswordRequest, db: AsyncSession = Depends(get_db)):
+async def reset_password(data: ResetPasswordRequest, response: Response, db: AsyncSession = Depends(get_db)):
     """Reset password using the token from the reset email."""
     result = await db.execute(
         select(User).where(User.reset_token == hash_token(data.token))
@@ -115,14 +144,20 @@ async def reset_password(data: ResetPasswordRequest, db: AsyncSession = Depends(
     # Recovering the account must log out any existing (possibly attacker) sessions.
     await revoke_all_refresh_tokens(db, user.id)
     await db.flush()
+    clear_refresh_cookie(response)
 
     logger.info("Password reset for %s", user.email)
     return {"message": "Password updated successfully"}
 
 
-@router.post("/login", response_model=TokenResponse)
-async def login(data: LoginRequest, request: Request, db: AsyncSession = Depends(get_db)):
-    """Authenticate and return tokens."""
+@router.post("/login", response_model=AuthResponse)
+async def login(
+    data: LoginRequest,
+    request: Request,
+    response: Response,
+    db: AsyncSession = Depends(get_db),
+):
+    """Authenticate; return an access token and set the refresh-token cookie."""
     await auth_limiter.check(request)
 
     email = data.email.lower().strip()
@@ -147,28 +182,45 @@ async def login(data: LoginRequest, request: Request, db: AsyncSession = Depends
 
     await login_lockout.clear(lockout_key)
 
-    access_token = create_access_token(user.id)
-    refresh_token, expires_at = create_refresh_token_str(user.id)
-    await save_refresh_token(db, user.id, refresh_token, expires_at)
-
-    return TokenResponse(access_token=access_token, refresh_token=refresh_token)
+    access_token = await _start_session(db, user, response)
+    return AuthResponse(access_token=access_token, expires_in=_access_expiry_seconds(), user=_auth_user(user))
 
 
-@router.post("/refresh", response_model=TokenResponse)
-async def refresh(data: RefreshRequest, db: AsyncSession = Depends(get_db)):
-    """Get new tokens using a refresh token (rotation: old token is revoked)."""
-    user = await validate_refresh_token(db, data.refresh_token)
+@router.post("/refresh", response_model=AccessTokenResponse)
+async def refresh(request: Request, response: Response, db: AsyncSession = Depends(get_db)):
+    """Rotate the refresh cookie and return a new access token.
+
+    The credential is the httpOnly cookie — there is no request body. On any
+    failure the cookie is cleared so the client falls back to login cleanly.
+    """
+    token = request.cookies.get(get_settings().REFRESH_COOKIE_NAME)
+    if not token:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
+
+    user = await validate_refresh_token(db, token)  # rotation: revokes the used token
     if not user:
+        clear_refresh_cookie(response)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or expired refresh token",
         )
 
-    access_token = create_access_token(user.id)
-    new_refresh, expires_at = create_refresh_token_str(user.id)
-    await save_refresh_token(db, user.id, new_refresh, expires_at)
+    access_token = await _start_session(db, user, response)
+    return AccessTokenResponse(access_token=access_token, expires_in=_access_expiry_seconds())
 
-    return TokenResponse(access_token=access_token, refresh_token=new_refresh)
+
+@router.post("/logout")
+async def logout(request: Request, response: Response, db: AsyncSession = Depends(get_db)):
+    """Revoke the current refresh token and clear the cookie.
+
+    Uses the cookie as the credential (no valid access token required), so a
+    client with an expired access token can still cleanly end its session.
+    """
+    token = request.cookies.get(get_settings().REFRESH_COOKIE_NAME)
+    if token:
+        await revoke_refresh_token(db, token)
+    clear_refresh_cookie(response)
+    return {"message": "Logged out"}
 
 
 @router.get("/me", response_model=UserResponse)

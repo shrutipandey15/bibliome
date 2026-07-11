@@ -16,14 +16,21 @@ class LoginRequest(BaseModel):
     password: str
 
 
-class TokenResponse(BaseModel):
+class AuthUser(BaseModel):
+    id: uuid.UUID
+    handle: str  # currently the username; becomes the pseudonymous handle in Phase 3
+    email: str
+
+
+class AccessTokenResponse(BaseModel):
+    """Shape returned by /refresh — refresh token is in the cookie, not here."""
     access_token: str
-    refresh_token: str
-    token_type: str = "bearer"
+    expires_in: int
 
 
-class RefreshRequest(BaseModel):
-    refresh_token: str
+class AuthResponse(AccessTokenResponse):
+    """Shape returned by login/register (auto-login)."""
+    user: AuthUser
 
 class ForgotPasswordRequest(BaseModel):
     email: EmailStr
