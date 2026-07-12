@@ -25,6 +25,7 @@ class User(Base):
         String(50), unique=True, nullable=False, index=True
     )
     display_name: Mapped[str | None] = mapped_column(String(100))
+    bio: Mapped[str | None] = mapped_column(String(300), nullable=True)
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
     personality_type: Mapped[str | None] = mapped_column(String(100))
     # Pseudonymous public handle (Phase 3). Defaults to the username; changeable,
