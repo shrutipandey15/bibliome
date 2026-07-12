@@ -24,7 +24,6 @@ from app.schemas.dna import (
     PersonalityInfo,
     RecapResponse,
     StatsResponse,
-    TwinResponse,
 )
 from app.services.blind_spots_service import get_blind_spots
 from app.services.calendar_service import get_emotional_calendar
@@ -32,7 +31,6 @@ from app.services.dna_engine import (
     build_heatmap_data,
     calculate_personality,
     dna_type_slug_for,
-    find_twins,
     generate_recap,
     generate_stats,
 )
@@ -301,67 +299,12 @@ async def get_monthly_recap(
     return recap
 
 
-@router.get("/twin", response_model=TwinResponse)
-async def get_reading_twin(
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    """
-    Find your reading twin — public users with the most similar emotion profiles.
-    Uses cosine similarity on emotion frequency vectors.
-    Requires at least 3 books.
-    """
-    # Get current user's entries
-    user_entries = await _get_user_entries(db, current_user.id)
-
-    if len(user_entries) < 3:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Need at least 3 books to find twins. You have {len(user_entries)}.",
-        )
-
-    # Build current user's emotion frequency
-    from collections import Counter
-    user_freq = Counter()
-    for entry in user_entries:
-        for emo in entry["emotions"]:
-            user_freq[emo] += 1
-
-    user_top = [emo for emo, _ in user_freq.most_common(5)]
-
-    # Fetch all public users (excluding self) who have entries
-    public_users_result = await db.execute(
-        select(User)
-        .where(User.profile_visibility == "public", User.id != current_user.id)
-    )
-    public_users = public_users_result.scalars().all()
-
-    # Build candidate profiles
-    candidates = []
-    for pu in public_users:
-        pu_entries = await _get_user_entries(db, pu.id)
-        if len(pu_entries) < 3:
-            continue
-
-        pu_freq = Counter()
-        for entry in pu_entries:
-            for emo in entry["emotions"]:
-                pu_freq[emo] += 1
-
-        candidates.append({
-            "username": pu.username,
-            "display_name": pu.display_name,
-            "personality_type": pu.personality_type,
-            "emotion_frequency": dict(pu_freq),
-        })
-
-    twins = find_twins(dict(user_freq), candidates, max_results=5)
-
-    return TwinResponse(
-        twins=twins,
-        your_top_emotions=user_top,
-        total_public_users_searched=len(candidates),
-    )
+# REMOVED (audit-v2 P1-NEW-2): GET /dna/twin is unmounted. Twin (reader-matching)
+# is parked (Phase 5, blueprint), and the old endpoint was O(all public users ×
+# all their entries) uncached per request — a live, unbounded cost for a shelved
+# feature. When Twin is reopened it must use precomputed emotion vectors
+# (cached_dna_profile) + a candidate pipeline, not this. Service helpers
+# (find_twins, cosine_similarity) are retained for that future rebuild.
 
 
 @router.get("/emotional-calendar", response_model=EmotionalCalendarResponse)

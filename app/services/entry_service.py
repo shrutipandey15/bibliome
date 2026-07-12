@@ -48,7 +48,6 @@ async def create_entry(db: AsyncSession, user_id: uuid.UUID, data: EntryCreate) 
         isbn=data.isbn,
         intensity=data.intensity,
         quote=data.quote,
-        public_echo=data.public_echo,
         notes=data.notes,
         status=status,
         started_at=data.started_at,
