@@ -15,6 +15,7 @@ from sqlalchemy.orm import selectinload
 from app.database import get_db
 from app.middleware.auth import get_current_user
 from app.services.moderation import list_open_reports, resolve_target
+from app.services.digest_service import run_weekly_digests
 from app.models.audit_log import AuditLog
 from app.models.book import Book
 from app.models.book_entry import BookEntry
@@ -273,6 +274,18 @@ async def moderation_resolve(
     await _audit(db, admin, f"moderation_{data.action}", data.target_type, str(data.target_id), None)
     await db.flush()
     return {"status": data.action}
+
+
+@router.post("/jobs/weekly-digest")
+async def trigger_weekly_digest(
+    db: AsyncSession = Depends(get_db),
+    admin: User = Depends(require_admin),
+):
+    """Run the weekly digest job (Tier 2). Idempotent per user per ISO week —
+    intended to be called by a scheduler; exposed here for manual/cron trigger."""
+    sent = await run_weekly_digests(db)
+    await db.flush()
+    return {"digests_sent": sent}
 
 
 # ── Maintenance ──

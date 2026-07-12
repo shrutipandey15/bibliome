@@ -35,6 +35,8 @@ from app.services.echo_service import (
     set_reaction,
 )
 from app.services.moderation import CRISIS_RESOURCES, VERDICT_CRISIS, submit_report
+from app.models.notification import TIER_DIRECT
+from app.services.notification_service import notify
 
 router = APIRouter(prefix="/echoes", tags=["echo"])
 
@@ -189,6 +191,25 @@ async def post_reply(
         reply, verdict, reason = await create_reply(db, echo, current_user.id, data.body)
     except EchoError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+    # Tier-1 batched notification to the echo's author ("N readers responded…").
+    # notify() suppresses self-replies and blocked actors.
+    if reply.status == "active":
+        await notify(
+            db,
+            echo.author_id,
+            TIER_DIRECT,
+            "echo_reply",
+            payload={
+                "echo_id": str(echo_id),
+                "book_title": echo.book_title,
+                "actors": [current_user.handle],
+                "count": 1,
+            },
+            batch_key=f"echo_reply:{echo_id}",
+            actor_id=current_user.id,
+        )
+
     return ReplyResponse(
         id=reply.id, echo_id=echo_id, handle=current_user.handle, body=reply.body, created_at=reply.created_at,
     )

@@ -35,6 +35,8 @@ from app.services.auth_service import (
 )
 from app.services.email_service import send_reset_email, _generate_token
 from app.utils.cookies import set_refresh_cookie, clear_refresh_cookie
+from app.models.notification import TIER_SECURITY
+from app.services.notification_service import notify
 
 
 def _access_expiry_seconds() -> int:
@@ -145,6 +147,9 @@ async def reset_password(data: ResetPasswordRequest, response: Response, db: Asy
     await revoke_all_refresh_tokens(db, user.id)
     await db.flush()
     clear_refresh_cookie(response)
+
+    await notify(db, user.id, TIER_SECURITY, "password_reset",
+                 payload={"message": "Your password was reset."})
 
     logger.info("Password reset for %s", user.email)
     return {"message": "Password updated successfully"}
