@@ -77,6 +77,27 @@ def _pg_available() -> bool:
 _PG_OK = None
 
 
+def pytest_terminal_summary(terminalreporter, exitstatus, config):
+    """Make skipped DB coverage LOUD (audit-v2 P2).
+
+    The DB-backed suite silently skips when Postgres is unreachable, so `pytest`
+    can print green while most of the suite never ran — the exact false-confidence
+    that let P0-1 ship. Shout about it at the end, where people actually look."""
+    if _PG_OK is False:
+        skipped = len(terminalreporter.stats.get("skipped", []))
+        terminalreporter.write_sep("!", "PARTIAL TEST RUN", red=True, bold=True)
+        terminalreporter.write_line(
+            f"Postgres was UNAVAILABLE — {skipped} DB-backed tests were SKIPPED, not run.",
+            red=True,
+        )
+        terminalreporter.write_line(
+            "Green here does NOT mean the DB-backed suite passed. Run against a real "
+            "Postgres (set TEST_DATABASE_URL) before trusting this result.",
+            red=True,
+        )
+        terminalreporter.write_sep("!", red=True, bold=True)
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _database():
     global _PG_OK

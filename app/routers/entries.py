@@ -83,7 +83,6 @@ def _entry_to_response(entry) -> EntryResponse:
         isbn=entry.isbn,
         intensity=entry.intensity,
         quote=entry.quote,
-        public_echo=entry.public_echo,
         notes=entry.notes,
         emotions=[
             EmotionOut(emotion_id=e.emotion_id, strength=e.strength)

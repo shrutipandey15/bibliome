@@ -38,7 +38,6 @@ class EntryCreate(BaseModel):
     isbn: str | None = Field(default=None, max_length=13)
     intensity: int = Field(default=5, ge=1, le=10)
     quote: str | None = None
-    public_echo: str | None = None
     notes: str | None = None
     emotions: list[EmotionIn] = Field(default_factory=list)
     started_at: date | None = None
@@ -55,7 +54,6 @@ class EntryUpdate(BaseModel):
     isbn: str | None = None
     intensity: int | None = Field(default=None, ge=1, le=10)
     quote: str | None = None
-    public_echo: str | None = None
     notes: str | None = None
     emotions: list[EmotionIn] | None = None
     started_at: date | None = None
@@ -73,7 +71,6 @@ class EntryResponse(BaseModel):
     isbn: str | None
     intensity: int
     quote: str | None
-    public_echo: str | None
     notes: str | None
     emotions: list[EmotionOut]
     started_at: date | None
