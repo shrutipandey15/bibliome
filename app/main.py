@@ -7,7 +7,7 @@ from sqlalchemy import text
 
 from app.config import get_settings
 from app.middleware.error_handlers import register_error_handlers, setup_logging
-from app.routers import auth, entries, dna, public, user, books, admin, mirror, meta, echo, social, notifications
+from app.routers import auth, entries, dna, public, user, books, admin, mirror, meta, echo, social, notifications, profile
 
 settings = get_settings()
 setup_logging(settings.ENVIRONMENT)
@@ -62,6 +62,7 @@ app.include_router(meta.router, prefix=settings.API_V1_PREFIX)
 app.include_router(echo.router, prefix=settings.API_V1_PREFIX)
 app.include_router(social.router, prefix=settings.API_V1_PREFIX)
 app.include_router(notifications.router, prefix=settings.API_V1_PREFIX)
+app.include_router(profile.router, prefix=settings.API_V1_PREFIX)
 # NOTE: routers/room.py (GET /api/room) is parked (B1.18) — the Reading Room
 # feature is deferred and the frontend uses GET /api/user/room. Left unmounted
 # to stop maintaining two divergent room contracts / two RoomResponse schemas.

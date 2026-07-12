@@ -9,6 +9,7 @@ from app.models.entry_checkin import EntryCheckin
 from app.models.echo import Echo, EchoReply, EchoReaction
 from app.models.social import Block, Mute, Report, HandleHistory
 from app.models.notification import Notification, NotificationPrefs, NotificationDigest
+from app.models.collection import Collection, CollectionItem
 
 __all__ = [
     "User",
@@ -30,4 +31,6 @@ __all__ = [
     "Notification",
     "NotificationPrefs",
     "NotificationDigest",
+    "Collection",
+    "CollectionItem",
 ]
