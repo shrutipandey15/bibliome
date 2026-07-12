@@ -19,6 +19,8 @@ from app.schemas.user import (
     UserSettingsUpdate,
 )
 from app.services.handle_service import HandleError, change_handle
+from app.models.notification import TIER_SECURITY
+from app.services.notification_service import notify
 from app.services.auth_service import hash_password, verify_password, revoke_all_refresh_tokens
 from app.services.room_decorations import (
     VALID_DECO_IDS,
@@ -193,6 +195,10 @@ async def change_password(
     await revoke_all_refresh_tokens(db, current_user.id)
     await db.flush()
     clear_refresh_cookie(response)
+
+    # Tier-0 security notice — always delivered, bypasses quiet hours/prefs.
+    await notify(db, current_user.id, TIER_SECURITY, "password_changed",
+                 payload={"message": "Your password was changed."})
 
     return {"message": "Password updated"}
 
