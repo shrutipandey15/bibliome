@@ -18,6 +18,7 @@ from app.schemas.echo import (
     EchoResponse,
     EchoThreadResponse,
     FeedResponse,
+    ReactionResponse,
     ReactionUpdate,
     ReplyCreate,
     ReplyResponse,
@@ -25,7 +26,10 @@ from app.schemas.echo import (
 )
 from app.services.echo_service import (
     EchoError,
+    FeedAnnotations,
     _book_key,
+    add_book_to_shelf,
+    annotate_feed,
     create_echo,
     create_reply,
     get_visible_echo,
@@ -33,6 +37,7 @@ from app.services.echo_service import (
     list_replies,
     reaction_counts,
     set_reaction,
+    viewer_reactions,
 )
 from app.services.moderation import CRISIS_RESOURCES, VERDICT_CRISIS, submit_report
 from app.models.notification import TIER_DIRECT
@@ -41,6 +46,9 @@ from app.services.notification_service import notify
 router = APIRouter(prefix="/echoes", tags=["echo"])
 
 echo_write_limiter = RateLimiter(max_requests=20, window_seconds=300, prefix="echo_write")
+# Reaction spam is cheap; throttle it (B6.2). Higher ceiling than writes — tapping
+# marginalia is a normal reading gesture, not authoring.
+react_limiter = RateLimiter(max_requests=120, window_seconds=300, prefix="echo_react")
 
 # New-account cool-down (B3.9): young accounts with few logged books post at a
 # reduced rate — kills throwaway spam without blocking genuine new readers.
@@ -49,7 +57,32 @@ NEW_ACCOUNT_MIN_BOOKS = 3
 NEW_ACCOUNT_ECHO_CAP = 3
 
 
-def _echo_resp(echo: Echo, handle: str) -> EchoResponse:
+def _reply_resp(reply: EchoReply) -> ReplyResponse:
+    return ReplyResponse(
+        id=reply.id, echo_id=reply.echo_id, handle=reply.author.handle,
+        body=reply.body, created_at=reply.created_at,
+    )
+
+
+def _echo_resp(
+    echo: Echo,
+    handle: str,
+    ann: FeedAnnotations | None = None,
+    viewer_id: uuid.UUID | None = None,
+) -> EchoResponse:
+    """Build an echo card. When `ann` is supplied (feed path), the viewer-relative
+    render state is stitched in from the batch-loaded page annotations."""
+    my_reactions: list[str] = []
+    replies_preview: list[ReplyResponse] = []
+    has_more = False
+    counts = None
+    if ann is not None:
+        my_reactions = ann.my_reactions.get(echo.id, [])
+        replies_preview = [_reply_resp(r) for r in ann.replies_for(echo.id)]
+        has_more = ann.has_more.get(echo.id, False)
+        # Private witness signal: only the author ever receives counts.
+        if viewer_id is not None and echo.author_id == viewer_id:
+            counts = ann.counts.get(echo.id, {})
     return EchoResponse(
         id=echo.id,
         handle=handle,
@@ -61,6 +94,11 @@ def _echo_resp(echo: Echo, handle: str) -> EchoResponse:
         visibility=echo.visibility,
         created_at=echo.created_at,
         edited_at=echo.edited_at,
+        prompt_id=echo.prompt_id,
+        my_reactions=my_reactions,
+        replies_preview=replies_preview,
+        has_more_replies=has_more,
+        reaction_counts=counts,
     )
 
 
@@ -106,6 +144,7 @@ async def post_echo(
             primary_emotion=data.primary_emotion,
             secondary_emotion=data.secondary_emotion,
             visibility=data.visibility,
+            prompt_id=data.prompt_id,
         )
     except EchoError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
@@ -125,20 +164,24 @@ async def get_feed(
     book_title: str | None = Query(default=None, max_length=300),
     book_author: str | None = Query(default=None, max_length=200),
     emotion: str | None = Query(default=None, max_length=30),
+    prompt_id: uuid.UUID | None = Query(default=None),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """Chronological, block-filtered feed that ends. No counts. Optional anchors:
-    a book (title[+author]) for the 'A Book' feed, or an emotion for 'A Feeling'."""
+    a book (title[+author]) for the 'A Book' feed, an emotion for 'A Feeling', or a
+    prompt_id for the answers to one weekly Prompt (the campfire)."""
     book_key = _book_key(book_title, book_author) if book_title else None
     try:
         echoes, next_cursor = await list_feed(
-            db, current_user.id, limit=limit, cursor=cursor, book_key=book_key, emotion=emotion,
+            db, current_user.id, limit=limit, cursor=cursor,
+            book_key=book_key, emotion=emotion, prompt_id=prompt_id,
         )
     except EchoError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    ann = await annotate_feed(db, echoes, current_user.id)
     return FeedResponse(
-        echoes=[_echo_resp(e, e.author.handle) for e in echoes],
+        echoes=[_echo_resp(e, e.author.handle, ann, current_user.id) for e in echoes],
         next_cursor=next_cursor,
         caught_up=next_cursor is None,
     )
@@ -157,7 +200,7 @@ async def get_echo_thread(
     replies = await list_replies(db, echo_id, current_user.id)
     return EchoThreadResponse(
         echo=_echo_resp(echo, echo.author.handle),
-        replies=[ReplyResponse(id=r.id, echo_id=r.echo_id, handle=r.author.handle, body=r.body, created_at=r.created_at) for r in replies],
+        replies=[_reply_resp(r) for r in replies],
     )
 
 
@@ -215,14 +258,21 @@ async def post_reply(
     )
 
 
-@router.post("/{echo_id}/react", status_code=status.HTTP_204_NO_CONTENT)
+@router.post("/{echo_id}/react", response_model=ReactionResponse)
 async def react_to_echo(
     echo_id: uuid.UUID,
     data: ReactionUpdate,
+    request: Request,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Set/unset a private reaction. Counts are never returned here."""
+    """Set/unset a private reaction and echo back the new state (B6.2).
+
+    Returns the viewer's `my_reactions`; the author additionally gets the private
+    `reaction_counts`. `adding_to_list = on` also adds the book to the viewer's
+    shelf (B6.3) and reports `added_to_shelf`. Public counts are never returned.
+    """
+    await react_limiter.check(request)
     echo = await get_visible_echo(db, echo_id, current_user.id)
     if echo is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Echo not found")
@@ -230,6 +280,16 @@ async def react_to_echo(
         await set_reaction(db, echo_id, current_user.id, data.kind, data.on)
     except EchoError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+    # "To my shelf" performs a real act of reading life. Deliberately asymmetric:
+    # turning it ON may create a want_to_read entry; turning it OFF never deletes it.
+    added_to_shelf = False
+    if data.kind == "adding_to_list" and data.on:
+        added_to_shelf = await add_book_to_shelf(db, current_user.id, echo)
+
+    mine = await viewer_reactions(db, echo_id, current_user.id)
+    counts = await reaction_counts(db, echo_id) if echo.author_id == current_user.id else None
+    return ReactionResponse(my_reactions=mine, reaction_counts=counts, added_to_shelf=added_to_shelf)
 
 
 @router.get("/{echo_id}/reactions")
