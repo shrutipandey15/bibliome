@@ -35,7 +35,6 @@ class BookEntry(Base):
         Integer, default=5
     )
     quote: Mapped[str | None] = mapped_column(Text)
-    public_echo: Mapped[str | None] = mapped_column(Text)
     notes: Mapped[str | None] = mapped_column(Text)
     started_at: Mapped[date | None] = mapped_column(Date)
     finished_at: Mapped[date | None] = mapped_column(Date)

@@ -25,21 +25,22 @@ async def test_new_account_defaults_to_private(client):
     assert r.json()["is_public"] is False
 
 
-async def test_private_profile_card_is_forbidden(client):
+async def test_old_username_card_endpoint_is_gone(client):
+    # The username-based public card was removed in Phase 5 (B5.1). Public
+    # profiles are now viewed via /profile/{handle}; the old surface is dead.
     await _register_login(client, "p2@example.com", "privcard")
     r = await client.get("/api/public/card/privcard")
-    assert r.status_code == 403
+    assert r.status_code == 404
 
 
-async def test_setting_public_exposes_card(client):
+async def test_setting_public_updates_visibility(client):
     headers = await _register_login(client, "pub@example.com", "pubcard")
     r = await client.patch("/api/user/settings", json={"profile_visibility": "public"}, headers=headers)
     assert r.status_code == 200
     assert r.json()["profile_visibility"] == "public"
     assert r.json()["is_public"] is True
-    # Now the crawler card is reachable (200, not 403).
-    r = await client.get("/api/public/card/pubcard")
-    assert r.status_code == 200
+    # The old username-based public card no longer exists.
+    assert (await client.get("/api/public/card/pubcard")).status_code == 404
 
 
 async def test_invalid_visibility_rejected(client):
@@ -57,7 +58,7 @@ async def test_share_link_grants_access_then_revoke_kills_it(client):
 
     r = await client.get(f"/api/public/shared/{token}")
     assert r.status_code == 200
-    assert r.json()["username"] == "sharer"
+    assert r.json()["handle"] == "sharer"
 
     # ...until revoked.
     r = await client.delete("/api/user/share-token", headers=headers)

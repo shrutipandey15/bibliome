@@ -12,8 +12,7 @@ from fastapi import (
     UploadFile,
     status,
 )
-from fastapi.responses import Response
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db, async_session
@@ -21,7 +20,7 @@ from app.middleware.auth import get_current_user
 from app.middleware.rate_limit import RateLimiter
 
 entries_limiter = RateLimiter(max_requests=60, window_seconds=60, prefix="entries")
-from app.models.book_entry import BookEntry, EntryEmotion
+from app.models.book_entry import BookEntry
 from app.models.user import User
 from app.schemas.entry import (
     EntryCreate,
@@ -31,13 +30,12 @@ from app.schemas.entry import (
     EntryUpdate,
     EmotionOut,
     ImportResponse,
+    ShelfPositionUpdate,
 )
 from app.services.import_service import MAX_IMPORT_BYTES, import_entries, parse_import_csv
 from app.schemas.arc import ArcCardResponse
 from app.schemas.checkin import CheckinCreate, CheckinResponse, StatusUpdate
-from app.schemas.room import ShelfPositionUpdate
 from app.services.arc_card_service import get_arc_card
-from app.services.og_image import generate_arc_card_image
 from app.services.entry_service import (
     InvalidCursor,
     create_entry,
@@ -55,8 +53,7 @@ from app.services.checkin_service import (
 )
 from app.services.background import recalculate_dna
 from app.services.book_search import bump_popularity
-from app.services.room_decorations import compute_unlocks
-from app.utils.emotions import VALID_SLUGS, TWO_AM_SLUGS
+from app.utils.emotions import VALID_SLUGS
 
 logger = logging.getLogger("bookdna.entries")
 
@@ -157,48 +154,11 @@ async def create_new_entry(
     current_user.dna_dirty = True
     await db.flush()
 
-    # Piggyback: check for new room decoration unlocks
-    room_unlocks_new = []
-    if current_user.room_unlocks is not None:
-        old_set = set(current_user.room_unlocks)
-        r = await db.execute(
-            select(func.count(BookEntry.id)).where(BookEntry.user_id == current_user.id)
-        )
-        entry_count = r.scalar() or 0
-
-        has_i10 = data.intensity == 10
-        has_2am = any(e.emotion_id in TWO_AM_SLUGS for e in data.emotions)
-
-        if not has_i10:
-            r2 = await db.execute(
-                select(func.count(BookEntry.id)).where(
-                    BookEntry.user_id == current_user.id, BookEntry.intensity == 10
-                )
-            )
-            has_i10 = (r2.scalar() or 0) > 0
-        if not has_2am:
-            r3 = await db.execute(
-                select(func.count(EntryEmotion.id))
-                .join(BookEntry, EntryEmotion.entry_id == BookEntry.id)
-                .where(BookEntry.user_id == current_user.id, EntryEmotion.emotion_id.in_(TWO_AM_SLUGS))
-            )
-            has_2am = (r3.scalar() or 0) > 0
-
-        updated = compute_unlocks(current_user, entry_count, has_i10, has_2am)
-        # Union, never replace: recomputes here don't know has_share_token and must
-        # not drop an already-earned unlock (e.g. mini_dna_frame).
-        merged = old_set | set(updated)
-        room_unlocks_new = sorted(merged - old_set)
-        if room_unlocks_new:
-            current_user.room_unlocks = sorted(merged)
-
     # Background (post-commit, once get_db has committed this request's transaction):
     # feed the catalog and refresh DNA caches from the now-durable entry.
     background_tasks.add_task(_feed_catalog, entry.title, entry.author, entry.cover_url, entry.isbn)
     background_tasks.add_task(recalculate_dna, current_user.id)
-    response = _entry_to_response(entry)
-    response.room_unlocks_new = room_unlocks_new
-    return response
+    return _entry_to_response(entry)
 
 
 @router.post("/import", response_model=ImportResponse)
@@ -303,27 +263,8 @@ async def get_entry_arc_card(
     return card
 
 
-@router.get("/{entry_id}/arc-card/og")
-async def get_entry_arc_card_og(
-    entry_id: uuid.UUID,
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    """Render the arc card as a 1200x630 PNG for sharing."""
-    card = await get_arc_card(db, entry_id, current_user.id)
-    if card is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Entry not found")
-
-    png = generate_arc_card_image(
-        title=card.title,
-        author=card.author,
-        dna_type=card.dna_type,
-        arc=[b.model_dump() for b in card.arc],
-        intensity=card.intensity,
-        thought=card.thought,
-        username=current_user.username,
-    )
-    return Response(content=png, media_type="image/png")
+# REMOVED (Phase 5 B5.7): GET /{entry_id}/arc-card/og. The only OG image the
+# frontend uses is the share-token DNA card. The arc-card *data* endpoint stays.
 
 
 @router.post("/{entry_id}/finish", response_model=EntryResponse)

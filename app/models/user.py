@@ -45,10 +45,6 @@ class User(Base):
     dna_dirty: Mapped[bool] = mapped_column(Boolean, default=True)
     cached_dna_profile: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
-    # Reading Room
-    room_layout: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
-    room_unlocks: Mapped[list | None] = mapped_column(JSONB, nullable=True)
-
     # Mirror insight cache
     cached_insight: Mapped[str | None] = mapped_column(Text, nullable=True)
     cached_insight_week: Mapped[str | None] = mapped_column(String(10), nullable=True)

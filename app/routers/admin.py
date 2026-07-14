@@ -20,6 +20,7 @@ from app.models.audit_log import AuditLog
 from app.models.book import Book
 from app.models.book_entry import BookEntry
 from app.models.dna_snapshot import DNASnapshot
+from app.models.echo import Echo
 from app.models.refresh_token import RefreshToken
 from app.models.user import User
 
@@ -96,7 +97,7 @@ async def dashboard(
     total_users = (await db.execute(select(func.count(User.id)))).scalar_one()
     total_entries = (await db.execute(select(func.count(BookEntry.id)))).scalar_one()
     total_echoes = (await db.execute(
-        select(func.count(BookEntry.id)).where(BookEntry.public_echo.isnot(None))
+        select(func.count(Echo.id))
     )).scalar_one()
     total_dna = (await db.execute(select(func.count(DNASnapshot.id)))).scalar_one()
     users_7d = (await db.execute(
@@ -215,7 +216,6 @@ async def get_user_detail(
                 "author": e.author,
                 "intensity": e.intensity,
                 "emotions": [em.emotion_id for em in e.emotions],
-                "public_echo": e.public_echo,
                 "created_at": e.created_at.isoformat(),
             }
             for e in entries

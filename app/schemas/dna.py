@@ -80,7 +80,6 @@ class DNASnapshotResponse(BaseModel):
 class DNAGenerateResponse(BaseModel):
     snapshot: DNASnapshotResponse
     personality: PersonalityInfo
-    room_unlocks_new: list[str] = Field(default_factory=list)
 
 
 class StatsResponse(BaseModel):
@@ -89,6 +88,8 @@ class StatsResponse(BaseModel):
     highest_intensity_book: dict | None
     most_common_emotion: str | None
     most_common_emotion_count: int
+    # Books tagged with each canonical emotion — the full Stats ledger (B5.3).
+    emotion_counts: dict[str, int] = {}
     emotion_diversity: float
     unique_emotions_used: int
     total_emotions_possible: int
