@@ -77,12 +77,3 @@ async def revoke_share_tokens(db: AsyncSession, user_id) -> int:
         st.revoked = True
     await db.flush()
     return len(tokens)
-
-
-async def user_has_share_token(db: AsyncSession, user_id) -> bool:
-    """Whether the user has ever created a share token (for the room unlock)."""
-    from sqlalchemy import func
-    result = await db.execute(
-        select(func.count(ShareToken.id)).where(ShareToken.user_id == user_id)
-    )
-    return (result.scalar() or 0) > 0

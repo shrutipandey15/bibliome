@@ -10,6 +10,7 @@ from app.models.echo import Echo, EchoReply, EchoReaction
 from app.models.social import Block, Mute, Report, HandleHistory
 from app.models.notification import Notification, NotificationPrefs, NotificationDigest
 from app.models.collection import Collection, CollectionItem
+from app.models.prompt import Prompt
 
 __all__ = [
     "User",
@@ -33,4 +34,5 @@ __all__ = [
     "NotificationDigest",
     "Collection",
     "CollectionItem",
+    "Prompt",
 ]

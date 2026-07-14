@@ -26,6 +26,7 @@ from app.schemas.dna import (
     StatsResponse,
 )
 from app.services.blind_spots_service import get_blind_spots
+from app.services.dna_service import compute_and_cache
 from app.services.calendar_service import get_emotional_calendar
 from app.services.dna_engine import (
     build_heatmap_data,
@@ -34,9 +35,7 @@ from app.services.dna_engine import (
     generate_recap,
     generate_stats,
 )
-from app.services.room_decorations import compute_unlocks
 from app.utils.cache import dna_cache, invalidate_dna
-from app.utils.emotions import TWO_AM_SLUGS
 
 router = APIRouter(prefix="/dna", tags=["dna"])
 
@@ -65,30 +64,20 @@ async def _get_user_entries(db: AsyncSession, user_id) -> list[dict]:
     ]
 
 
-@router.get("/profile", response_model=DNAProfileResponse)
+@router.get("/profile")
 async def get_dna_profile(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    """The owner's DNA mirror (Phase 7): a demoted archetype, the strongest few
+    falsifiable insights, the honestly-locked rest, and both recency profiles.
+
+    Below 5 books it returns an honest "not enough yet". Served from cache while
+    `dna_dirty` is false; recomputed once per change, not per request (Part 4).
     """
-    Get the current DNA profile. Uses cached result if entries haven't changed.
-    Recalculates and caches when dna_dirty is True.
-    """
-    # Serve from cache if clean
-    if not current_user.dna_dirty and current_user.cached_dna_profile:
-        return current_user.cached_dna_profile
-
-    # Recalculate
-    entries = await _get_user_entries(db, current_user.id)
-    result = calculate_personality(entries)
-    result["book_count"] = len(entries)
-
-    # Cache it
-    current_user.cached_dna_profile = result
-    current_user.dna_dirty = False
-    await db.flush()
-
-    return result
+    if not current_user.dna_dirty and current_user.cached_dna_v2:
+        return current_user.cached_dna_v2
+    return await compute_and_cache(db, current_user)
 
 
 @router.post("/generate", response_model=DNAGenerateResponse)
@@ -139,39 +128,11 @@ async def generate_dna(
     )
     db.add(snapshot)
 
-    # Update user's cached personality type and DNA cache
-    current_user.personality_type = personality["name"]
-    current_user.cached_dna_profile = result
-    current_user.cached_dna_profile["book_count"] = len(entries)
-    current_user.dna_dirty = False
-
+    # Refresh both caches (public signature + private Phase-7 payload) consistently.
     await db.flush()
+    await compute_and_cache(db, current_user)
 
     await invalidate_dna(current_user.id)
-
-    # Piggyback: check for new room decoration unlocks (glyph_figurine unlocks on first DNA gen)
-    room_unlocks_new = []
-    if current_user.room_unlocks is not None:
-        old_set = set(current_user.room_unlocks)
-        from sqlalchemy import func, select
-        from app.models.book_entry import BookEntry, EntryEmotion
-        r_i10 = await db.execute(
-            select(func.count(BookEntry.id)).where(
-                BookEntry.user_id == current_user.id, BookEntry.intensity == 10
-            )
-        )
-        has_i10 = (r_i10.scalar() or 0) > 0
-        r_2am = await db.execute(
-            select(func.count(EntryEmotion.id))
-            .join(BookEntry, EntryEmotion.entry_id == BookEntry.id)
-            .where(BookEntry.user_id == current_user.id, EntryEmotion.emotion_id.in_(TWO_AM_SLUGS))
-        )
-        has_2am = (r_2am.scalar() or 0) > 0
-        updated = compute_unlocks(current_user, len(entries), has_i10, has_2am)
-        merged = old_set | set(updated)
-        room_unlocks_new = sorted(merged - old_set)
-        if room_unlocks_new:
-            current_user.room_unlocks = sorted(merged)
 
     return DNAGenerateResponse(
         snapshot=DNASnapshotResponse(
@@ -183,7 +144,6 @@ async def generate_dna(
             generated_at=snapshot.generated_at or now,
         ),
         personality=PersonalityInfo(**personality),
-        room_unlocks_new=room_unlocks_new,
     )
 
 
@@ -229,6 +189,66 @@ async def get_stats(
     result = generate_stats(entries)
     await dna_cache.set(cache_key, result)
     return result
+
+
+@router.get("/patterns")
+async def get_patterns(
+    request: Request,
+    user_id: uuid.UUID = Depends(get_current_user_id),
+):
+    """Stats + heatmap in one response (B5.4), backing the merged 'Patterns' view
+    so it's one round trip. Reuses the same cache keys as /stats and /heatmap."""
+    await dna_read_limiter.check(request)
+    stats = await dna_cache.get(f"stats:{user_id}")
+    heatmap = await dna_cache.get(f"heatmap:{user_id}")
+
+    if stats is None or heatmap is None:
+        async with async_session() as db:
+            entries = await _get_user_entries(db, user_id)
+        if stats is None:
+            stats = generate_stats(entries)
+            await dna_cache.set(f"stats:{user_id}", stats)
+        if heatmap is None:
+            heatmap = build_heatmap_data(entries)
+            await dna_cache.set(f"heatmap:{user_id}", heatmap)
+
+    return {"stats": stats, "heatmap": heatmap}
+
+
+@router.get("/evolution")
+async def get_dna_evolution(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """The evolution timeline (B7.4): one point per snapshot, oldest first. Powers
+    the "watch your DNA change" screen. O(read snapshots) — the past is never
+    recomputed."""
+    snaps = (await db.execute(
+        select(DNASnapshot)
+        .where(DNASnapshot.user_id == current_user.id)
+        .order_by(DNASnapshot.generated_at.asc())
+    )).scalars().all()
+
+    points = []
+    for s in snaps:
+        data = s.emotion_data or {}
+        vec = data.get("current_vector")
+        if vec:
+            top = [slug for slug, _ in sorted(vec.items(), key=lambda kv: kv[1], reverse=True)[:3]
+                   if _ > 0]
+        else:  # legacy snapshot shape
+            top = [t.get("emotion_id") for t in (data.get("top_emotions") or [])[:3]]
+        points.append({
+            "id": str(s.id),
+            "date": s.generated_at,
+            "archetype": s.personality_type,
+            "dna_type_slug": s.dna_type_slug,
+            "book_count": s.book_count,
+            "top_emotions": top,
+            "drift_from_prev": data.get("drift"),
+            "trigger": s.trigger,
+        })
+    return points
 
 
 @router.get("/history", response_model=list[DNASnapshotResponse])
