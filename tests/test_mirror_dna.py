@@ -29,12 +29,13 @@ async def test_dna_and_mirror_surfaces_return(client):
     headers = await _auth(client)
     await _seed(client, headers)
 
-    # DNA signature (fixed engine)
+    # DNA profile (Phase-7 payload)
     r = await client.get("/api/dna/profile", headers=headers)
     assert r.status_code == 200
     prof = r.json()
+    assert prof["enough"] is True
     assert prof["book_count"] == 6
-    assert set(prof["emotion_frequency"]).issubset({
+    assert set(prof["profiles"]["enduring"]).issubset({
         "grief", "desire", "rage", "dread", "comfort", "awe", "catharsis",
         "two_am", "chaos", "tenderness", "wit", "longing", "devastation",
     })

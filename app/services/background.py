@@ -12,13 +12,10 @@ import logging
 import uuid
 
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
 
 from app.database import async_session
-from app.models.book_entry import BookEntry
 from app.models.user import User
-from app.services.dna_engine import calculate_personality
+from app.services.dna_service import compute_and_cache, maybe_snapshot_and_notify
 
 logger = logging.getLogger("bookdna.background")
 
@@ -39,53 +36,21 @@ async def recalculate_dna(user_id: uuid.UUID) -> None:
     try:
         async with async_session() as db:
             async with db.begin():
-                # Fetch user
-                user_result = await db.execute(
+                user = (await db.execute(
                     select(User).where(User.id == user_id)
-                )
-                user = user_result.scalar_one_or_none()
+                )).scalar_one_or_none()
                 if not user:
                     return
 
-                # Fetch entries
-                entries_result = await db.execute(
-                    select(BookEntry)
-                    .options(selectinload(BookEntry.emotions))
-                    .where(BookEntry.user_id == user_id)
-                    .order_by(BookEntry.created_at.asc())
-                )
-                entries = entries_result.scalars().all()
-
-                entry_dicts = [
-                    {
-                        "id": str(e.id),
-                        "title": e.title,
-                        "author": e.author,
-                        "intensity": e.intensity,
-                        "emotions": [em.emotion_id for em in e.emotions],
-                        "created_at": e.created_at,
-                        "finished_at": e.finished_at,
-                    }
-                    for e in entries
-                ]
-
-                # Calculate
-                result = calculate_personality(entry_dicts)
-                result["book_count"] = len(entry_dicts)
-
-                # Cache
-                user.cached_dna_profile = result
-                user.dna_dirty = False
-
-                user.personality_type = (
-                    result["personality"]["name"] if result.get("personality") else None
-                )
+                # Recompute both payloads (private Phase-7 + public signature) and
+                # capture a snapshot if the reader has moved far enough (B7.4).
+                v2 = await compute_and_cache(db, user)
+                await maybe_snapshot_and_notify(db, user)
 
                 logger.debug(
                     "Recalculated DNA for user %s (%d books)",
-                    user.username, len(entry_dicts),
+                    user.username, v2.get("book_count", 0),
                 )
-
 
         from app.utils.cache import invalidate_dna
         await invalidate_dna(user_id)

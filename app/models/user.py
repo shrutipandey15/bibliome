@@ -45,6 +45,15 @@ class User(Base):
     dna_dirty: Mapped[bool] = mapped_column(Boolean, default=True)
     cached_dna_profile: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
+    # Stated preference (B7.1): 1–2 canonical emotion slugs — "what do you read for?"
+    # The *stated* half of the stated-vs-revealed insight; the shelf is the revealed half.
+    reads_for: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+
+    # The Phase-7 DNA payload (recency profiles + private insights). Kept SEPARATE
+    # from cached_dna_profile because that one is reused as the *public* profile
+    # signature — the insights here (abandonment, contradiction) are owner-only.
+    cached_dna_v2: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+
     # Mirror insight cache
     cached_insight: Mapped[str | None] = mapped_column(Text, nullable=True)
     cached_insight_week: Mapped[str | None] = mapped_column(String(10), nullable=True)

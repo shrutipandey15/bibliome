@@ -16,6 +16,7 @@ from app.services.handle_service import HandleError, change_handle
 from app.services.notification_service import notify
 from app.services.visibility import create_share_token, revoke_share_tokens
 from app.utils.cookies import clear_refresh_cookie
+from app.utils.emotions import canonicalize
 
 router = APIRouter(prefix="/user", tags=["user"])
 
@@ -26,6 +27,7 @@ def _settings_response(user: User) -> UserSettingsResponse:
         profile_visibility=user.profile_visibility,
         is_public=user.is_public,
         personality_type=user.personality_type,
+        reads_for=user.reads_for,
         username=user.username,
         email=user.email,
     )
@@ -43,8 +45,25 @@ async def update_settings(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Update user settings (display name, profile visibility)."""
+    """Update user settings (display name, profile visibility, stated preference)."""
     update_data = data.model_dump(exclude_unset=True)
+
+    # Stated preference (B7.1) needs validation + it changes the contradiction
+    # insight, so it dirties the DNA cache.
+    if "reads_for" in update_data:
+        raw = update_data.pop("reads_for")
+        if raw is None or raw == []:
+            current_user.reads_for = None
+        else:
+            canon = [canonicalize(s) for s in raw]
+            if any(c is None for c in canon):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="reads_for must be 1–2 canonical emotion slugs.",
+                )
+            current_user.reads_for = canon
+        current_user.dna_dirty = True
+
     for field, value in update_data.items():
         if hasattr(current_user, field):
             setattr(current_user, field, value)
