@@ -6,17 +6,23 @@ canonical emotion — there is no freeform posting.
 """
 
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 
-from sqlalchemy import and_, or_, select, tuple_
+from sqlalchemy import and_, func, or_, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.models.book_entry import BookEntry
 from app.models.echo import Echo, EchoReaction, EchoReply
+from app.models.prompt import Prompt
+from app.models.user import User
 from app.services.book_search import normalize
 from app.services.moderation import VERDICT_CRISIS, VERDICT_HOLD, classify_text
 from app.services.social_service import hidden_author_ids, is_blocked_between
 from app.utils.emotions import canonicalize
+
+# How many replies the feed renders inline under each echo (blueprint: shown, not counted).
+REPLY_PREVIEW_LIMIT = 2
 
 
 class EchoError(ValueError):
@@ -50,6 +56,7 @@ async def create_echo(
     primary_emotion: str | None,
     secondary_emotion: str | None,
     visibility: str,
+    prompt_id: uuid.UUID | None = None,
 ) -> tuple[Echo, str, str | None]:
     """Create an echo. Returns (echo, verdict, reason).
 
@@ -74,6 +81,11 @@ async def create_echo(
     if not title and not prim:
         raise EchoError("An echo must be anchored to a book and/or an emotion")
 
+    if prompt_id is not None:
+        exists = (await db.execute(select(Prompt.id).where(Prompt.id == prompt_id))).scalar_one_or_none()
+        if exists is None:
+            raise EchoError("Unknown prompt")
+
     verdict, reason = classify_text(body)
     status = "held" if verdict in (VERDICT_HOLD, VERDICT_CRISIS) else "active"
 
@@ -84,6 +96,7 @@ async def create_echo(
         book_author=(book_author or "").strip() or None,
         primary_emotion=prim,
         secondary_emotion=sec,
+        prompt_id=prompt_id,
         body=body,
         visibility=visibility,
         status=status,
@@ -107,11 +120,13 @@ async def list_feed(
     cursor: str | None = None,
     book_key: str | None = None,
     emotion: str | None = None,
+    prompt_id: uuid.UUID | None = None,
 ) -> tuple[list[Echo], str | None]:
     """Chronological, keyset-paginated, block-filtered feed. No counts anywhere.
 
-    Optional anchors: `book_key` (the "A Book" feed) or `emotion` (the "A Feeling"
-    feed). Returns (echoes, next_cursor); next_cursor is None at the end ("caught up").
+    Optional anchors: `book_key` (the "A Book" feed), `emotion` (the "A Feeling"
+    feed), or `prompt_id` (answers to one weekly Prompt — the campfire). Returns
+    (echoes, next_cursor); next_cursor is None at the end ("caught up").
     """
     hidden = await hidden_author_ids(db, viewer_id)
 
@@ -130,6 +145,8 @@ async def list_feed(
         query = query.where(
             or_(Echo.primary_emotion == canon, Echo.secondary_emotion == canon)
         )
+    if prompt_id:
+        query = query.where(Echo.prompt_id == prompt_id)
     if cursor:
         cts, cid = _decode_cursor(cursor)
         query = query.where(tuple_(Echo.created_at, Echo.id) < (cts, cid))
@@ -213,10 +230,145 @@ async def set_reaction(db: AsyncSession, echo_id: uuid.UUID, user_id: uuid.UUID,
 
 async def reaction_counts(db: AsyncSession, echo_id: uuid.UUID) -> dict[str, int]:
     """Private aggregate — only ever exposed to the echo's author."""
-    from sqlalchemy import func
     result = await db.execute(
         select(EchoReaction.kind, func.count(EchoReaction.id))
         .where(EchoReaction.echo_id == echo_id)
         .group_by(EchoReaction.kind)
     )
     return {kind: n for kind, n in result.all()}
+
+
+async def viewer_reactions(db: AsyncSession, echo_id: uuid.UUID, user_id: uuid.UUID) -> list[str]:
+    """Which reaction kinds this viewer currently has set on one echo."""
+    result = await db.execute(
+        select(EchoReaction.kind).where(
+            EchoReaction.echo_id == echo_id, EchoReaction.user_id == user_id
+        )
+    )
+    return list(result.scalars().all())
+
+
+class FeedAnnotations:
+    """Per-echo render state for a whole feed page, loaded in a constant number of
+    queries regardless of page size (B6.1). Naive per-item loading is the classic
+    N+1 on the one fan-out surface in the product — so everything here is batched
+    by echo id and stitched in Python."""
+
+    def __init__(self) -> None:
+        self.replies: dict[uuid.UUID, list[EchoReply]] = {}
+        self.has_more: dict[uuid.UUID, bool] = {}
+        self.my_reactions: dict[uuid.UUID, list[str]] = {}
+        self.counts: dict[uuid.UUID, dict[str, int]] = {}  # author's own echoes only
+
+    def replies_for(self, echo_id: uuid.UUID) -> list[EchoReply]:
+        return self.replies.get(echo_id, [])[:REPLY_PREVIEW_LIMIT]
+
+
+async def annotate_feed(
+    db: AsyncSession, echoes: list[Echo], viewer_id: uuid.UUID | None
+) -> FeedAnnotations:
+    """Batch-load reply previews + the viewer's reaction state for a page of echoes.
+
+    Query budget (constant in page size):
+      1. reply previews (top REPLY_PREVIEW_LIMIT+1 per echo, block-filtered)
+      2. the viewer's own reaction rows across the page
+      3. private reaction_counts — ONLY for echoes the viewer authored (skipped if none)
+    """
+    ann = FeedAnnotations()
+    ids = [e.id for e in echoes]
+    if not ids:
+        return ann
+
+    # 1) Reply previews. A window function caps rows at PREVIEW_LIMIT+1 per echo so a
+    # popular echo can't drag the whole page; the +1 tells us `has_more` without a count.
+    # Block/mute filtering must survive the optimization (B6.4).
+    hidden = await hidden_author_ids(db, viewer_id)
+    rn = func.row_number().over(
+        partition_by=EchoReply.echo_id,
+        order_by=(EchoReply.created_at.asc(), EchoReply.id.asc()),
+    ).label("rn")
+    ranked = (
+        select(EchoReply.id.label("rid"), rn)
+        .where(EchoReply.echo_id.in_(ids), EchoReply.status == "active")
+    )
+    if hidden:
+        ranked = ranked.where(EchoReply.author_id.notin_(hidden))
+    ranked = ranked.subquery()
+
+    reply_q = (
+        select(EchoReply)
+        .options(selectinload(EchoReply.author))
+        .join(ranked, ranked.c.rid == EchoReply.id)
+        .where(ranked.c.rn <= REPLY_PREVIEW_LIMIT + 1)
+        .order_by(EchoReply.echo_id, EchoReply.created_at.asc(), EchoReply.id.asc())
+    )
+    for reply in (await db.execute(reply_q)).scalars().all():
+        bucket = ann.replies.setdefault(reply.echo_id, [])
+        if len(bucket) < REPLY_PREVIEW_LIMIT:
+            bucket.append(reply)
+        else:
+            ann.has_more[reply.echo_id] = True  # the PREVIEW_LIMIT+1'th row
+
+    # 2) The viewer's own reactions across the page (drives pressed-state).
+    if viewer_id is not None:
+        rows = await db.execute(
+            select(EchoReaction.echo_id, EchoReaction.kind).where(
+                EchoReaction.echo_id.in_(ids), EchoReaction.user_id == viewer_id
+            )
+        )
+        for eid, kind in rows.all():
+            ann.my_reactions.setdefault(eid, []).append(kind)
+
+    # 3) Private counts — only for echoes the viewer authored (the witness payoff).
+    own = [e.id for e in echoes if viewer_id is not None and e.author_id == viewer_id]
+    if own:
+        rows = await db.execute(
+            select(EchoReaction.echo_id, EchoReaction.kind, func.count(EchoReaction.id))
+            .where(EchoReaction.echo_id.in_(own))
+            .group_by(EchoReaction.echo_id, EchoReaction.kind)
+        )
+        for eid, kind, n in rows.all():
+            ann.counts.setdefault(eid, {})[kind] = n
+
+    return ann
+
+
+async def add_book_to_shelf(db: AsyncSession, user_id: uuid.UUID, echo: Echo) -> bool:
+    """'To my shelf' made real (B6.3): add the echo's book to the reader's own shelf
+    as `want_to_read`. Idempotent — reacting twice never creates a duplicate. Returns
+    True only when a new entry was created (so the UI can confirm). Emotion-only echoes
+    (no book anchor) add nothing.
+    """
+    if not echo.book_title:
+        return False
+    t_norm = normalize(echo.book_title)
+    a_norm = normalize(echo.book_author or "")
+
+    existing = (await db.execute(
+        select(BookEntry).where(BookEntry.user_id == user_id)
+    )).scalars().all()
+    for e in existing:
+        if normalize(e.title) == t_norm and normalize(e.author or "") == a_norm:
+            return False  # already on their shelf — don't touch its status
+
+    db.add(BookEntry(
+        user_id=user_id,
+        title=echo.book_title,
+        author=echo.book_author,
+        status="want_to_read",
+    ))
+    await db.flush()
+    return True
+
+
+async def current_prompt(db: AsyncSession) -> Prompt | None:
+    """The weekly Prompt whose window contains now (B6.5). None if none is live.
+    Most-recently-started wins if windows ever overlap."""
+    now = datetime.now(timezone.utc)
+    result = await db.execute(
+        select(Prompt)
+        .where(Prompt.starts_at <= now, Prompt.ends_at > now)
+        .order_by(Prompt.starts_at.desc())
+        .limit(1)
+    )
+    return result.scalar_one_or_none()

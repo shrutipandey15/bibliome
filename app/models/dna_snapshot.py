@@ -26,6 +26,10 @@ class DNASnapshot(Base):
     emotion_data: Mapped[dict] = mapped_column(JSONB, nullable=False)
     book_count: Mapped[int] = mapped_column(Integer, nullable=False)
     year: Mapped[int | None] = mapped_column(Integer)
+    # How this snapshot came to exist: manual (/dna/generate), drift (auto — the
+    # profile moved far enough), or cadence (monthly heartbeat). Lets the evolution
+    # timeline distinguish a real shift from a user-forced capture (B7.4).
+    trigger: Mapped[str | None] = mapped_column(String(20))
     generated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

@@ -11,10 +11,14 @@ pytestmark = pytest.mark.asyncio
 REG = {"email": "reader@example.com", "username": "reader", "password": "hunter2pass"}
 
 # chaos + awe + rage → the midnight_arsonist fingerprint (see test_dna_engine).
+# Six books clears the 5-book DNA floor (B7.6).
 BOOKS = [
     {"title": "Blood Meridian", "emotions": [{"emotion_id": "chaos"}, {"emotion_id": "rage"}]},
     {"title": "House of Leaves", "emotions": [{"emotion_id": "chaos"}, {"emotion_id": "awe"}]},
     {"title": "The Road", "emotions": [{"emotion_id": "awe"}, {"emotion_id": "rage"}]},
+    {"title": "Blindsight", "emotions": [{"emotion_id": "chaos"}, {"emotion_id": "awe"}]},
+    {"title": "Annihilation", "emotions": [{"emotion_id": "awe"}, {"emotion_id": "rage"}]},
+    {"title": "The Fifth Season", "emotions": [{"emotion_id": "chaos"}, {"emotion_id": "rage"}]},
 ]
 
 
@@ -36,16 +40,18 @@ async def test_register_log_books_get_profile(client):
     # Books are listed back.
     r = await client.get("/api/entries", headers=headers)
     assert r.status_code == 200
-    assert r.json()["total"] == 3
+    assert r.json()["total"] == 6
 
-    # DNA profile computes from the fixed engine.
+    # DNA profile computes the Phase-7 payload (demoted archetype + recency profiles).
     r = await client.get("/api/dna/profile", headers=headers)
     assert r.status_code == 200, r.text
     profile = r.json()
-    assert profile["book_count"] == 3
-    assert profile["personality"]["id"] == "midnight_arsonist"
-    # Output emotion keys are canonical.
-    assert set(profile["emotion_frequency"]) <= {"chaos", "awe", "rage"}
+    assert profile["enough"] is True
+    assert profile["book_count"] == 6
+    assert profile["archetype"]["id"] == "midnight_arsonist"
+    # Recency-weighted current profile keys are canonical.
+    current = {k for k, v in profile["profiles"]["current"].items() if v > 0}
+    assert current <= {"chaos", "awe", "rage"}
 
 
 async def test_cover_url_ssrf_rejected_on_create(client):
