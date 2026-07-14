@@ -63,9 +63,6 @@ app.include_router(echo.router, prefix=settings.API_V1_PREFIX)
 app.include_router(social.router, prefix=settings.API_V1_PREFIX)
 app.include_router(notifications.router, prefix=settings.API_V1_PREFIX)
 app.include_router(profile.router, prefix=settings.API_V1_PREFIX)
-# NOTE: routers/room.py (GET /api/room) is parked (B1.18) — the Reading Room
-# feature is deferred and the frontend uses GET /api/user/room. Left unmounted
-# to stop maintaining two divergent room contracts / two RoomResponse schemas.
 
 
 @app.get("/health")

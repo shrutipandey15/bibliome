@@ -34,9 +34,7 @@ from app.services.dna_engine import (
     generate_recap,
     generate_stats,
 )
-from app.services.room_decorations import compute_unlocks
 from app.utils.cache import dna_cache, invalidate_dna
-from app.utils.emotions import TWO_AM_SLUGS
 
 router = APIRouter(prefix="/dna", tags=["dna"])
 
@@ -149,30 +147,6 @@ async def generate_dna(
 
     await invalidate_dna(current_user.id)
 
-    # Piggyback: check for new room decoration unlocks (glyph_figurine unlocks on first DNA gen)
-    room_unlocks_new = []
-    if current_user.room_unlocks is not None:
-        old_set = set(current_user.room_unlocks)
-        from sqlalchemy import func, select
-        from app.models.book_entry import BookEntry, EntryEmotion
-        r_i10 = await db.execute(
-            select(func.count(BookEntry.id)).where(
-                BookEntry.user_id == current_user.id, BookEntry.intensity == 10
-            )
-        )
-        has_i10 = (r_i10.scalar() or 0) > 0
-        r_2am = await db.execute(
-            select(func.count(EntryEmotion.id))
-            .join(BookEntry, EntryEmotion.entry_id == BookEntry.id)
-            .where(BookEntry.user_id == current_user.id, EntryEmotion.emotion_id.in_(TWO_AM_SLUGS))
-        )
-        has_2am = (r_2am.scalar() or 0) > 0
-        updated = compute_unlocks(current_user, len(entries), has_i10, has_2am)
-        merged = old_set | set(updated)
-        room_unlocks_new = sorted(merged - old_set)
-        if room_unlocks_new:
-            current_user.room_unlocks = sorted(merged)
-
     return DNAGenerateResponse(
         snapshot=DNASnapshotResponse(
             id=snapshot.id,
@@ -183,7 +157,6 @@ async def generate_dna(
             generated_at=snapshot.generated_at or now,
         ),
         personality=PersonalityInfo(**personality),
-        room_unlocks_new=room_unlocks_new,
     )
 
 
@@ -229,6 +202,30 @@ async def get_stats(
     result = generate_stats(entries)
     await dna_cache.set(cache_key, result)
     return result
+
+
+@router.get("/patterns")
+async def get_patterns(
+    request: Request,
+    user_id: uuid.UUID = Depends(get_current_user_id),
+):
+    """Stats + heatmap in one response (B5.4), backing the merged 'Patterns' view
+    so it's one round trip. Reuses the same cache keys as /stats and /heatmap."""
+    await dna_read_limiter.check(request)
+    stats = await dna_cache.get(f"stats:{user_id}")
+    heatmap = await dna_cache.get(f"heatmap:{user_id}")
+
+    if stats is None or heatmap is None:
+        async with async_session() as db:
+            entries = await _get_user_entries(db, user_id)
+        if stats is None:
+            stats = generate_stats(entries)
+            await dna_cache.set(f"stats:{user_id}", stats)
+        if heatmap is None:
+            heatmap = build_heatmap_data(entries)
+            await dna_cache.set(f"heatmap:{user_id}", heatmap)
+
+    return {"stats": stats, "heatmap": heatmap}
 
 
 @router.get("/history", response_model=list[DNASnapshotResponse])

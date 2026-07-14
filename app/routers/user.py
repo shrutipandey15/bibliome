@@ -1,131 +1,23 @@
-import uuid as uuid_mod
-
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
-from sqlalchemy import func, select
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
 
 from app.database import get_db
 from app.middleware.auth import get_current_user
-from app.middleware.rate_limit import RateLimiter
-from app.models.book_entry import BookEntry, EntryEmotion
+from app.models.notification import TIER_SECURITY
 from app.models.user import User
 from app.schemas.echo import HandleChangeRequest
 from app.schemas.user import (
     PasswordChangeRequest,
-    RoomLayoutUpdate,
-    RoomResponse,
     UserSettingsResponse,
     UserSettingsUpdate,
 )
+from app.services.auth_service import hash_password, revoke_all_refresh_tokens, verify_password
 from app.services.handle_service import HandleError, change_handle
-from app.models.notification import TIER_SECURITY
 from app.services.notification_service import notify
-from app.services.auth_service import hash_password, verify_password, revoke_all_refresh_tokens
-from app.services.room_decorations import (
-    VALID_DECO_IDS,
-    build_decoration_catalog,
-    compute_unlocks,
-)
-from app.services.visibility import (
-    create_share_token,
-    revoke_share_tokens,
-    user_has_share_token,
-)
-from app.utils.cache import room_cache
+from app.services.visibility import create_share_token, revoke_share_tokens
 from app.utils.cookies import clear_refresh_cookie
-from app.utils.emotions import TWO_AM_SLUGS
 
 router = APIRouter(prefix="/user", tags=["user"])
-
-room_limiter = RateLimiter(max_requests=30, window_seconds=60, prefix="room")
-
-CURRENT_ROOM_VERSION = 1
-
-
-def migrate_room_layout(layout: dict | None) -> dict | None:
-    """Migrate old room layouts to current version. Pure function."""
-    if layout is None:
-        return None
-    v = layout.get("version", 0)
-    if v == CURRENT_ROOM_VERSION:
-        return layout
-    # Future: add per-version migration logic here.
-    # Return a copy so callers can treat this as pure (no side effects on read).
-    return {**layout, "version": CURRENT_ROOM_VERSION}
-
-
-async def _count_entries(db: AsyncSession, user_id) -> int:
-    result = await db.execute(
-        select(func.count(BookEntry.id)).where(BookEntry.user_id == user_id)
-    )
-    return result.scalar() or 0
-
-
-async def _check_special_unlocks(db: AsyncSession, user_id) -> tuple[bool, bool]:
-    """Check for intensity-10 and 2am-tagged entries."""
-    i10 = await db.execute(
-        select(func.count(BookEntry.id)).where(
-            BookEntry.user_id == user_id,
-            BookEntry.intensity == 10,
-        )
-    )
-    has_i10 = (i10.scalar() or 0) > 0
-
-    am = await db.execute(
-        select(func.count(EntryEmotion.id))
-        .join(BookEntry, EntryEmotion.entry_id == BookEntry.id)
-        .where(BookEntry.user_id == user_id, EntryEmotion.emotion_id.in_(TWO_AM_SLUGS))
-    )
-    has_2am = (am.scalar() or 0) > 0
-
-    return has_i10, has_2am
-
-
-async def _clean_stale_books(db: AsyncSession, user_id, layout: dict | None) -> dict | None:
-    """Remove deleted book references from room layout."""
-    if not layout or not layout.get("shelves"):
-        return layout
-
-    book_ids = set()
-    for shelf in layout["shelves"]:
-        for item in shelf:
-            if item.get("type") == "book":
-                book_ids.add(item["id"])
-
-    if not book_ids:
-        return layout
-
-    valid_uuids = []
-    for bid in book_ids:
-        try:
-            valid_uuids.append(uuid_mod.UUID(bid))
-        except ValueError:
-            continue
-
-    result = await db.execute(
-        select(BookEntry.id).where(
-            BookEntry.user_id == user_id,
-            BookEntry.id.in_(valid_uuids),
-        )
-    )
-    existing_ids = {str(r) for r in result.scalars().all()}
-
-    cleaned = False
-    new_shelves = []
-    for shelf in layout["shelves"]:
-        new_shelf = []
-        for item in shelf:
-            if item.get("type") == "book" and item["id"] not in existing_ids:
-                cleaned = True
-                continue
-            new_shelf.append(item)
-        new_shelves.append(new_shelf)
-
-    if cleaned:
-        layout = {**layout, "shelves": new_shelves}
-
-    return layout
 
 
 def _settings_response(user: User) -> UserSettingsResponse:
@@ -210,23 +102,8 @@ async def generate_share_token(
 ):
     """Mint a new revocable share link (capability link) for the current user."""
     token = await create_share_token(db, current_user.id)
-
-    # Piggyback: mini_dna_frame unlocks on first share.
-    room_unlocks_new = []
-    if current_user.room_unlocks is not None:
-        old_set = set(current_user.room_unlocks)
-        entry_count = await _count_entries(db, current_user.id)
-        has_i10, has_2am = await _check_special_unlocks(db, current_user.id)
-        updated = compute_unlocks(
-            current_user, entry_count, has_i10, has_2am, has_share_token=True
-        )
-        merged = old_set | set(updated)
-        room_unlocks_new = sorted(merged - old_set)
-        if room_unlocks_new:
-            current_user.room_unlocks = sorted(merged)
-
     await db.commit()
-    return {"share_token": token, "room_unlocks_new": room_unlocks_new}
+    return {"share_token": token}
 
 
 @router.delete("/share-token", status_code=status.HTTP_204_NO_CONTENT)
@@ -237,75 +114,3 @@ async def revoke_share_token(
     """Revoke all of the current user's active share links."""
     await revoke_share_tokens(db, current_user.id)
     await db.flush()
-
-
-@router.get("/room", response_model=RoomResponse)
-async def get_room(
-    request: Request,
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    """Get the user's reading room layout and decoration unlocks.
-
-    Read-only: unlock init, layout migration, and stale-book pruning are all
-    computed in-memory for the response but never written here (B1.5). The
-    persisted state is refreshed by the write endpoints that recompute unlocks
-    (POST /entries, POST /dna/generate, POST /user/share-token) and by PATCH
-    /user/room, which stamps the current layout version.
-    """
-    await room_limiter.check(request)
-
-    # Compute unlocks in-memory if never initialized (do not persist on read).
-    unlocks = current_user.room_unlocks
-    if unlocks is None:
-        entry_count = await _count_entries(db, current_user.id)
-        has_i10, has_2am = await _check_special_unlocks(db, current_user.id)
-        has_share = await user_has_share_token(db, current_user.id)
-        unlocks = compute_unlocks(
-            current_user, entry_count, has_i10, has_2am, has_share_token=has_share
-        )
-
-    # Migrate + prune stale books for the response only (pure, no writes).
-    layout = migrate_room_layout(current_user.room_layout)
-    layout = await _clean_stale_books(db, current_user.id, layout)
-
-    catalog = build_decoration_catalog(unlocks)
-
-    return RoomResponse(
-        version=CURRENT_ROOM_VERSION,
-        layout=layout,
-        unlocks=unlocks or [],
-        decorations=catalog,
-    )
-
-
-@router.patch("/room")
-async def update_room(
-    request: Request,
-    data: RoomLayoutUpdate,
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    """Save the user's room arrangement."""
-    await room_limiter.check(request)
-
-    # Validate all placed decorations are unlocked
-    unlocked = set(current_user.room_unlocks or [])
-    for shelf in data.shelves:
-        for item in shelf:
-            if item.type == "deco":
-                if item.id not in VALID_DECO_IDS:
-                    raise HTTPException(400, f"Unknown decoration '{item.id}'")
-                if item.id not in unlocked:
-                    raise HTTPException(403, f"Decoration '{item.id}' is locked")
-
-    current_user.room_layout = {
-        "version": CURRENT_ROOM_VERSION,
-        **data.model_dump(),
-    }
-    await db.flush()
-
-    # Invalidate public cache
-    await room_cache.invalidate(f"public:{current_user.username}")
-
-    return {"status": "saved"}

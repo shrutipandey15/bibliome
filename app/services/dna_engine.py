@@ -7,7 +7,6 @@ Phase 2 (future): Clustering from real user data.
 Phase 3 (future): AI-powered with Claude API.
 """
 
-import math
 from collections import Counter
 from datetime import datetime, timezone
 
@@ -305,6 +304,7 @@ def generate_stats(entries: list[dict]) -> dict:
             "highest_intensity_book": None,
             "most_common_emotion": None,
             "most_common_emotion_count": 0,
+            "emotion_counts": {},
             "emotion_diversity": 0,
             "unique_emotions_used": 0,
             "total_emotions_possible": len(VALID_EMOTION_IDS),
@@ -329,6 +329,13 @@ def generate_stats(entries: list[dict]) -> dict:
     emotion_counter = Counter(all_emotions)
     most_common = emotion_counter.most_common(1)
 
+    # Books tagged with each emotion (deduped per book) — the full ledger the
+    # Stats page renders (B5.3). Keys are canonical slugs.
+    emotion_book_counts: Counter = Counter()
+    for e in entries:
+        for slug in set(_canonical_emotions(e["emotions"])):
+            emotion_book_counts[slug] += 1
+
     # Emotion diversity (unique emotions / total possible)
     unique_emotions = len(set(all_emotions))
     diversity = unique_emotions / len(VALID_EMOTION_IDS)
@@ -351,6 +358,7 @@ def generate_stats(entries: list[dict]) -> dict:
         },
         "most_common_emotion": most_common[0][0] if most_common else None,
         "most_common_emotion_count": most_common[0][1] if most_common else 0,
+        "emotion_counts": dict(emotion_book_counts),
         "emotion_diversity": round(diversity * 100),
         "unique_emotions_used": unique_emotions,
         "total_emotions_possible": len(VALID_EMOTION_IDS),
@@ -358,72 +366,11 @@ def generate_stats(entries: list[dict]) -> dict:
     }
 
 
-def build_emotion_vector(emotion_freq: dict[str, int]) -> list[float]:
-    """
-    Convert emotion frequency dict to a fixed-length vector.
-    Order follows VALID_EMOTION_IDS for consistency across users.
-    """
-    sorted_ids = sorted(list(VALID_EMOTION_IDS))
-    return [float(emotion_freq.get(emo, 0)) for emo in sorted_ids]
-
-
-def cosine_similarity(a: list[float], b: list[float]) -> float:
-    """Cosine similarity between two vectors. Returns 0.0-1.0."""
-    dot = sum(x * y for x, y in zip(a, b))
-    mag_a = math.sqrt(sum(x * x for x in a))
-    mag_b = math.sqrt(sum(x * x for x in b))
-    if mag_a == 0 or mag_b == 0:
-        return 0.0
-    return dot / (mag_a * mag_b)
-
-
-def find_twins(
-    user_emotion_freq: dict[str, int],
-    candidates: list[dict],
-    max_results: int = 5,
-) -> list[dict]:
-    """
-    Find reading twins — users with the most similar emotion profiles.
-
-    Args:
-        user_emotion_freq: Current user's emotion frequency dict {emotion_id: count}
-        candidates: List of dicts with keys:
-            - username, display_name, personality_type
-            - emotion_frequency: dict {emotion_id: count}
-        max_results: How many twins to return
-
-    Returns:
-        List of twin matches sorted by similarity (highest first).
-    """
-    if not candidates:
-        return []
-
-    user_vec = build_emotion_vector(user_emotion_freq)
-    user_emotions = set(e for e, c in user_emotion_freq.items() if c > 0)
-
-    results = []
-    for candidate in candidates:
-        cand_freq = candidate.get("emotion_frequency", {})
-        cand_vec = build_emotion_vector(cand_freq)
-
-        sim = cosine_similarity(user_vec, cand_vec)
-        if sim < 0.01:
-            continue
-
-        cand_emotions = set(e for e, c in cand_freq.items() if c > 0)
-        shared = sorted(user_emotions & cand_emotions)
-
-        results.append({
-            "username": candidate["username"],
-            "display_name": candidate.get("display_name"),
-            "personality_type": candidate.get("personality_type"),
-            "similarity": round(sim, 3),
-            "shared_emotions": shared,
-            "shared_count": len(shared),
-        })
-
-    results.sort(key=lambda x: x["similarity"], reverse=True)
-    return results[:max_results]
+# REMOVED (Phase 5 B5.6): find_twins / build_emotion_vector / cosine_similarity.
+# Twin (reader-matching) is parked; its endpoint was O(all public users × entries)
+# per request. When Twin is reopened it must use precomputed emotion vectors from
+# cached_dna_profile + an offline candidate pipeline (blueprint §Feature 4), not a
+# per-request scan. The design notes live in blueprint.md.
 
 
 def build_heatmap_data(entries: list[dict]) -> dict:

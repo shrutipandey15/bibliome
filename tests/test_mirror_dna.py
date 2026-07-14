@@ -49,3 +49,39 @@ async def test_dna_and_mirror_surfaces_return(client):
                  "/api/mirror/weekly-memory", "/api/mirror/right-now"):
         r = await client.get(path, headers=headers)
         assert r.status_code == 200, f"{path}: {r.text}"
+
+
+CANON = {
+    "grief", "desire", "rage", "dread", "comfort", "awe", "catharsis",
+    "two_am", "chaos", "tenderness", "wit", "longing", "devastation",
+}
+
+
+async def test_stats_emotion_counts_ledger(client):
+    """B5.3: the Stats ledger is populated with per-book canonical counts."""
+    headers = await _auth(client)
+    # 3 books: grief x3, awe x2, longing x1 (deduped per book).
+    plan = [["grief"], ["grief", "awe"], ["grief", "awe", "longing"]]
+    for i, emos in enumerate(plan):
+        await client.post("/api/entries", json={
+            "title": f"B{i}", "intensity": 6,
+            "emotions": [{"emotion_id": e, "strength": 7} for e in emos],
+        }, headers=headers)
+
+    r = await client.get("/api/dna/stats", headers=headers)
+    counts = r.json()["emotion_counts"]
+    assert counts == {"grief": 3, "awe": 2, "longing": 1}
+    assert set(counts).issubset(CANON)          # all keys canonical
+    assert sum(counts.values()) == 6            # total tag-books
+
+
+async def test_patterns_endpoint_bundles_stats_and_heatmap(client):
+    headers = await _auth(client)
+    await client.post("/api/entries", json={
+        "title": "Solo", "intensity": 5, "emotions": [{"emotion_id": "awe", "strength": 6}],
+    }, headers=headers)
+    r = await client.get("/api/dna/patterns", headers=headers)
+    assert r.status_code == 200
+    body = r.json()
+    assert "stats" in body and "heatmap" in body
+    assert body["stats"]["emotion_counts"]["awe"] == 1
