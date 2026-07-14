@@ -26,6 +26,7 @@ from app.schemas.dna import (
     StatsResponse,
 )
 from app.services.blind_spots_service import get_blind_spots
+from app.services.dna_service import compute_and_cache
 from app.services.calendar_service import get_emotional_calendar
 from app.services.dna_engine import (
     build_heatmap_data,
@@ -63,30 +64,20 @@ async def _get_user_entries(db: AsyncSession, user_id) -> list[dict]:
     ]
 
 
-@router.get("/profile", response_model=DNAProfileResponse)
+@router.get("/profile")
 async def get_dna_profile(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    """The owner's DNA mirror (Phase 7): a demoted archetype, the strongest few
+    falsifiable insights, the honestly-locked rest, and both recency profiles.
+
+    Below 5 books it returns an honest "not enough yet". Served from cache while
+    `dna_dirty` is false; recomputed once per change, not per request (Part 4).
     """
-    Get the current DNA profile. Uses cached result if entries haven't changed.
-    Recalculates and caches when dna_dirty is True.
-    """
-    # Serve from cache if clean
-    if not current_user.dna_dirty and current_user.cached_dna_profile:
-        return current_user.cached_dna_profile
-
-    # Recalculate
-    entries = await _get_user_entries(db, current_user.id)
-    result = calculate_personality(entries)
-    result["book_count"] = len(entries)
-
-    # Cache it
-    current_user.cached_dna_profile = result
-    current_user.dna_dirty = False
-    await db.flush()
-
-    return result
+    if not current_user.dna_dirty and current_user.cached_dna_v2:
+        return current_user.cached_dna_v2
+    return await compute_and_cache(db, current_user)
 
 
 @router.post("/generate", response_model=DNAGenerateResponse)
@@ -137,13 +128,9 @@ async def generate_dna(
     )
     db.add(snapshot)
 
-    # Update user's cached personality type and DNA cache
-    current_user.personality_type = personality["name"]
-    current_user.cached_dna_profile = result
-    current_user.cached_dna_profile["book_count"] = len(entries)
-    current_user.dna_dirty = False
-
+    # Refresh both caches (public signature + private Phase-7 payload) consistently.
     await db.flush()
+    await compute_and_cache(db, current_user)
 
     await invalidate_dna(current_user.id)
 
@@ -226,6 +213,42 @@ async def get_patterns(
             await dna_cache.set(f"heatmap:{user_id}", heatmap)
 
     return {"stats": stats, "heatmap": heatmap}
+
+
+@router.get("/evolution")
+async def get_dna_evolution(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """The evolution timeline (B7.4): one point per snapshot, oldest first. Powers
+    the "watch your DNA change" screen. O(read snapshots) — the past is never
+    recomputed."""
+    snaps = (await db.execute(
+        select(DNASnapshot)
+        .where(DNASnapshot.user_id == current_user.id)
+        .order_by(DNASnapshot.generated_at.asc())
+    )).scalars().all()
+
+    points = []
+    for s in snaps:
+        data = s.emotion_data or {}
+        vec = data.get("current_vector")
+        if vec:
+            top = [slug for slug, _ in sorted(vec.items(), key=lambda kv: kv[1], reverse=True)[:3]
+                   if _ > 0]
+        else:  # legacy snapshot shape
+            top = [t.get("emotion_id") for t in (data.get("top_emotions") or [])[:3]]
+        points.append({
+            "id": str(s.id),
+            "date": s.generated_at,
+            "archetype": s.personality_type,
+            "dna_type_slug": s.dna_type_slug,
+            "book_count": s.book_count,
+            "top_emotions": top,
+            "drift_from_prev": data.get("drift"),
+            "trigger": s.trigger,
+        })
+    return points
 
 
 @router.get("/history", response_model=list[DNASnapshotResponse])
