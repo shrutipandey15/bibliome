@@ -35,6 +35,7 @@ class Echo(Base):
         Index("ix_echoes_emotion_created", "primary_emotion", "created_at"),
         Index("ix_echoes_book", "book_key"),
         Index("ix_echoes_author", "author_id"),
+        Index("ix_echoes_prompt", "prompt_id"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -51,6 +52,12 @@ class Echo(Base):
 
     primary_emotion: Mapped[str | None] = mapped_column(String(30), nullable=True)
     secondary_emotion: Mapped[str | None] = mapped_column(String(30), nullable=True)
+
+    # Optional campfire anchor (B6.5): the weekly Prompt this echo answers, so the
+    # feed can group answers to the same question. SET NULL if the prompt is removed.
+    prompt_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("prompts.id", ondelete="SET NULL"), nullable=True
+    )
 
     body: Mapped[str] = mapped_column(String(500), nullable=False)
     visibility: Mapped[str] = mapped_column(String(20), nullable=False, server_default="community")
