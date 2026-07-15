@@ -12,7 +12,8 @@ router = APIRouter(tags=["meta"])
 class EmotionVocabItem(BaseModel):
     slug: str
     family: str          # UI-only grouping ("It hurt", "It held me", …)
-    name: str            # display label
+    name: str            # the plain word ("confusion")
+    phrase: str          # the first-person line the UI shows ("it confused me")
     symbol: str
     color: str
     description: str
