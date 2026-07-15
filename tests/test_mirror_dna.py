@@ -2,6 +2,8 @@
 
 import pytest
 
+from app.utils.emotions import VALID_SLUGS
+
 pytestmark = pytest.mark.asyncio
 
 EMO = ["grief", "longing", "catharsis", "tenderness", "awe", "comfort"]
@@ -35,10 +37,7 @@ async def test_dna_and_mirror_surfaces_return(client):
     prof = r.json()
     assert prof["enough"] is True
     assert prof["book_count"] == 6
-    assert set(prof["profiles"]["enduring"]).issubset({
-        "grief", "desire", "rage", "dread", "comfort", "awe", "catharsis",
-        "two_am", "chaos", "tenderness", "wit", "longing", "devastation",
-    })
+    assert set(prof["profiles"]["enduring"]).issubset(VALID_SLUGS)
 
     for path in ("/api/dna/heatmap", "/api/dna/stats", "/api/dna/blind-spots",
                  "/api/dna/emotional-calendar"):
@@ -52,10 +51,7 @@ async def test_dna_and_mirror_surfaces_return(client):
         assert r.status_code == 200, f"{path}: {r.text}"
 
 
-CANON = {
-    "grief", "desire", "rage", "dread", "comfort", "awe", "catharsis",
-    "two_am", "chaos", "tenderness", "wit", "longing", "devastation",
-}
+CANON = VALID_SLUGS
 
 
 async def test_stats_emotion_counts_ledger(client):

@@ -9,7 +9,7 @@ from sqlalchemy.orm import selectinload
 from app.models.book_entry import BookEntry
 from app.utils.emotions import (
     BLIND_SPOT_HINTS,
-    EMOTIONS_13,
+    EMOTIONS,
     EMOTIONS_BY_SLUG,
     canonicalize,
 )
@@ -40,7 +40,7 @@ async def get_blind_spots(db: AsyncSession, user_id: uuid.UUID) -> list[dict]:
 
     never: list[tuple[str, int]] = []
     rare: list[tuple[str, int]] = []
-    for e_meta in EMOTIONS_13:
+    for e_meta in EMOTIONS:
         slug = e_meta["slug"]
         count = entry_counts.get(slug, 0)
         prevalence = count / total
@@ -50,7 +50,7 @@ async def get_blind_spots(db: AsyncSession, user_id: uuid.UUID) -> list[dict]:
             rare.append((slug, count))
 
     # Prioritize never-tagged, then rare. Deterministic order within each bucket
-    # by EMOTIONS_13 declaration order.
+    # by EMOTIONS declaration order.
     picks = (never + rare)[:3]
 
     out = []

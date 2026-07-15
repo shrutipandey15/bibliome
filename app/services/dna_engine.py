@@ -55,23 +55,24 @@ def dna_type_slug_for(engine_id: str | None) -> str | None:
     return DNA_TYPE_SLUG_MAP.get(engine_id)
 
 
-# Personality "fingerprints" over the canonical 13-emotion vocabulary.
+# Personality "fingerprints" over the canonical 18-emotion vocabulary.
 #
 # INVARIANT: every slug in primary_emotions / anti_emotions MUST be a canonical
 # VALID_SLUGS value (see tests/test_dna_engine.py::test_personality_slugs_are_canonical).
-# The lists below were migrated off the pre-cutover vocabulary:
-#   healing→catharsis, seen→tenderness, obsession→desire, nostalgia→longing, 2am→two_am.
-# The old "nothing" (numbness) slug has no canonical equivalent and was removed;
-# where a list needed a replacement, the closest canonical fit for that type's
-# character was chosen (noted inline). `devastation` — previously in no type —
-# now anchors the soft_masochist, so all 13 canonical emotions are represented.
+# Fingerprints were migrated to the 18-emotion vocabulary:
+#   wit→amusement, chaos→confusion, two_am→longing (the old removed slugs).
+# Archetypes are anchored only on *experiential* emotions; the "It lost me" family
+# (boredom/revulsion/confusion/indifference) appears solely as anti_emotions —
+# they describe a book failing you, not a reading identity. Across the 8 types,
+# every experiential emotion is used as a primary at least once
+# (test_every_experiential_emotion_is_used_somewhere).
 PERSONALITY_TYPES = [
     {
         "id": "grief_romantic",
         "name": "The Grief Romantic",
         "description": "You seek books that break your heart because feeling deeply is how you know you're alive. Loss isn't your enemy — numbness is.",
-        "primary_emotions": ["grief", "catharsis", "tenderness"],
-        "anti_emotions": ["comfort", "wit"],  # was ["nothing", "wit"] — nothing→comfort (they reject safe comfort)
+        "primary_emotions": ["grief", "catharsis", "devastation"],
+        "anti_emotions": ["comfort", "amusement"],  # they reject safe comfort and the merely clever
         "blind_spots": ["You avoid books with neat happy endings", "You mistake emotional pain for depth"],
         "comfort_tropes": ["Unrequited love", "Beautiful suffering", "Bittersweet endings"],
         "color": "#3A5A6B",
@@ -80,9 +81,9 @@ PERSONALITY_TYPES = [
     {
         "id": "control_intellectual",
         "name": "The Control-Seeking Intellectual",
-        "description": "You read to master the chaos. Understanding is your armor, and every book is a new piece of territory mapped.",
-        "primary_emotions": ["wit", "dread", "chaos"],  # was [..., "nothing"] — nothing→chaos (the chaos they map)
-        "anti_emotions": ["comfort", "catharsis"],
+        "description": "You read to master what unsettles you. Understanding is your armor, and every book is a new piece of territory mapped.",
+        "primary_emotions": ["recognition", "dread", "awe"],
+        "anti_emotions": ["confusion", "catharsis"],  # they resist being lost, and being emotionally undone
         "blind_spots": ["You intellectualize emotions instead of feeling them", "You abandon books that make you vulnerable"],
         "comfort_tropes": ["Unreliable narrators", "Philosophical fiction", "Systems and structures"],
         "color": "#5A5A8A",
@@ -92,8 +93,8 @@ PERSONALITY_TYPES = [
         "id": "soft_masochist",
         "name": "The Soft Masochist",
         "description": "You choose pain on purpose because you trust books that hurt you more than ones that comfort you.",
-        "primary_emotions": ["rage", "grief", "devastation"],  # was [..., "obsession"] — devastation anchors this type
-        "anti_emotions": ["comfort", "wit"],  # was ["nothing", "comfort"] — nothing→wit
+        "primary_emotions": ["rage", "grief", "devastation"],
+        "anti_emotions": ["comfort", "amusement"],
         "blind_spots": ["You equate suffering with authenticity", "You distrust books that feel too safe"],
         "comfort_tropes": ["Tragic love", "Moral ambiguity", "Devastating plot twists"],
         "color": "#6B3A5D",
@@ -104,7 +105,7 @@ PERSONALITY_TYPES = [
         "name": "The Comfort Architect",
         "description": "You build emotional safety through stories. Your bookshelf isn't a collection — it's a home you can always return to.",
         "primary_emotions": ["comfort", "longing", "tenderness"],
-        "anti_emotions": ["rage", "chaos", "dread"],
+        "anti_emotions": ["rage", "dread", "revulsion"],
         "blind_spots": ["You avoid books that might destabilize you", "You re-read instead of risking new things"],
         "comfort_tropes": ["Found family", "Slow-burn romance", "Cozy settings"],
         "color": "#7A8B6F",
@@ -114,8 +115,8 @@ PERSONALITY_TYPES = [
         "id": "midnight_arsonist",
         "name": "The Midnight Arsonist",
         "description": "You read like you're setting fire to your own beliefs. Comfort zones are for people who haven't found the right book yet.",
-        "primary_emotions": ["chaos", "awe", "rage"],
-        "anti_emotions": ["comfort", "longing"],  # was ["comfort", "nothing", "nostalgia"] — nothing dropped
+        "primary_emotions": ["amusement", "awe", "rage"],
+        "anti_emotions": ["comfort", "boredom"],
         "blind_spots": ["You conflate discomfort with growth", "You dismiss gentle books as boring"],
         "comfort_tropes": ["Boundary-pushing fiction", "Experimental structure", "Provocative themes"],
         "color": "#C47A3A",
@@ -125,8 +126,8 @@ PERSONALITY_TYPES = [
         "id": "quiet_witness",
         "name": "The Quiet Witness",
         "description": "You absorb everything and process in silence. Books are your confessional — the only place you don't perform.",
-        "primary_emotions": ["tenderness", "awe", "dread"],
-        "anti_emotions": ["rage", "chaos"],
+        "primary_emotions": ["tenderness", "awe", "nostalgia"],
+        "anti_emotions": ["rage", "revulsion"],
         "blind_spots": ["You observe more than you feel", "You use reading to avoid confrontation"],
         "comfort_tropes": ["Introspective narrators", "Literary fiction", "Quiet revelations"],
         "color": "#B8964E",
@@ -136,8 +137,8 @@ PERSONALITY_TYPES = [
         "id": "obsessive_romantic",
         "name": "The Obsessive Romantic",
         "description": "You don't read books — you fall into them. Every story is a love affair, and you don't do casual.",
-        "primary_emotions": ["desire", "comfort", "two_am"],
-        "anti_emotions": ["dread", "wit"],  # was ["nothing", "dread", "wit"] — nothing dropped
+        "primary_emotions": ["desire", "comfort", "longing"],
+        "anti_emotions": ["dread", "indifference"],  # they cannot do casual or detached
         "blind_spots": ["You abandon books you can't fall in love with", "You chase the high of a new obsession"],
         "comfort_tropes": ["Consuming love stories", "Immersive worlds", "Characters you'd die for"],
         "color": "#C4553A",
@@ -147,8 +148,8 @@ PERSONALITY_TYPES = [
         "id": "emotional_archaeologist",
         "name": "The Emotional Archaeologist",
         "description": "You dig into stories looking for buried parts of yourself. Every book is an excavation site.",
-        "primary_emotions": ["longing", "tenderness", "catharsis"],
-        "anti_emotions": ["two_am"],  # was ["nothing", "2am"] — nothing dropped, 2am→two_am
+        "primary_emotions": ["longing", "joy", "catharsis"],
+        "anti_emotions": ["amusement", "indifference"],
         "blind_spots": ["You over-analyze what you read", "You search for meaning even when there's none"],
         "comfort_tropes": ["Psychological depth", "Identity exploration", "Hidden truths"],
         "color": "#7A5A9B",

@@ -18,7 +18,7 @@ from app.services.dna_engine import (
     generate_stats,
     build_heatmap_data,
 )
-from app.utils.emotions import VALID_SLUGS, LEGACY_EMOTION_MAP
+from app.utils.emotions import VALID_SLUGS, LEGACY_EMOTION_MAP, LOST_ME_SLUGS
 
 
 def _entry(emotions, intensity=5, days_ago=0, title="Book", author="Author"):
@@ -47,15 +47,21 @@ def test_personality_slugs_are_canonical():
             )
 
 
-def test_every_canonical_emotion_is_used_somewhere():
-    """No canonical emotion should be dead weight — each anchors at least one type."""
+def test_every_experiential_emotion_is_used_somewhere():
+    """Every *experiential* emotion anchors at least one archetype.
+
+    The "It lost me" family (boredom/revulsion/confusion/indifference) is excluded:
+    those are registers of disengagement — a book failing you, not a reading
+    identity — so they only ever appear as anti_emotions, never as a primary.
+    """
     used = {
         slug
         for ptype in PERSONALITY_TYPES
         for slug in ptype["primary_emotions"]
     }
-    missing = VALID_SLUGS - used
-    assert not missing, f"canonical emotions never used as a primary: {sorted(missing)}"
+    experiential = VALID_SLUGS - LOST_ME_SLUGS
+    missing = experiential - used
+    assert not missing, f"experiential emotions never used as a primary: {sorted(missing)}"
 
 
 def test_type_slug_map_targets_bible_slugs():
@@ -78,9 +84,9 @@ def test_output_frequency_keys_are_canonical():
 
 
 def test_strong_signal_selects_expected_type():
-    # chaos + awe + rage is the midnight_arsonist fingerprint.
+    # amusement + awe + rage is the midnight_arsonist fingerprint.
     entries = [
-        _entry(["chaos", "awe", "rage"], intensity=9, days_ago=i, title=f"B{i}")
+        _entry(["amusement", "awe", "rage"], intensity=9, days_ago=i, title=f"B{i}")
         for i in range(6)
     ]
     result = calculate_personality(entries)
@@ -102,6 +108,17 @@ def test_legacy_slugs_are_remapped_not_dropped():
         assert canon in freq
 
 
+def test_retired_slugs_canonicalize_forward():
+    """The 13→18 cutover retired chaos/wit/two_am; they must map forward, not drop."""
+    from app.utils.emotions import canonicalize
+    assert canonicalize("chaos") == "confusion"
+    assert canonicalize("wit") == "amusement"
+    assert canonicalize("two_am") == "longing"
+    assert canonicalize("2am") == "longing"
+    # nostalgia was a legacy alias; it is now canonical in its own right.
+    assert canonicalize("nostalgia") == "nostalgia"
+
+
 def test_unknown_slugs_are_ignored():
     entries = [_entry(["not_a_real_emotion", "grief"], days_ago=i) for i in range(4)]
     result = calculate_personality(entries)
@@ -112,9 +129,10 @@ def test_unknown_slugs_are_ignored():
 # ── stats / heatmap also canonicalize ──
 
 def test_generate_stats_counts_legacy_slugs():
+    # '2am' is retired vocab; it canonicalizes forward to 'longing'.
     entries = [_entry(["2am"], days_ago=i) for i in range(3)]
     stats = generate_stats(entries)
-    assert stats["most_common_emotion"] == "two_am"
+    assert stats["most_common_emotion"] == "longing"
     assert stats["total_books"] == 3
 
 

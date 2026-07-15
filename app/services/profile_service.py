@@ -45,7 +45,7 @@ def compute_milestones(entries: list[BookEntry]) -> list[dict]:
     if len(tagged) >= 10:
         milestones.append({"kind": "deep_range", "label": "Felt across 10+ emotional registers"})
     if tagged >= VALID_SLUGS:
-        milestones.append({"kind": "full_spectrum", "label": "Read across all 13 emotional registers"})
+        milestones.append({"kind": "full_spectrum", "label": f"Read across all {len(VALID_SLUGS)} emotional registers"})
     if dates and (max(dates) - min(dates)).days >= 365:
         milestones.append({"kind": "year_of_reflection", "label": "A year of consistent reflection"})
     return milestones

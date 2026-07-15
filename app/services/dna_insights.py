@@ -163,7 +163,7 @@ RANGE = [
     InsightTemplate(
         "range", "breadth", GATES["range"], True,
         lambda c: bool(c.get("range")),
-        lambda c: (f"You reach across {c['range']['distinct']} of 13 feelings."
+        lambda c: (f"You reach across {c['range']['distinct']} of {len(EMOTIONS_BY_SLUG)} feelings."
                    + (" That's a wide emotional range." if c["range"]["entropy"] >= 0.7
                       else " You stay in a tight band.")),
         lambda c: abs(c["range"]["entropy"] - 0.5),

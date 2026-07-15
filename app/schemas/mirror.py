@@ -17,7 +17,7 @@ class LandscapeItem(BaseModel):
     book_author: str | None
     dominant_emotion: EmotionMini | None
     finished_at: date | None
-    status: Literal["want_to_read", "reading", "finished"]
+    status: Literal["want_to_read", "reading", "finished", "abandoned", "paused", "reread"]
 
 
 LandscapeResponse = list[LandscapeItem]

@@ -46,6 +46,10 @@ class BookEntry(Base):
     )
 
     status: Mapped[str] = mapped_column(String(20), nullable=False, server_default="finished")
+    # "Would you read it again?" — yes | no | not_sure (nullable).
+    verdict: Mapped[str | None] = mapped_column(String(10))
+    # Why a book was abandoned — only set when status == 'abandoned' (nullable).
+    dnf_reason: Mapped[str | None] = mapped_column(String(20))
     arc_start_emotion_id: Mapped[str | None] = mapped_column(String(30))
     arc_middle_emotion_id: Mapped[str | None] = mapped_column(String(30))
     arc_end_emotion_id: Mapped[str | None] = mapped_column(String(30))
@@ -55,8 +59,17 @@ class BookEntry(Base):
     __table_args__ = (
         CheckConstraint("intensity >= 1 AND intensity <= 10", name="check_intensity_range"),
         CheckConstraint(
-            "status IN ('want_to_read','reading','finished')",
+            "status IN ('want_to_read','reading','finished','abandoned','paused','reread')",
             name="check_entry_status",
+        ),
+        CheckConstraint(
+            "verdict IS NULL OR verdict IN ('yes','no','not_sure')",
+            name="check_entry_verdict",
+        ),
+        CheckConstraint(
+            "dnf_reason IS NULL OR dnf_reason IN "
+            "('bored','too_much','badly_written','wrong_time','lost_me','drifted')",
+            name="check_entry_dnf_reason",
         ),
     )
 
