@@ -90,6 +90,8 @@ def _entry_to_response(entry) -> EntryResponse:
         created_at=entry.created_at,
         updated_at=entry.updated_at,
         status=entry.status,
+        verdict=entry.verdict,
+        dnf_reason=entry.dnf_reason,
         arc_start_emotion_id=entry.arc_start_emotion_id,
         arc_middle_emotion_id=entry.arc_middle_emotion_id,
         arc_end_emotion_id=entry.arc_end_emotion_id,

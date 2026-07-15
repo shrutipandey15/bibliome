@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from app.services.dna_engine import PERSONALITY_TYPES
-from app.utils.emotions import EMOTIONS_13, VALID_SLUGS, canonicalize
+from app.utils.emotions import EMOTIONS, VALID_SLUGS, canonicalize
 
 # ── Tunable constants (Part 4 / §11) ──
 HALF_LIFE_DAYS = 120          # a book's emotional weight halves every ~4 months
@@ -29,8 +29,8 @@ MONTHLY_CADENCE_DAYS = 30
 MIN_BOOKS_FOR_DNA = 5
 
 _LN2 = math.log(2)
-_ALL_SLUGS = [e["slug"] for e in EMOTIONS_13]           # canonical declaration order
-_MAX_ENTROPY = math.log2(len(_ALL_SLUGS))               # log2(13)
+_ALL_SLUGS = [e["slug"] for e in EMOTIONS]              # canonical declaration order
+_MAX_ENTROPY = math.log2(len(_ALL_SLUGS))               # log2(vocabulary size)
 
 # Minimum book count below which each insight is NOT computed and NOT shown.
 # This is statistical validity, not artificial scarcity (B7.6).
@@ -101,7 +101,7 @@ def recency_weight(age_days: float) -> float:
 
 
 def frequency_vector(sigs: list[EntrySig], *, weighted: bool, now: datetime | None = None) -> dict[str, float]:
-    """A 13-dim emotion vector normalized to sum 1.0 (all-zero if no tags).
+    """An emotion vector over the full canonical vocabulary, normalized to sum 1.0 (all-zero if no tags).
 
     weighted=False → enduring (each tagged book contributes 1 per distinct emotion).
     weighted=True  → current (contribution scaled by exp-decay on the book's age).

@@ -20,6 +20,50 @@ async def _create(client, headers, **over):
     return await client.post("/api/entries", json=body, headers=headers)
 
 
+# ── Per-emotion intensity: each emotion carries its own strength ──
+
+async def test_per_emotion_strengths_persist_independently(client):
+    headers = await _auth(client)
+    r = await _create(client, headers, emotions=[
+        {"emotion_id": "grief", "strength": 9},
+        {"emotion_id": "comfort", "strength": 2},
+    ])
+    assert r.status_code == 201, r.text
+    by_slug = {e["emotion_id"]: e["strength"] for e in r.json()["emotions"]}
+    assert by_slug == {"grief": 9, "comfort": 2}
+
+
+async def test_read_path_canonicalizes_legacy_emotion(client):
+    # A retired slug reaching the read path surfaces under its canonical name.
+    # (Write validation blocks legacy slugs, so this proves the read-time remap.)
+    from app.utils.emotions import canonicalize
+    assert canonicalize("chaos") == "confusion"
+
+
+# ── verdict + dnf_reason axes round-trip ──
+
+async def test_verdict_round_trips(client):
+    headers = await _auth(client)
+    r = await _create(client, headers, verdict="yes")
+    assert r.status_code == 201, r.text
+    assert r.json()["verdict"] == "yes"
+
+
+async def test_dnf_reason_round_trips_on_abandoned(client):
+    headers = await _auth(client)
+    r = await _create(client, headers, status="abandoned", dnf_reason="bored")
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["status"] == "abandoned"
+    assert body["dnf_reason"] == "bored"
+
+
+async def test_invalid_verdict_rejected(client):
+    headers = await _auth(client)
+    r = await _create(client, headers, verdict="maybe")
+    assert r.status_code == 422
+
+
 # ── B2.4: full fields + finished_at defaulting ──
 
 async def test_status_respected_on_create(client):
@@ -139,8 +183,9 @@ async def test_emotion_vocabulary_endpoint(client):
     r = await client.get("/api/emotions")
     assert r.status_code == 200
     body = r.json()
-    assert body["count"] == 13
+    assert body["count"] == 18
     slugs = {e["slug"] for e in body["emotions"]}
-    assert "two_am" in slugs and "devastation" in slugs
+    assert "nostalgia" in slugs and "devastation" in slugs
+    assert "two_am" not in slugs and "chaos" not in slugs  # old vocab retired
     for e in body["emotions"]:
-        assert e["slug"] and e["name"] and e["color"] and e["symbol"]
+        assert e["slug"] and e["name"] and e["color"] and e["symbol"] and e["family"]

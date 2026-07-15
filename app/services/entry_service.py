@@ -50,6 +50,8 @@ async def create_entry(db: AsyncSession, user_id: uuid.UUID, data: EntryCreate) 
         quote=data.quote,
         notes=data.notes,
         status=status,
+        verdict=data.verdict,
+        dnf_reason=data.dnf_reason,
         started_at=data.started_at,
         finished_at=_default_finished_at(status, data.finished_at),
     )

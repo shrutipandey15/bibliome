@@ -19,4 +19,4 @@ class CheckinResponse(BaseModel):
 
 
 class StatusUpdate(BaseModel):
-    status: Literal["want_to_read", "reading", "finished"]
+    status: Literal["want_to_read", "reading", "finished", "abandoned", "paused", "reread"]

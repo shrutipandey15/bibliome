@@ -4,10 +4,18 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
 
-from app.utils.emotions import VALID_EMOTION_IDS
+from app.utils.emotions import VALID_EMOTION_IDS, canonicalize
 from app.utils.url_safety import validate_cover_url
 
-EntryStatus = Literal["want_to_read", "reading", "finished"]
+# want_to_read / reading are the pre-completion pipeline; finished / abandoned /
+# paused / reread are the states a book lands in once you've engaged with it.
+EntryStatus = Literal["want_to_read", "reading", "finished", "abandoned", "paused", "reread"]
+
+# "Would you read it again?" — separate axis from emotion.
+Verdict = Literal["yes", "no", "not_sure"]
+
+# Why a book was abandoned. Only meaningful when status == "abandoned".
+DnfReason = Literal["bored", "too_much", "badly_written", "wrong_time", "lost_me", "drifted"]
 
 
 def _validate_cover(v: str | None) -> str | None:
@@ -30,6 +38,15 @@ class EmotionOut(BaseModel):
 
     model_config = {"from_attributes": True}
 
+    @field_validator("emotion_id", mode="before")
+    @classmethod
+    def _canonicalize(cls, v):
+        # Remap legacy slugs on read so historical rows surface under their
+        # canonical name; keep the raw value if there's no canonical target.
+        if isinstance(v, str):
+            return canonicalize(v) or v
+        return v
+
 
 class EntryCreate(BaseModel):
     title: str = Field(min_length=1, max_length=300)
@@ -43,6 +60,8 @@ class EntryCreate(BaseModel):
     started_at: date | None = None
     finished_at: date | None = None
     status: EntryStatus | None = None
+    verdict: Verdict | None = None
+    dnf_reason: DnfReason | None = None
 
     _check_cover = field_validator("cover_url")(_validate_cover)
 
@@ -59,6 +78,8 @@ class EntryUpdate(BaseModel):
     started_at: date | None = None
     finished_at: date | None = None
     status: EntryStatus | None = None
+    verdict: Verdict | None = None
+    dnf_reason: DnfReason | None = None
 
     _check_cover = field_validator("cover_url")(_validate_cover)
 
@@ -78,6 +99,8 @@ class EntryResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
     status: EntryStatus = "finished"
+    verdict: Verdict | None = None
+    dnf_reason: DnfReason | None = None
     arc_start_emotion_id: str | None = None
     arc_middle_emotion_id: str | None = None
     arc_end_emotion_id: str | None = None
