@@ -188,4 +188,7 @@ async def test_emotion_vocabulary_endpoint(client):
     assert "nostalgia" in slugs and "devastation" in slugs
     assert "two_am" not in slugs and "chaos" not in slugs  # old vocab retired
     for e in body["emotions"]:
-        assert e["slug"] and e["name"] and e["color"] and e["symbol"] and e["family"]
+        assert e["slug"] and e["name"] and e["color"] and e["symbol"] and e["family"] and e["phrase"]
+    # phrase is the first-person line the UI shows, distinct from the plain word.
+    conf = next(e for e in body["emotions"] if e["slug"] == "confusion")
+    assert conf["name"] == "confusion" and conf["phrase"] == "it confused me"
