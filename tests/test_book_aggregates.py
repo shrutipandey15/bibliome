@@ -165,3 +165,18 @@ async def test_want_to_read_contributes_nothing(client):
     r = await client.get(f"/api/books/{entry['book_id']}/profile", headers=headers)
     assert r.status_code == 200
     assert r.json()["available"] is False
+
+
+
+def test_thresholds_are_separate_questions():
+    """Privacy and deviation-trust are different bars and must stay unlinked.
+
+    3 readers is enough that a profile isn't one person's private tagging; it is
+    nowhere near enough for a reader to be a small enough share of the population
+    to deviate from meaningfully.
+    """
+    from app.config import get_settings
+    s = get_settings()
+    assert s.AGGREGATE_PUBLIC_MIN_READERS == 3
+    assert s.DEVIATION_MIN_READERS == s.AGGREGATE_CONFIRMED_MIN_READERS
+    assert s.DEVIATION_MIN_READERS > s.AGGREGATE_PUBLIC_MIN_READERS
