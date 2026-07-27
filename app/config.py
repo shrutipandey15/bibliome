@@ -53,6 +53,13 @@ class Settings(BaseSettings):
     # tagging, and serving it would de-anonymize them (B8.6).
     AGGREGATE_PUBLIC_MIN_READERS: int = 3
 
+    # A *separate* question from the privacy floor above: is this book's profile
+    # stable enough to measure an individual reader's deviation against? That
+    # needs more readers than mere anonymity does — below this, any one reader is
+    # too large a fraction of the population to deviate from it meaningfully.
+    # Tied to the `confirmed` tier for the same reason it exists.
+    DEVIATION_MIN_READERS: int = 5
+
     # Email (SMTP)
     SMTP_HOST: str | None = None
     SMTP_PORT: int = 587
