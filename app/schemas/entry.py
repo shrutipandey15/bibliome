@@ -86,6 +86,9 @@ class EntryUpdate(BaseModel):
 
 class EntryResponse(BaseModel):
     id: uuid.UUID
+    # Canonical book this entry resolved to (B8.1). Null when the title matched
+    # nothing and nothing could be created — the entry still lives on the shelf.
+    book_id: uuid.UUID | None = None
     title: str
     author: str | None
     cover_url: str | None

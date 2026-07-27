@@ -7,6 +7,7 @@ from sqlalchemy.orm import selectinload
 
 from app.models.book_entry import BookEntry, EntryEmotion
 from app.schemas.entry import EntryCreate, EntryUpdate
+from app.services.book_identity import resolve_book
 from app.utils.emotions import canonicalize
 
 
@@ -40,8 +41,10 @@ def _default_finished_at(status: str, finished_at: date | None) -> date | None:
 async def create_entry(db: AsyncSession, user_id: uuid.UUID, data: EntryCreate) -> BookEntry:
     """Create a new book entry with emotions."""
     status = data.status or "finished"
+    book = await resolve_book(db, data.title, data.author, data.isbn, data.cover_url)
     entry = BookEntry(
         user_id=user_id,
+        book_id=book.id if book else None,
         title=data.title,
         author=data.author,
         cover_url=data.cover_url,
@@ -172,6 +175,13 @@ async def update_entry(
     update_data = data.model_dump(exclude_unset=True, exclude={"emotions"})
     for field, value in update_data.items():
         setattr(entry, field, value)
+
+    # Retitling an entry retargets its book identity, so its emotions move to the
+    # right aggregate (B8.1). The caller is responsible for recomputing both the
+    # old and the new book — see routers/entries.py.
+    if {"title", "author", "isbn"} & update_data.keys() or entry.book_id is None:
+        book = await resolve_book(db, entry.title, entry.author, entry.isbn, entry.cover_url)
+        entry.book_id = book.id if book else None
 
     # Keep finished_at consistent with status (P5-7): a book that just became
     # finished gets today's date if none was supplied; clearing to a non-finished

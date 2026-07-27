@@ -158,6 +158,9 @@ dna_cache = RedisDNACache(ttl_seconds=600)
 # Book-search results, shared across workers so a query hits external APIs once
 # for the whole fleet, not once per worker (P4-5).
 book_search_cache = RedisDNACache(ttl_seconds=300, namespace="bookdna:search")
+# Per-book emotional aggregates (B8.3). Longer TTL than DNA: an aggregate only
+# moves when some reader tags that specific book, and writes invalidate directly.
+book_aggregate_cache = RedisDNACache(ttl_seconds=1800, namespace="bookdna:aggregate")
 
 
 async def invalidate_dna(user_id) -> None:
@@ -172,3 +175,12 @@ async def invalidate_dna(user_id) -> None:
     """
     await dna_cache.invalidate_prefix(f"heatmap:{user_id}")
     await dna_cache.invalidate_prefix(f"stats:{user_id}")
+
+
+async def invalidate_book_aggregate(book_id) -> None:
+    """Single invalidation point for one book's aggregate (B8.3).
+
+    Scoped to the one book that changed — an entry write must never sweep the
+    whole aggregate cache.
+    """
+    await book_aggregate_cache.invalidate(f"profile:{book_id}")

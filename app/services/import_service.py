@@ -13,6 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.book_entry import BookEntry
+from app.services.book_identity import resolve_book
 from app.services.book_search import normalize
 
 # Goodreads "Exclusive Shelf" / StoryGraph "Read Status" → our status vocabulary.
@@ -103,8 +104,13 @@ def _dedupe_keys(title: str | None, author: str | None, isbn: str | None) -> set
     return keys
 
 
-async def import_entries(db: AsyncSession, user_id, books: list[dict]) -> tuple[int, int]:
-    """Create entries for parsed books, skipping duplicates. Returns (imported, skipped)."""
+async def import_entries(db: AsyncSession, user_id, books: list[dict]) -> tuple[int, int, set]:
+    """Create entries for parsed books, skipping duplicates.
+
+    Returns (imported, skipped, engaged_book_ids) — the book ids whose aggregates
+    the caller should refresh post-commit (B8.3). Only engaged statuses are
+    included; a want_to_read carries no emotional data.
+    """
     result = await db.execute(
         select(BookEntry.title, BookEntry.author, BookEntry.isbn).where(BookEntry.user_id == user_id)
     )
@@ -113,13 +119,16 @@ async def import_entries(db: AsyncSession, user_id, books: list[dict]) -> tuple[
         seen |= _dedupe_keys(title, author, isbn)
 
     imported = skipped = 0
+    engaged_book_ids: set = set()
     for b in books:
         keys = _dedupe_keys(b["title"], b["author"], b["isbn"])
         if keys & seen:  # already in library, or a duplicate within this file
             skipped += 1
             continue
+        book = await resolve_book(db, b["title"], b["author"], b["isbn"])
         db.add(BookEntry(
             user_id=user_id,
+            book_id=book.id if book else None,
             title=b["title"],
             author=b["author"],
             isbn=b["isbn"],
@@ -129,6 +138,8 @@ async def import_entries(db: AsyncSession, user_id, books: list[dict]) -> tuple[
         ))
         seen |= keys
         imported += 1
+        if book and b["status"] != "want_to_read":
+            engaged_book_ids.add(book.id)
 
     await db.flush()
-    return imported, skipped
+    return imported, skipped, engaged_book_ids
