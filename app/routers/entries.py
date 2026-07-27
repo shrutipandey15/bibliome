@@ -51,6 +51,7 @@ from app.services.checkin_service import (
     list_checkins,
     update_status,
 )
+from app.services.aggregate_service import refresh_book_aggregate
 from app.services.background import recalculate_dna
 from app.services.book_search import bump_popularity
 from app.utils.emotions import VALID_SLUGS
@@ -74,6 +75,7 @@ def _entry_to_response(entry) -> EntryResponse:
     """Convert a BookEntry ORM object to an EntryResponse schema."""
     return EntryResponse(
         id=entry.id,
+        book_id=entry.book_id,
         title=entry.title,
         author=entry.author,
         cover_url=entry.cover_url,
@@ -160,6 +162,7 @@ async def create_new_entry(
     # feed the catalog and refresh DNA caches from the now-durable entry.
     background_tasks.add_task(_feed_catalog, entry.title, entry.author, entry.cover_url, entry.isbn)
     background_tasks.add_task(recalculate_dna, current_user.id)
+    background_tasks.add_task(refresh_book_aggregate, entry.book_id)
     return _entry_to_response(entry)
 
 
@@ -186,12 +189,14 @@ async def import_library(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="File must be UTF-8 CSV")
 
     books, errors = parse_import_csv(content)
-    imported, skipped = await import_entries(db, current_user.id, books)
+    imported, skipped, engaged_book_ids = await import_entries(db, current_user.id, books)
 
     if imported:
         current_user.dna_dirty = True
         await db.flush()
         background_tasks.add_task(recalculate_dna, current_user.id)
+        for book_id in engaged_book_ids:
+            background_tasks.add_task(refresh_book_aggregate, book_id)
 
     return ImportResponse(
         parsed=len(books),
@@ -225,12 +230,20 @@ async def update_existing_entry(
 ):
     """Update a book entry."""
     await entries_limiter.check(request)
+    # Retitling retargets book_id, so both the book it left and the book it
+    # joined need recomputing (B8.3).
+    previous = await get_entry_by_id(db, entry_id, current_user.id)
+    previous_book_id = previous.book_id if previous else None
+
     entry = await update_entry(db, entry_id, current_user.id, data)
     if not entry:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Entry not found")
     current_user.dna_dirty = True
     await db.flush()
     background_tasks.add_task(recalculate_dna, current_user.id)
+    background_tasks.add_task(refresh_book_aggregate, entry.book_id)
+    if previous_book_id and previous_book_id != entry.book_id:
+        background_tasks.add_task(refresh_book_aggregate, previous_book_id)
     return _entry_to_response(entry)
 
 
@@ -244,12 +257,18 @@ async def delete_existing_entry(
 ):
     """Delete a book entry."""
     await entries_limiter.check(request)
+    # Capture the book before the row goes away — afterwards there is nothing to
+    # read it from, and its aggregate still needs recomputing without this reader.
+    doomed = await get_entry_by_id(db, entry_id, current_user.id)
+    book_id = doomed.book_id if doomed else None
+
     deleted = await delete_entry(db, entry_id, current_user.id)
     if not deleted:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Entry not found")
     current_user.dna_dirty = True
     await db.flush()
     background_tasks.add_task(recalculate_dna, current_user.id)
+    background_tasks.add_task(refresh_book_aggregate, book_id)
 
 
 @router.get("/{entry_id}/arc-card", response_model=ArcCardResponse)
@@ -305,6 +324,8 @@ async def finish_existing_entry(
     current_user.dna_dirty = True
     await db.flush()
     background_tasks.add_task(recalculate_dna, current_user.id)
+    # Finishing is the moment an entry becomes engaged data for the aggregate.
+    background_tasks.add_task(refresh_book_aggregate, entry.book_id)
     return _entry_to_response(entry)
 
 
@@ -393,6 +414,7 @@ async def patch_entry_status(
     request: Request,
     entry_id: uuid.UUID,
     data: StatusUpdate,
+    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -404,6 +426,9 @@ async def patch_entry_status(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Entry not found")
 
     await update_status(db, entry, data.status)
+    # A status change moves the entry in or out of the engaged set, which changes
+    # what the book's aggregate is computed over (B8.3).
+    background_tasks.add_task(refresh_book_aggregate, entry.book_id)
     # Reload via the eager path so emotions are loaded for the serializer.
     entry = await get_entry_by_id(db, entry_id, current_user.id)
     return _entry_to_response(entry)

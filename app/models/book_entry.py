@@ -45,6 +45,12 @@ class BookEntry(Base):
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
 
+    # Canonical book identity (B8.1). Nullable: an entry whose title resolves to
+    # nothing still belongs on the shelf, it just cannot feed the aggregate.
+    book_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("books.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+
     status: Mapped[str] = mapped_column(String(20), nullable=False, server_default="finished")
     # "Would you read it again?" — yes | no | not_sure (nullable).
     verdict: Mapped[str | None] = mapped_column(String(10))

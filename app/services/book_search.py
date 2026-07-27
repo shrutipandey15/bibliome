@@ -18,6 +18,7 @@ The more people use the app, the faster search gets.
 import asyncio
 import logging
 import re
+import unicodedata
 import urllib.parse
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
@@ -45,13 +46,30 @@ class BookResult:
 _NOISE_RE = re.compile(r"[^\w\s]", re.UNICODE)
 
 
+def fold_accents(text: str) -> str:
+    """Decompose accented characters and drop the combining marks.
+
+    Without this, the same name yields two different keys depending on which
+    Unicode form the source happened to use: "Emily Brontë" arrives from one API
+    as NFC (precomposed U+00EB, which ``\\w`` keeps -> "emily brontë") and from
+    another as NFD ("e" + U+0308, whose combining mark _NOISE_RE strips ->
+    "emily bronte"). That fractured the catalog into two Wuthering Heights rows
+    (P8-1). Folding to ASCII also collapses "Gabriel García Márquez" and
+    "Gabriel Garcia Marquez", which is what we want for book metadata.
+    """
+    decomposed = unicodedata.normalize("NFKD", text)
+    return "".join(ch for ch in decomposed if not unicodedata.combining(ch))
+
+
 def normalize(text: str) -> str:
-    """Lowercase, strip punctuation, collapse whitespace runs to one space.
+    """Fold accents, lowercase, strip punctuation, collapse whitespace runs.
 
     Collapsing whitespace matters for catalog dedupe (P4-6): "cormac  mccarthy"
-    and "cormac mccarthy" must map to the same normalized key.
+    and "cormac mccarthy" must map to the same normalized key. This is the
+    catalog's identity function — changing it requires re-normalizing the stored
+    ``books.title_normalized`` / ``author_normalized`` columns (see 023).
     """
-    cleaned = _NOISE_RE.sub("", text.lower())
+    cleaned = _NOISE_RE.sub("", fold_accents(text).lower())
     return re.sub(r"\s+", " ", cleaned).strip()
 
 

@@ -39,6 +39,20 @@ class Settings(BaseSettings):
     APP_NAME: str = "Book DNA"
     API_V1_PREFIX: str = "/api"
 
+    # Book aggregate confidence tiers (B8.4). Tunable — these are honesty
+    # thresholds, not performance knobs.
+    #   < EMERGING            -> nothing real to say
+    #   EMERGING .. CONFIRMED -> "early readings"
+    #   >= CONFIRMED          -> enough readers to call it a pattern
+    # CONFIRMED mirrors the 5-book DNA gate: the same bar for the same reason.
+    AGGREGATE_EMERGING_MIN_READERS: int = 1
+    AGGREGATE_CONFIRMED_MIN_READERS: int = 5
+
+    # Below this many readers an aggregate is not served to *other* users: with
+    # one or two readers the "aggregate" is effectively one person's private
+    # tagging, and serving it would de-anonymize them (B8.6).
+    AGGREGATE_PUBLIC_MIN_READERS: int = 3
+
     # Email (SMTP)
     SMTP_HOST: str | None = None
     SMTP_PORT: int = 587

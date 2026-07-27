@@ -1,6 +1,7 @@
 from app.models.user import User
 from app.models.book_entry import BookEntry, EntryEmotion
 from app.models.book import Book
+from app.models.book_aggregate import BookEmotionAggregate
 from app.models.dna_snapshot import DNASnapshot
 from app.models.refresh_token import RefreshToken
 from app.models.share_token import ShareToken
@@ -17,6 +18,7 @@ __all__ = [
     "BookEntry",
     "EntryEmotion",
     "Book",
+    "BookEmotionAggregate",
     "DNASnapshot",
     "RefreshToken",
     "ShareToken",

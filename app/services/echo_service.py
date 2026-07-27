@@ -16,6 +16,7 @@ from app.models.book_entry import BookEntry
 from app.models.echo import Echo, EchoReaction, EchoReply
 from app.models.prompt import Prompt
 from app.models.user import User
+from app.services.book_identity import resolve_book
 from app.services.book_search import normalize
 from app.services.moderation import VERDICT_CRISIS, VERDICT_HOLD, classify_text
 from app.services.social_service import hidden_author_ids, is_blocked_between
@@ -351,8 +352,12 @@ async def add_book_to_shelf(db: AsyncSession, user_id: uuid.UUID, echo: Echo) ->
         if normalize(e.title) == t_norm and normalize(e.author or "") == a_norm:
             return False  # already on their shelf — don't touch its status
 
+    # Same find-or-create every other write path uses, so a book added from an
+    # echo lands on the same canonical row as one added from search (B8.1).
+    book = await resolve_book(db, echo.book_title, echo.book_author)
     db.add(BookEntry(
         user_id=user_id,
+        book_id=book.id if book else None,
         title=echo.book_title,
         author=echo.book_author,
         status="want_to_read",
