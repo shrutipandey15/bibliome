@@ -141,5 +141,6 @@ async def book_profile(
         dnf_rate=agg.dnf_rate,
         confidence=agg.confidence,
         confidence_label=CONFIDENCE_LABELS.get(agg.confidence, agg.confidence),
+        source=agg.source,
         updated_at=agg.updated_at,
     )

@@ -17,12 +17,17 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
 
-# 0 real readers — an LLM/seed prior, never reader data (B8.5). Nothing writes
-# this tier yet; it is defined so the vocabulary is fixed before seeds land.
+# 0 real readers — an LLM/seed prior, never reader data (B8.5).
 CONFIDENCE_PREDICTED = "predicted"
 CONFIDENCE_EMERGING = "emerging"
 CONFIDENCE_CONFIRMED = "confirmed"
 CONFIDENCE_TIERS = (CONFIDENCE_PREDICTED, CONFIDENCE_EMERGING, CONFIDENCE_CONFIRMED)
+
+# Where the row came from, kept separate from how much it should be trusted.
+# An ``llm`` row is disposable scaffolding: the first real reader overwrites it.
+SOURCE_READERS = "readers"
+SOURCE_LLM = "llm"
+SOURCES = (SOURCE_READERS, SOURCE_LLM)
 
 
 class BookEmotionAggregate(Base):
@@ -48,6 +53,8 @@ class BookEmotionAggregate(Base):
 
     confidence: Mapped[str] = mapped_column(String(20), nullable=False, default=CONFIDENCE_EMERGING)
 
+    source: Mapped[str] = mapped_column(String(20), nullable=False, default=SOURCE_READERS)
+
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
@@ -56,6 +63,10 @@ class BookEmotionAggregate(Base):
         CheckConstraint(
             "confidence IN ('predicted','emerging','confirmed')",
             name="check_aggregate_confidence",
+        ),
+        CheckConstraint(
+            "source IN ('readers','llm')",
+            name="check_aggregate_source",
         ),
         CheckConstraint("reader_count >= 0", name="check_aggregate_reader_count"),
         CheckConstraint("dnf_rate >= 0 AND dnf_rate <= 1", name="check_aggregate_dnf_rate"),

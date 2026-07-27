@@ -20,6 +20,7 @@ from app.database import async_session
 from app.models.book_aggregate import (
     CONFIDENCE_CONFIRMED,
     CONFIDENCE_EMERGING,
+    SOURCE_READERS,
     BookEmotionAggregate,
 )
 from app.models.book_entry import BookEntry, EntryEmotion
@@ -117,6 +118,7 @@ async def compute_aggregate(db: AsyncSession, book_id: uuid.UUID) -> dict:
     """Compute (without writing) the aggregate for one book."""
     profile = build_profile(await _load_rows(db, book_id))
     profile["confidence"] = _confidence_for(profile["reader_count"])
+    profile["source"] = SOURCE_READERS
     return profile
 
 

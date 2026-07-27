@@ -427,7 +427,11 @@ async def patch_entry_status(
 
     await update_status(db, entry, data.status)
     # A status change moves the entry in or out of the engaged set, which changes
-    # what the book's aggregate is computed over (B8.3).
+    # both the reader's own profile and what the book's aggregate is computed
+    # over (B8.3).
+    current_user.dna_dirty = True
+    await db.flush()
+    background_tasks.add_task(recalculate_dna, current_user.id)
     background_tasks.add_task(refresh_book_aggregate, entry.book_id)
     # Reload via the eager path so emotions are loaded for the serializer.
     entry = await get_entry_by_id(db, entry_id, current_user.id)

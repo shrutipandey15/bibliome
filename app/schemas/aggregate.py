@@ -7,6 +7,7 @@ from typing import Literal
 from pydantic import BaseModel
 
 Confidence = Literal["predicted", "emerging", "confirmed"]
+Source = Literal["readers", "llm"]
 
 
 class EmotionAggregate(BaseModel):
@@ -31,6 +32,9 @@ class BookProfileResponse(BaseModel):
     # Plain-language rendering of the tier. The UI must show this next to the
     # profile — the tier is the product's honesty, not a footnote (B8.4).
     confidence_label: str
+    # Provenance, separate from trust: "llm" is a seeded prior with no reader
+    # behind it, and the UI must never render it as something readers reported.
+    source: Source = "readers"
     updated_at: datetime | None = None
 
 
