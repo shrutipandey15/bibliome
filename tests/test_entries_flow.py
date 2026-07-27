@@ -136,6 +136,67 @@ async def test_status_patch_toggles_finished_at(client):
     assert r.json()["finished_at"] is None
 
 
+async def test_status_patch_marks_dna_dirty(client, db, monkeypatch):
+    """Finishing a book must refresh the reader's DNA.
+
+    This handler was the one write path that changed what the DNA is computed
+    over without flagging it, so a book could go reading → finished and leave the
+    profile describing a library the reader no longer has.
+
+    The recalc is stubbed out because it clears the flag as its last act — with
+    the real task running, a handler that never set the flag and one that set it
+    look identical afterwards.
+    """
+    from sqlalchemy import select
+    from app.models.user import User
+    from app.routers import entries as entries_router
+
+    scheduled = []
+    async def _fake_recalc(user_id):
+        scheduled.append(user_id)
+    monkeypatch.setattr(entries_router, "recalculate_dna", _fake_recalc)
+
+    headers = await _auth(client, "dirty@example.com", "dirtyreader")
+    entry_id = (await _create(client, headers, status="reading")).json()["id"]
+
+    # Clear the flag the create set, so what we read back can only come from the
+    # status change.
+    user = (await db.execute(select(User).where(User.email == "dirty@example.com"))).scalar_one()
+    user.dna_dirty = False
+    await db.commit()
+    scheduled.clear()
+
+    r = await client.patch(f"/api/entries/{entry_id}/status",
+                           json={"status": "finished"}, headers=headers)
+    assert r.status_code == 200, r.text
+
+    await db.refresh(user)
+    assert user.dna_dirty is True
+    assert scheduled == [user.id]
+
+
+async def test_every_entry_write_handler_flags_dna_dirty():
+    """Regression guard: a new write path must not silently skip the flag.
+
+    Asserted against the source because the failure mode is an *omission* — there
+    is no call to intercept when the line is simply missing, and the only
+    behavioural symptom is a profile that quietly goes stale.
+    """
+    import inspect
+    from app.routers import entries as entries_router
+
+    # Handlers that change what the DNA is computed over. Checkins are excluded:
+    # they're mid-read notes and feed no DNA signal.
+    write_handlers = [
+        "create_new_entry", "import_library", "update_existing_entry",
+        "delete_existing_entry", "finish_existing_entry", "patch_entry_status",
+    ]
+    for name in write_handlers:
+        source = inspect.getsource(getattr(entries_router, name))
+        assert "dna_dirty = True" in source, f"{name} does not flag DNA as dirty"
+        assert "recalculate_dna" in source, f"{name} does not schedule a DNA recalc"
+
+
 async def test_checkins_create_and_list(client):
     headers = await _auth(client)
     entry_id = (await _create(client, headers, status="reading")).json()["id"]
