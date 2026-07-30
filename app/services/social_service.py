@@ -7,10 +7,11 @@ seeing the muted). Both are silent to the other party.
 
 import uuid
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.resonance import ResonanceMatch, ResonanceThread
 from app.models.social import Block, Mute
 
 
@@ -21,6 +22,37 @@ async def block_user(db: AsyncSession, blocker_id: uuid.UUID, blocked_id: uuid.U
         constraint="uq_block"
     )
     await db.execute(stmt)
+    await db.flush()
+    await _purge_resonance(db, blocker_id, blocked_id)
+
+
+async def _purge_resonance(db: AsyncSession, blocker_id: uuid.UUID, blocked_id: uuid.UUID) -> None:
+    """A block has to reach backwards, not just forwards.
+
+    Excluding the pair from *future* matching is not enough: a suggestion banked
+    by the batch job an hour ago is still sitting in the blocker's list, and a
+    connected thread is still open. Both get closed here, at the moment of the
+    block, so "I don't want to see this person" means it everywhere at once.
+
+    Kept in this module rather than resonance_service because block_user is the
+    single chokepoint every block passes through, and resonance_service already
+    imports from here.
+    """
+    a, b = (blocker_id, blocked_id) if str(blocker_id) < str(blocked_id) else (blocked_id, blocker_id)
+    pair = (ResonanceMatch.user_a == a) & (ResonanceMatch.user_b == b)
+
+    matches = (await db.execute(select(ResonanceMatch).where(pair))).scalars().all()
+    if not matches:
+        return
+
+    for match in matches:
+        match.status = "declined"
+        match.declined_by = blocker_id
+    await db.execute(
+        update(ResonanceThread)
+        .where(ResonanceThread.match_id.in_([m.id for m in matches]))
+        .values(status="closed", closed_by=blocker_id)
+    )
     await db.flush()
 
 

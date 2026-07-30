@@ -6,6 +6,7 @@ from sqlalchemy import (
     Date,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
@@ -107,6 +108,8 @@ class EntryEmotion(Base):
     __table_args__ = (
         UniqueConstraint("entry_id", "emotion_id", name="uq_entry_emotion"),
         CheckConstraint("strength >= 1 AND strength <= 10", name="check_strength_range"),
+        # Resonance matches readers by joining this column across users.
+        Index("ix_entry_emotions_emotion_id", "emotion_id"),
     )
 
     # Relationships

@@ -52,7 +52,7 @@ from app.services.checkin_service import (
     update_status,
 )
 from app.services.aggregate_service import refresh_book_aggregate
-from app.services.background import recalculate_dna
+from app.services.background import recalculate_dna, recompute_resonance
 from app.services.book_search import bump_popularity
 from app.utils.emotions import VALID_SLUGS
 
@@ -163,6 +163,9 @@ async def create_new_entry(
     background_tasks.add_task(_feed_catalog, entry.title, entry.author, entry.cover_url, entry.isbn)
     background_tasks.add_task(recalculate_dna, current_user.id)
     background_tasks.add_task(refresh_book_aggregate, entry.book_id)
+    # New book + new emotions = new possible resonance. Batched here, never
+    # computed on the read path.
+    background_tasks.add_task(recompute_resonance, current_user.id)
     return _entry_to_response(entry)
 
 
@@ -197,6 +200,7 @@ async def import_library(
         background_tasks.add_task(recalculate_dna, current_user.id)
         for book_id in engaged_book_ids:
             background_tasks.add_task(refresh_book_aggregate, book_id)
+        background_tasks.add_task(recompute_resonance, current_user.id)
 
     return ImportResponse(
         parsed=len(books),
@@ -244,6 +248,7 @@ async def update_existing_entry(
     background_tasks.add_task(refresh_book_aggregate, entry.book_id)
     if previous_book_id and previous_book_id != entry.book_id:
         background_tasks.add_task(refresh_book_aggregate, previous_book_id)
+    background_tasks.add_task(recompute_resonance, current_user.id)
     return _entry_to_response(entry)
 
 
@@ -328,6 +333,8 @@ async def finish_existing_entry(
     background_tasks.add_task(recalculate_dna, current_user.id)
     # Finishing is the moment an entry becomes engaged data for the aggregate.
     background_tasks.add_task(refresh_book_aggregate, entry.book_id)
+    # ...and the moment it can resonate with another reader.
+    background_tasks.add_task(recompute_resonance, current_user.id)
     return _entry_to_response(entry)
 
 
@@ -435,6 +442,7 @@ async def patch_entry_status(
     await db.flush()
     background_tasks.add_task(recalculate_dna, current_user.id)
     background_tasks.add_task(refresh_book_aggregate, entry.book_id)
+    background_tasks.add_task(recompute_resonance, current_user.id)
     # Reload via the eager path so emotions are loaded for the serializer.
     entry = await get_entry_by_id(db, entry_id, current_user.id)
     return _entry_to_response(entry)

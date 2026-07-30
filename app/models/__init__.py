@@ -13,6 +13,7 @@ from app.models.notification import Notification, NotificationPrefs, Notificatio
 from app.models.collection import Collection, CollectionItem
 from app.models.prompt import Prompt
 from app.models.journal import JournalEntry, JournalEmotion, JournalKeyBundle
+from app.models.resonance import ResonanceMatch, ResonanceMessage, ResonanceThread
 
 __all__ = [
     "User",
@@ -41,4 +42,7 @@ __all__ = [
     "JournalEntry",
     "JournalEmotion",
     "JournalKeyBundle",
+    "ResonanceMatch",
+    "ResonanceThread",
+    "ResonanceMessage",
 ]
