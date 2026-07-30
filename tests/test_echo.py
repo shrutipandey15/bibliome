@@ -52,10 +52,16 @@ async def test_feed_carries_no_public_count(client):
     card = r.json()["echoes"][0]
     assert card["reaction_counts"] is None
     assert "has_more_replies" in card and isinstance(card["has_more_replies"], bool)
+    # `reply_count` exists on the schema but is author-private, exactly like
+    # reaction_counts: the gate is that no *count* reaches a peer, not that the
+    # key is absent. Its value, not its name, is what has to stay private.
+    assert card["reply_count"] is None
     for key in card:
         assert not any(bad in key.lower() for bad in ("like", "score", "karma"))
-        # No field exposes a *reply* count in any form.
-        assert "reply_count" not in key.lower() and "replies_count" not in key.lower()
+    # Nothing numeric about other people's engagement reaches a peer at all.
+    for key, value in card.items():
+        if isinstance(value, int) and not isinstance(value, bool):
+            raise AssertionError(f"peer received a bare count in {key!r}: {value}")
 
 
 async def test_reply_shows_in_thread(client):
@@ -397,3 +403,94 @@ async def test_handle_change_and_cooldown(client):
     # Second change is rate-limited.
     r = await client.patch("/api/user/handle", json={"handle": "nyx"}, headers=h)
     assert r.status_code == 400
+
+
+# ── Frontend-blocking contract: mine / reply_count / is_mine ──
+
+async def test_mine_filter_returns_only_the_viewers_echoes(client):
+    """The "your echoes" tab. Shipped as a real server filter because a server
+    that ignored an unknown param would return the everyone-feed, and the tab
+    would silently lie about whose echoes those are."""
+    a = await _user(client, "minea")
+    b = await _user(client, "mineb")
+    await _post_echo(client, a, body="Mine, and it wrecked me.", book_title="Piranesi")
+    await _post_echo(client, b, body="Theirs, and it held me.", book_title="Stoner")
+
+    everyone = (await client.get("/api/echoes/feed", headers=a)).json()["echoes"]
+    assert len(everyone) == 2
+
+    r = await client.get("/api/echoes/feed?mine=true", headers=a)
+    assert r.status_code == 200, r.text
+    mine = r.json()["echoes"]
+    assert len(mine) == 1
+    assert mine[0]["book_title"] == "Piranesi"
+    assert all(e["is_mine"] for e in mine)
+
+
+async def test_mine_composes_with_the_emotion_anchor(client):
+    """`mine` must narrow the other anchors, not replace them — otherwise "my
+    echoes tagged grief" becomes a client-side filter over someone else's page."""
+    a = await _user(client, "minec")
+    b = await _user(client, "mined")
+    await _post_echo(client, a, body="Grief one.", book_title="A", primary_emotion="grief")
+    await _post_echo(client, a, body="Awe one.", book_title="B", primary_emotion="awe")
+    await _post_echo(client, b, body="Their grief.", book_title="C", primary_emotion="grief")
+
+    r = await client.get("/api/echoes/feed?mine=true&emotion=grief", headers=a)
+    echoes = r.json()["echoes"]
+    assert len(echoes) == 1
+    assert echoes[0]["book_title"] == "A"
+
+
+async def test_reply_count_is_author_only_and_not_capped_by_the_preview(client):
+    """The tally must count *all* replies. Deriving it from `replies_preview`
+    would cap at 2 and under-report any echo with a real conversation."""
+    author = await _user(client, "rcauthor")
+    peer = await _user(client, "rcpeer")
+    echo_id = (await _post_echo(client, author)).json()["echo"]["id"]
+
+    for i in range(4):
+        r = await client.post(f"/api/echoes/{echo_id}/replies",
+                              json={"body": f"reply {i}"}, headers=peer)
+        assert r.status_code == 201, r.text
+
+    mine = (await client.get("/api/echoes/feed", headers=author)).json()["echoes"][0]
+    assert mine["reply_count"] == 4          # not 2, the preview cap
+    assert len(mine["replies_preview"]) == 2
+    assert mine["has_more_replies"] is True
+
+    theirs = (await client.get("/api/echoes/feed", headers=peer)).json()["echoes"][0]
+    assert theirs["reply_count"] is None     # never leaks to non-authors
+
+
+async def test_reply_count_is_zero_not_null_for_an_authors_quiet_echo(client):
+    """For the author, absent must not be confusable with none — the whole point
+    of the field is telling "no replies yet" apart from "not yours"."""
+    author = await _user(client, "rcquiet")
+    await _post_echo(client, author)
+    mine = (await client.get("/api/echoes/feed", headers=author)).json()["echoes"][0]
+    assert mine["reply_count"] == 0
+    assert mine["is_mine"] is True
+
+
+async def test_is_mine_does_not_depend_on_reaction_counts(client):
+    """Ownership is stated, not inferred. The old inference ("reaction_counts is
+    not None") happened to hold, but it coupled the "yours" pill and
+    self-reaction suppression to the nullability of an unrelated field."""
+    author = await _user(client, "ismineA")
+    peer = await _user(client, "ismineB")
+    echo_id = (await _post_echo(client, author)).json()["echo"]["id"]
+
+    mine = (await client.get("/api/echoes/feed", headers=author)).json()["echoes"][0]
+    assert mine["is_mine"] is True
+    assert mine["reaction_counts"] == {}   # no reactions yet — still owned
+
+    theirs = (await client.get("/api/echoes/feed", headers=peer)).json()["echoes"][0]
+    assert theirs["is_mine"] is False
+    assert theirs["reaction_counts"] is None
+
+    # And on the single-echo thread route, which builds cards without annotations.
+    thread = (await client.get(f"/api/echoes/{echo_id}", headers=author)).json()
+    assert thread["echo"]["is_mine"] is True
+    thread = (await client.get(f"/api/echoes/{echo_id}", headers=peer)).json()
+    assert thread["echo"]["is_mine"] is False

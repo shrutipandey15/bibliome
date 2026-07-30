@@ -138,3 +138,57 @@ async def test_snapshot_on_drift_and_shift_notification(client, db):
     )).scalars().all()
     assert len(shift) == 1
     assert shift[0].payload["new"] != shift[0].payload["old"]
+
+
+# ── snapshot_count on /dna/profile ──
+
+async def test_profile_carries_snapshot_count_on_both_branches(client):
+    """Saves the DNA tab a whole extra GET /dna/evolution just to learn a list
+    length. The value already exists in build_dna's ctx (it gates
+    has_two_snapshots), so returning it costs nothing."""
+    h = await _user(client, "snapcount")
+
+    # Below the 5-book gate: still present, so the client never has to check
+    # `enough` before reading it.
+    for i in range(3):
+        await _add_book(client, h, f"B{i}", ["comfort"])
+    body = (await client.get("/api/dna/profile", headers=h)).json()
+    assert body["enough"] is False
+    assert body["snapshot_count"] == 0
+    assert body["has_two_snapshots"] is False
+
+    for i in range(3, 10):
+        await _add_book(client, h, f"B{i}", ["comfort"])
+    body = (await client.get("/api/dna/profile", headers=h)).json()
+    assert body["enough"] is True
+    assert body["snapshot_count"] == 0
+    assert body["has_two_snapshots"] is False
+
+    # And it tracks real snapshots.
+    assert (await client.post("/api/dna/generate", headers=h)).status_code in (200, 201)
+    body = (await client.get("/api/dna/profile", headers=h)).json()
+    assert body["snapshot_count"] >= 1
+
+
+async def test_a_cached_profile_predating_snapshot_count_is_recomputed(client, db):
+    """`dna_dirty` can't see this staleness — nothing changed about the reader,
+    only about the shape we serve. Without the guard the field would be silently
+    missing for every existing user until something else dirtied their DNA."""
+    from sqlalchemy import select
+    from app.models.user import User
+
+    h = await _user(client, "snapstale")
+    for i in range(6):
+        await _add_book(client, h, f"B{i}", ["comfort"])
+    assert "snapshot_count" in (await client.get("/api/dna/profile", headers=h)).json()
+
+    # Simulate a payload cached before the field existed.
+    user = (await db.execute(select(User).where(User.username == "snapstale"))).scalar_one()
+    stale = dict(user.cached_dna_v2)
+    stale.pop("snapshot_count", None)
+    user.cached_dna_v2 = stale
+    user.dna_dirty = False
+    await db.commit()
+
+    body = (await client.get("/api/dna/profile", headers=h)).json()
+    assert "snapshot_count" in body
