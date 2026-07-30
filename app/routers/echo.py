@@ -76,13 +76,18 @@ def _echo_resp(
     replies_preview: list[ReplyResponse] = []
     has_more = False
     counts = None
+    reply_count = None
+    # Ownership is decided once, here, and reported explicitly — it does not
+    # depend on `ann`, so a card built off the feed path still answers it.
+    is_mine = viewer_id is not None and echo.author_id == viewer_id
     if ann is not None:
         my_reactions = ann.my_reactions.get(echo.id, [])
         replies_preview = [_reply_resp(r) for r in ann.replies_for(echo.id)]
         has_more = ann.has_more.get(echo.id, False)
         # Private witness signal: only the author ever receives counts.
-        if viewer_id is not None and echo.author_id == viewer_id:
+        if is_mine:
             counts = ann.counts.get(echo.id, {})
+            reply_count = ann.reply_counts.get(echo.id, 0)
     return EchoResponse(
         id=echo.id,
         handle=handle,
@@ -99,6 +104,8 @@ def _echo_resp(
         replies_preview=replies_preview,
         has_more_replies=has_more,
         reaction_counts=counts,
+        reply_count=reply_count,
+        is_mine=is_mine,
     )
 
 
@@ -151,7 +158,7 @@ async def post_echo(
 
     crisis = CrisisInterstitial(**CRISIS_RESOURCES) if verdict == VERDICT_CRISIS else None
     return EchoCreateResponse(
-        echo=_echo_resp(echo, current_user.handle),
+        echo=_echo_resp(echo, current_user.handle, viewer_id=current_user.id),
         held_for_review=echo.status == "held",
         crisis=crisis,
     )
@@ -165,17 +172,19 @@ async def get_feed(
     book_author: str | None = Query(default=None, max_length=200),
     emotion: str | None = Query(default=None, max_length=30),
     prompt_id: uuid.UUID | None = Query(default=None),
+    mine: bool = Query(default=False),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """Chronological, block-filtered feed that ends. No counts. Optional anchors:
-    a book (title[+author]) for the 'A Book' feed, an emotion for 'A Feeling', or a
-    prompt_id for the answers to one weekly Prompt (the campfire)."""
+    a book (title[+author]) for the 'A Book' feed, an emotion for 'A Feeling', a
+    prompt_id for the answers to one weekly Prompt (the campfire), or `mine` for
+    the viewer's own echoes. Anchors compose."""
     book_key = _book_key(book_title, book_author) if book_title else None
     try:
         echoes, next_cursor = await list_feed(
             db, current_user.id, limit=limit, cursor=cursor,
-            book_key=book_key, emotion=emotion, prompt_id=prompt_id,
+            book_key=book_key, emotion=emotion, prompt_id=prompt_id, mine=mine,
         )
     except EchoError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
@@ -199,7 +208,7 @@ async def get_echo_thread(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Echo not found")
     replies = await list_replies(db, echo_id, current_user.id)
     return EchoThreadResponse(
-        echo=_echo_resp(echo, echo.author.handle),
+        echo=_echo_resp(echo, echo.author.handle, viewer_id=current_user.id),
         replies=[_reply_resp(r) for r in replies],
     )
 

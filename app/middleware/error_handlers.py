@@ -21,6 +21,8 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from sqlalchemy.exc import IntegrityError
 
+from app.config import get_settings
+
 logger = logging.getLogger("bookdna")
 
 
@@ -134,6 +136,8 @@ def setup_logging(environment: str = "development") -> None:
     # Quiet noisy libraries
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
+    # SQL statement logging is opt-in via SQL_ECHO, not implied by development:
+    # at INFO the engine logs every statement and buries the request log.
     logging.getLogger("sqlalchemy.engine").setLevel(
-        logging.INFO if environment == "development" else logging.WARNING
+        logging.INFO if get_settings().SQL_ECHO else logging.WARNING
     )
