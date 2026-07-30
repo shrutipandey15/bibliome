@@ -284,8 +284,10 @@ async def get_entry_arc_card(
     return card
 
 
-# REMOVED (Phase 5 B5.7): GET /{entry_id}/arc-card/og. The only OG image the
-# frontend uses is the share-token DNA card. The arc-card *data* endpoint stays.
+# REMOVED (Phase 5 B5.7): GET /{entry_id}/arc-card/og. Server-side OG rendering
+# is gone entirely now — the share-token card that outlived this one was retired
+# too, and the frontend rasterises the DNA card locally with html2canvas. The
+# arc-card *data* endpoint stays.
 
 
 @router.post("/{entry_id}/finish", response_model=EntryResponse)

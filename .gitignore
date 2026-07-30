@@ -33,3 +33,8 @@ htmlcov/
 
 # Docker
 docker-compose.override.yml
+
+# Personal reading data. scripts/import_reading_journal.py takes --file, so the
+# spreadsheet it reads never needs to live in the repo — and one did, publicly,
+# until it was removed.
+*.xlsx

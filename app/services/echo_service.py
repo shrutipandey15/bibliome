@@ -122,11 +122,14 @@ async def list_feed(
     book_key: str | None = None,
     emotion: str | None = None,
     prompt_id: uuid.UUID | None = None,
+    mine: bool = False,
 ) -> tuple[list[Echo], str | None]:
     """Chronological, keyset-paginated, block-filtered feed. No counts anywhere.
 
     Optional anchors: `book_key` (the "A Book" feed), `emotion` (the "A Feeling"
-    feed), or `prompt_id` (answers to one weekly Prompt — the campfire). Returns
+    feed), `prompt_id` (answers to one weekly Prompt — the campfire), or `mine`
+    (the author's own echoes). They compose — "my echoes tagged grief" is one
+    query, not a client-side filter over a page of everyone's. Returns
     (echoes, next_cursor); next_cursor is None at the end ("caught up").
     """
     hidden = await hidden_author_ids(db, viewer_id)
@@ -137,6 +140,15 @@ async def list_feed(
         .where(Echo.status == "active", _visibility_filter(viewer_id))
         .order_by(Echo.created_at.desc(), Echo.id.desc())
     )
+    if mine:
+        # Composes with every other anchor rather than replacing them, so
+        # "my echoes tagged grief" is one query instead of a client-side filter
+        # over a page of everyone's. Safe against the visibility filter above:
+        # echoes are only ever community|public, never private, so an author's
+        # own echoes are never excluded by it.
+        if viewer_id is None:
+            return [], None  # anonymous viewer has no "mine"
+        query = query.where(Echo.author_id == viewer_id)
     if hidden:
         query = query.where(Echo.author_id.notin_(hidden))
     if book_key:
@@ -260,6 +272,7 @@ class FeedAnnotations:
         self.has_more: dict[uuid.UUID, bool] = {}
         self.my_reactions: dict[uuid.UUID, list[str]] = {}
         self.counts: dict[uuid.UUID, dict[str, int]] = {}  # author's own echoes only
+        self.reply_counts: dict[uuid.UUID, int] = {}       # author's own echoes only
 
     def replies_for(self, echo_id: uuid.UUID) -> list[EchoReply]:
         return self.replies.get(echo_id, [])[:REPLY_PREVIEW_LIMIT]
@@ -330,6 +343,25 @@ async def annotate_feed(
         )
         for eid, kind, n in rows.all():
             ann.counts.setdefault(eid, {})[kind] = n
+
+        # 4) Reply totals, same author-only rule. Counted here rather than derived
+        # from the preview, which caps at REPLY_PREVIEW_LIMIT and would silently
+        # under-report any echo with a real conversation on it. Block-filtered to
+        # match the preview, so the number never exceeds what the author can read.
+        reply_q = (
+            select(EchoReply.echo_id, func.count(EchoReply.id))
+            .where(EchoReply.echo_id.in_(own), EchoReply.status == "active")
+            .group_by(EchoReply.echo_id)
+        )
+        if hidden:
+            reply_q = reply_q.where(EchoReply.author_id.notin_(hidden))
+        reply_rows = await db.execute(reply_q)
+        for eid, n in reply_rows.all():
+            ann.reply_counts[eid] = n
+        # Zero-reply echoes get an explicit 0 rather than a missing key: for the
+        # author the field means "how many", and absent must not read as none.
+        for eid in own:
+            ann.reply_counts.setdefault(eid, 0)
 
     return ann
 

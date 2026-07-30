@@ -59,6 +59,15 @@ class EchoResponse(BaseModel):
     replies_preview: list[ReplyResponse] = []  # first 2 replies, oldest first, inline
     has_more_replies: bool = False        # drives the neutral "read the rest" link (no number)
     reaction_counts: dict[str, int] | None = None  # author-only private aggregate; None otherwise
+    # Author-only too, for the same reason: a reply tally is part of the private
+    # witness signal, not a public popularity number. Counted server-side rather
+    # than derived from `replies_preview`, which caps at 2 and would under-report.
+    reply_count: int | None = None        # None for non-authors
+    # Ownership stated outright instead of inferred from "reaction_counts is not
+    # None". That inference happens to hold, but it couples every ownership check
+    # in the UI (the "yours" pill, self-reaction suppression) to the nullability
+    # of an unrelated field — so any future change to counts silently breaks them.
+    is_mine: bool = False
 
 
 class CrisisInterstitial(BaseModel):

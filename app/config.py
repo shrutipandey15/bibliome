@@ -34,6 +34,11 @@ class Settings(BaseSettings):
     # sending its own X-Forwarded-For (P1-5). 0 = ignore XFF, use the socket peer.
     TRUSTED_PROXY_COUNT: int = 0
 
+    # Echo every SQL statement to the log. Off by default even in development:
+    # it drowns the request log and the app's own startup lines. Set SQL_ECHO=1
+    # when actually debugging a query.
+    SQL_ECHO: bool = False
+
     # App
     ENVIRONMENT: str = "development"
     APP_NAME: str = "Book DNA"

@@ -75,8 +75,13 @@ async def get_dna_profile(
     Below 5 books it returns an honest "not enough yet". Served from cache while
     `dna_dirty` is false; recomputed once per change, not per request (Part 4).
     """
-    if not current_user.dna_dirty and current_user.cached_dna_v2:
-        return current_user.cached_dna_v2
+    cached = current_user.cached_dna_v2
+    # A payload cached before `snapshot_count` existed is stale in a way
+    # `dna_dirty` can't know about: nothing changed about the reader, only about
+    # the shape we serve. Recompute once rather than serving a response missing a
+    # field the client now depends on.
+    if not current_user.dna_dirty and cached and "snapshot_count" in cached:
+        return cached
     return await compute_and_cache(db, current_user)
 
 

@@ -273,6 +273,10 @@ def build_dna(
             "book_count": book_count,
             "needed": MIN_BOOKS_FOR_DNA,
             "message": f"{book_count} books in. At {MIN_BOOKS_FOR_DNA}, the mirror starts to see you.",
+            # Present on both branches so the client never has to check `enough`
+            # before reading it.
+            "snapshot_count": snapshot_count,
+            "has_two_snapshots": snapshot_count >= 2,
         }
 
     enduring = sig.frequency_vector(sigs, weighted=False)
@@ -325,5 +329,10 @@ def build_dna(
         "profiles": {"enduring": enduring, "current": current},
         "drift": drift_val,
         "reads_for": sig._canon_list(reads_for),
+        # Already known here (it gates `has_two_snapshots` above), so returning it
+        # costs nothing. Without it the DNA tab had to spend a whole extra
+        # GET /dna/evolution purely to learn a list length.
+        "snapshot_count": snapshot_count,
+        "has_two_snapshots": snapshot_count >= 2,
     }
 
