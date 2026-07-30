@@ -2,6 +2,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from app.schemas.journal import JournalKeyBundleIn
+
 Visibility = Literal["private", "community", "public"]
 
 
@@ -15,6 +17,13 @@ class UserSettingsUpdate(BaseModel):
 class PasswordChangeRequest(BaseModel):
     current_password: str = Field(min_length=1)
     new_password: str = Field(min_length=8, max_length=128)
+    # The journal's data key is wrapped under a key derived from the password, and
+    # the server cannot re-wrap it — it has neither the old key nor the new one.
+    # So the client re-wraps locally and sends the new bundle *with* the password
+    # change, and both land in one transaction. Omit it and the password still
+    # changes, but the stored wrap goes stale and only the recovery code will open
+    # the journal (journalCryptoContract.md §5).
+    journal_key_bundle: JournalKeyBundleIn | None = None
 
 
 class UserSettingsResponse(BaseModel):

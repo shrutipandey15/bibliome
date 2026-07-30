@@ -25,6 +25,7 @@ from app.models.user import User
 from app.services import dna_signals as sig
 from app.services.dna_engine import calculate_personality, dna_type_slug_for
 from app.services.dna_insights import build_dna
+from app.services.journal_service import load_emotion_sources as load_journal_sources
 from app.services.notification_service import notify
 
 
@@ -49,6 +50,16 @@ async def _load_raw(db: AsyncSession, user_id: uuid.UUID) -> list[dict]:
         }
         for e in rows
     ]
+
+
+async def _load_journal_sigs(db: AsyncSession, user_id: uuid.UUID) -> list[sig.EntrySig]:
+    """Named journal days as EntrySigs — the same shape books produce.
+
+    Journal emotions are just another emotion source. The prose is ciphertext we
+    cannot read and never load; only the plaintext tags come through here, which is
+    the entire reason those tags are stored readable (VISION §6).
+    """
+    return [sig.entry_sig(r) for r in await load_journal_sources(db, user_id)]
 
 
 @dataclass
@@ -79,12 +90,16 @@ async def compute_and_cache(db: AsyncSession, user: User) -> dict:
     Phase-7 payload (what the owner's mirror renders). No snapshot side effects."""
     raw = await _load_raw(db, user.id)
     sigs = [sig.entry_sig(r) for r in raw]
+    journal_sigs = await _load_journal_sigs(db, user.id)
     ctx = await _snapshot_context(db, user.id)
 
-    v2 = build_dna(sigs, user.reads_for, prev_snapshot=ctx.prev_emotion_data,
-                   snapshot_count=ctx.count)
+    v2 = build_dna(sigs, user.reads_for, journal_sigs=journal_sigs,
+                   prev_snapshot=ctx.prev_emotion_data, snapshot_count=ctx.count)
 
-    # Legacy public signature (unchanged shape) — reused by the public profile.
+    # Legacy public signature — books ONLY, deliberately. This payload is reused as
+    # the *public* profile signature, and the journal is private: a stranger must
+    # not be able to read emotion frequencies out of someone's private life, even
+    # in aggregate. The private mirror (v2, above) is where life and reading meet.
     legacy = calculate_personality(raw)
     legacy["book_count"] = len(raw)
 
@@ -110,8 +125,12 @@ async def maybe_snapshot_and_notify(db: AsyncSession, user: User) -> DNASnapshot
     sigs = [sig.entry_sig(r) for r in raw]
     ctx = await _snapshot_context(db, user.id)
 
-    current = sig.frequency_vector(sigs, weighted=True)
-    enduring = sig.frequency_vector(sigs, weighted=False)
+    # Snapshot the same vectors the mirror renders — books plus named journal days.
+    # If these two diverged, drift would be measured against a profile the reader
+    # was never shown, and the "your DNA shifted" notice would be unfalsifiable.
+    vector_sigs = sigs + await _load_journal_sigs(db, user.id)
+    current = sig.frequency_vector(vector_sigs, weighted=True)
+    enduring = sig.frequency_vector(vector_sigs, weighted=False)
     archetype_id, _ = sig.score_archetype(current)
     archetype_name = sig.archetype_dict(archetype_id)["name"]
 

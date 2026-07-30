@@ -80,6 +80,15 @@ class User(Base):
     share_tokens: Mapped[list["ShareToken"]] = relationship(
         "ShareToken", back_populates="user", cascade="all, delete-orphan"
     )
+    # The journal (VISION §6). Deleting the account deletes the ciphertext and the
+    # only key material that could ever have opened it.
+    journal_entries: Mapped[list["JournalEntry"]] = relationship(
+        "JournalEntry", back_populates="user", cascade="all, delete-orphan"
+    )
+    journal_key_bundle: Mapped["JournalKeyBundle | None"] = relationship(
+        "JournalKeyBundle", back_populates="user", uselist=False,
+        cascade="all, delete-orphan",
+    )
 
     @hybrid_property
     def is_public(self) -> bool:

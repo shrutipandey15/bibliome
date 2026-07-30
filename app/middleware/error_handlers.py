@@ -12,6 +12,7 @@ Logs errors with request context for debugging.
 """
 
 import logging
+import re
 import traceback
 import uuid
 from datetime import datetime, timezone
@@ -24,6 +25,30 @@ from sqlalchemy.exc import IntegrityError
 from app.config import get_settings
 
 logger = logging.getLogger("bookdna")
+
+# SQLAlchemy stringifies a failed statement as
+# "... [SQL: INSERT ...] [parameters: (...)] (Background on this error at: ...)".
+# The SQL is useful in a log; the bound parameters are the user's data — entry
+# notes, quotes, emails, and journal ciphertext.
+_SQL_PARAMS_RE = re.compile(r"\[parameters:.*?\](?=\s*(?:\(Background|\[SQL|$))", re.DOTALL)
+
+
+def redact_sql_parameters(text: str) -> str:
+    """Strip bound parameters out of anything we're about to log.
+
+    The journal makes this load-bearing rather than merely tidy: journal
+    ciphertext must never reach the logs (journalCryptoContract.md §3), and an
+    unhandled DB error on a journal write would otherwise stringify the whole blob
+    straight into them. Nothing downstream needs the values to diagnose a failure.
+    """
+    if "[parameters:" not in text:
+        return text
+    redacted = _SQL_PARAMS_RE.sub("[parameters: REDACTED]", text)
+    if "[parameters:" in redacted.replace("[parameters: REDACTED]", ""):
+        # Unrecognized layout — truncate rather than risk logging the values.
+        head, _, _ = redacted.partition("[parameters:")
+        return head + "[parameters: REDACTED]"
+    return redacted
 
 
 def error_response(status_code: int, error: str, detail: str, error_id: str | None = None) -> JSONResponse:
@@ -88,7 +113,7 @@ def register_error_handlers(app: FastAPI) -> None:
 
         logger.warning(
             "Integrity error on %s %s: %s",
-            request.method, request.url.path, err_str,
+            request.method, request.url.path, redact_sql_parameters(err_str),
         )
 
         return error_response(
@@ -111,8 +136,10 @@ def register_error_handlers(app: FastAPI) -> None:
             error_id,
             request.method,
             request.url.path,
-            str(exc),
-            traceback.format_exc(),
+            redact_sql_parameters(str(exc)),
+            # The traceback carries the same stringified DB error, so it needs the
+            # same redaction — otherwise the tail of the trace re-leaks the values.
+            redact_sql_parameters(traceback.format_exc()),
         )
 
         return error_response(
