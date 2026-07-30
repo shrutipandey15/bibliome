@@ -121,15 +121,20 @@ def _reset_limiters():
     from app.routers import auth as auth_router
     from app.routers import entries as entries_router
     from app.routers import echo as echo_router
+    from app.routers import threads as threads_router
     relaxed = (
         rate_limit.auth_limiter, rate_limit.generate_limiter,
         auth_router.register_limiter, entries_router.entries_limiter,
-        echo_router.echo_write_limiter,
+        echo_router.echo_write_limiter, threads_router.message_limiter,
     )
     for lim in relaxed:
         lim._hits.clear()
         lim.max_requests = 100000
     rate_limit.login_lockout._hits.clear()
+    # Cleared but NOT relaxed: the reach cap is keyed per user id, and
+    # test_reach_is_rate_limited_per_day asserts the real production ceiling.
+    from app.routers import resonance as resonance_router
+    resonance_router.reach_limiter._hits.clear()
 
 
 @pytest.fixture

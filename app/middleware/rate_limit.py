@@ -99,13 +99,12 @@ class RateLimiter:
     def _get_ip(self, request: Request) -> str:
         return get_client_ip(request)
 
-    def _redis_key(self, ip: str) -> str:
-        return f"bookdna:{self.prefix}:{ip}"
+    def _redis_key(self, ident: str) -> str:
+        return f"bookdna:{self.prefix}:{ident}"
 
-    async def _check_redis(self, r: redis.Redis, request: Request) -> None:
+    async def _check_redis(self, r: redis.Redis, ident: str) -> None:
         """Rate limit check using Redis sorted set sliding window."""
-        ip = self._get_ip(request)
-        key = self._redis_key(ip)
+        key = self._redis_key(ident)
         now = time.time()
         cutoff = now - self.window
 
@@ -131,7 +130,7 @@ class RateLimiter:
                 headers={"Retry-After": str(retry_after)},
             )
 
-    def _check_memory(self, request: Request) -> None:
+    def _check_memory(self, ident: str) -> None:
         """Fallback in-memory rate limiter."""
         now = time.monotonic()
 
@@ -143,27 +142,48 @@ class RateLimiter:
             for k in expired:
                 del self._hits[k]
 
-        ip = self._get_ip(request)
         cutoff = now - self.window
-        self._hits[ip] = [t for t in self._hits[ip] if t > cutoff]
+        self._hits[ident] = [t for t in self._hits[ident] if t > cutoff]
 
-        if len(self._hits[ip]) >= self.max_requests:
-            retry_after = int(self._hits[ip][0] + self.window - now) + 1
+        if len(self._hits[ident]) >= self.max_requests:
+            retry_after = int(self._hits[ident][0] + self.window - now) + 1
             raise HTTPException(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                 detail=f"Too many requests. Try again in {retry_after}s.",
                 headers={"Retry-After": str(retry_after)},
             )
 
-        self._hits[ip].append(now)
+        self._hits[ident].append(now)
 
     async def check(self, request: Request) -> None:
-        """Check rate limit. Uses Redis if available, falls back to memory."""
+        """Check rate limit for the client IP. Redis if available, else memory."""
+        await self.check_key(self._get_ip(request))
+
+    async def check_key(self, ident: str) -> None:
+        """Check the limit against an arbitrary identity — e.g. a user id, so the
+        budget follows the account across networks instead of the IP it happened
+        to arrive from. Consumes one unit of budget when it passes.
+        """
         r = await get_redis()
         if r is not None:
-            await self._check_redis(r, request)
+            await self._check_redis(r, ident)
         else:
-            self._check_memory(request)
+            self._check_memory(ident)
+
+    async def remaining(self, ident: str) -> int:
+        """Budget left for this identity, without consuming any. Read-only."""
+        r = await get_redis()
+        if r is not None:
+            key = self._redis_key(ident)
+            now = time.time()
+            pipe = r.pipeline()
+            pipe.zremrangebyscore(key, 0, now - self.window)
+            pipe.zcard(key)
+            used = (await pipe.execute())[1]
+        else:
+            cutoff = time.monotonic() - self.window
+            used = len([t for t in self._hits.get(ident, []) if t > cutoff])
+        return max(self.max_requests - used, 0)
 
 
 class FailedAttemptTracker:

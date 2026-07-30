@@ -133,14 +133,19 @@ async def submit_report(
     created = result.scalar_one_or_none() is not None
     await db.flush()
 
-    # Auto-throttle: hide the target from the feed while it awaits review.
-    Model = Echo if target_type == "echo" else EchoReply
-    pressure = await _weighted_open_pressure(db, target_type, target_id)
-    if pressure >= REPORT_THROTTLE_THRESHOLD:
-        obj = (await db.execute(select(Model).where(Model.id == target_id))).scalar_one_or_none()
-        if obj is not None and obj.status == "active":
-            obj.status = "held"
-            await db.flush()
+    # Auto-throttle: hide the target from the feed while it awaits review. Only
+    # public surfaces can be throttled this way — a reported private thread goes
+    # to the queue, but auto-hiding it would silence a conversation on one
+    # party's say-so. There, blocking (which the reporter does themselves) is the
+    # remedy, not moderation pressure.
+    Model = {"echo": Echo, "reply": EchoReply}.get(target_type)
+    if Model is not None:
+        pressure = await _weighted_open_pressure(db, target_type, target_id)
+        if pressure >= REPORT_THROTTLE_THRESHOLD:
+            obj = (await db.execute(select(Model).where(Model.id == target_id))).scalar_one_or_none()
+            if obj is not None and obj.status == "active":
+                obj.status = "held"
+                await db.flush()
 
     return created
 

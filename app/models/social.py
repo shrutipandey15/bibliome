@@ -15,7 +15,7 @@ REPORT_CATEGORIES = (
     "harassment", "hate", "csam", "spam", "self_harm", "pii", "other",
 )
 REPORT_STATUSES = ("open", "resolved", "dismissed")
-REPORT_TARGET_TYPES = ("echo", "reply")
+REPORT_TARGET_TYPES = ("echo", "reply", "thread")
 
 
 class Block(Base):
