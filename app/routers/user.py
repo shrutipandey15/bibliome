@@ -13,6 +13,11 @@ from app.schemas.user import (
 )
 from app.services.auth_service import hash_password, revoke_all_refresh_tokens, verify_password
 from app.services.handle_service import HandleError, change_handle
+from app.services.journal_service import (
+    KeyBundleMissing,
+    mark_password_wrap_stale,
+    replace_key_bundle,
+)
 from app.services.notification_service import notify
 from app.services.visibility import create_share_token, revoke_share_tokens
 from app.utils.cookies import clear_refresh_cookie
@@ -94,7 +99,17 @@ async def change_password(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Change password. Requires current password for verification."""
+    """Change password. Requires current password for verification.
+
+    If the account has an encrypted journal, the password change also has to move
+    its wrapped data key — which only the client can do. Send the re-wrapped
+    bundle as ``journal_key_bundle`` and both are written in this one transaction,
+    so there is never a moment where the stored wrap doesn't match the password.
+
+    Omit it and the change still goes through; we then mark the password wrap
+    stale and say so in the response rather than letting the user find out the
+    next time they open their journal.
+    """
     if not await verify_password(data.current_password, current_user.password_hash):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -102,6 +117,32 @@ async def change_password(
         )
 
     current_user.password_hash = await hash_password(data.new_password)
+
+    # Journal key, same transaction as the password itself.
+    journal_state: dict | None = None
+    if data.journal_key_bundle is not None:
+        try:
+            await replace_key_bundle(db, current_user.id, data.journal_key_bundle)
+            journal_state = {"rewrapped": True}
+        except KeyBundleMissing:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    "No journal key exists for this account, so there is nothing "
+                    "to re-wrap. Set one up with POST /journal/key."
+                ),
+            )
+    elif await mark_password_wrap_stale(db, current_user.id):
+        journal_state = {
+            "rewrapped": False,
+            "locked": True,
+            "recoverable_with_recovery_code": True,
+            "message": (
+                "Your journal is still encrypted under your old password. Unlock it "
+                "with your recovery code, then re-wrap it (PUT /journal/key)."
+            ),
+        }
+
     # Changing the password revokes all sessions and clears this browser's cookie (P1-1).
     await revoke_all_refresh_tokens(db, current_user.id)
     await db.flush()
@@ -111,7 +152,10 @@ async def change_password(
     await notify(db, current_user.id, TIER_SECURITY, "password_changed",
                  payload={"message": "Your password was changed."})
 
-    return {"message": "Password updated"}
+    body: dict = {"message": "Password updated"}
+    if journal_state is not None:
+        body["journal"] = journal_state
+    return body
 
 
 @router.post("/share-token")

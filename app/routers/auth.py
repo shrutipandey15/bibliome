@@ -34,6 +34,7 @@ from app.services.auth_service import (
     hash_password,
 )
 from app.services.email_service import send_reset_email, _generate_token
+from app.services.journal_service import mark_password_wrap_stale
 from app.utils.cookies import set_refresh_cookie, clear_refresh_cookie
 from app.models.notification import TIER_SECURITY
 from app.services.notification_service import notify
@@ -128,7 +129,16 @@ async def forgot_password(
 
 @router.post("/reset-password")
 async def reset_password(data: ResetPasswordRequest, response: Response, db: AsyncSession = Depends(get_db)):
-    """Reset password using the token from the reset email."""
+    """Reset password using the token from the reset email.
+
+    A reset proves control of the email, not knowledge of the old password — so
+    the journal's password-wrapped data key becomes permanently unusable here.
+    Nobody, including us, can re-wrap it: the server has never held that key.
+
+    We therefore mark the wrap stale and say so in the response. With the recovery
+    code the journal comes back; without it, it is gone for good. The API states
+    that plainly at the moment it becomes true (journalCryptoContract.md §5).
+    """
     result = await db.execute(
         select(User).where(User.reset_token == hash_token(data.token))
     )
@@ -143,6 +153,9 @@ async def reset_password(data: ResetPasswordRequest, response: Response, db: Asy
     user.password_hash = await hash_password(data.new_password)
     user.reset_token = None
     user.reset_token_expires = None
+    # The password wrap of the journal key is now dead. The recovery wrap is not —
+    # it never depended on the password — so the bundle stays exactly where it is.
+    had_journal = await mark_password_wrap_stale(db, user.id)
     # Recovering the account must log out any existing (possibly attacker) sessions.
     await revoke_all_refresh_tokens(db, user.id)
     await db.flush()
@@ -152,7 +165,18 @@ async def reset_password(data: ResetPasswordRequest, response: Response, db: Asy
                  payload={"message": "Your password was reset."})
 
     logger.info("Password reset for %s", user.email)
-    return {"message": "Password updated successfully"}
+    body: dict = {"message": "Password updated successfully"}
+    if had_journal:
+        body["journal"] = {
+            "locked": True,
+            "recoverable_with_recovery_code": True,
+            "message": (
+                "Your journal was encrypted with your old password, and we never had "
+                "the key. Only your recovery code can unlock it now — without that "
+                "code those entries are permanently unreadable, by you and by us."
+            ),
+        }
+    return body
 
 
 @router.post("/login", response_model=AuthResponse)

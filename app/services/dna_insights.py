@@ -256,6 +256,7 @@ def build_dna(
     sigs: list["sig.EntrySig"],
     reads_for: list[str] | None = None,
     *,
+    journal_sigs: list["sig.EntrySig"] | None = None,
     prev_snapshot: dict | None = None,
     snapshot_count: int = 0,
     insight_limit: int = 4,
@@ -265,8 +266,20 @@ def build_dna(
     Below 5 books it returns an honest "not enough yet" — not a failure state, but
     anticipation. Above it: recency-weighted profiles, a demoted archetype, the
     strongest few falsifiable insights, and the honestly-locked rest.
+
+    ``sigs`` is books. ``journal_sigs`` is named journal days, and it feeds exactly
+    the signals that are about *who you are* — the emotion vectors, their drift,
+    the archetype, and the never-named blind spots — so DNA spans reading and life
+    (VISION §6). It deliberately does NOT feed anything that makes a claim about
+    books: ``book_count``, rating style, abandonment, arcs, pairing, and
+    stated-vs-revealed all stay book-only, because "you've logged 12 books" and
+    "the books you rate highest" have to remain true sentences.
     """
     book_count = len(sigs)
+    # Every signal below reads one of these two lists, and which one it reads is
+    # the whole editorial decision above.
+    vector_sigs = sigs + (journal_sigs or [])
+    journal_count = len(journal_sigs or [])
     if book_count < MIN_BOOKS_FOR_DNA:
         return {
             "enough": False,
@@ -277,10 +290,11 @@ def build_dna(
             # before reading it.
             "snapshot_count": snapshot_count,
             "has_two_snapshots": snapshot_count >= 2,
+            "journal_entry_count": journal_count,
         }
 
-    enduring = sig.frequency_vector(sigs, weighted=False)
-    current = sig.frequency_vector(sigs, weighted=True)
+    enduring = sig.frequency_vector(vector_sigs, weighted=False)
+    current = sig.frequency_vector(vector_sigs, weighted=True)
     drift_val = sig.drift(enduring, current)
 
     # Book-share (distinct books tagged / total) — for the "rare" blind-spot variant.
@@ -304,7 +318,10 @@ def build_dna(
         "intensity_signature": sig.intensity_signature(sigs),
         "range": sig.range_entropy(sigs),
         "range_prev_distinct": range_prev_distinct,
-        "blind_spots": sig.blind_spots(sigs),
+        # An emotion is only a blind spot if it's absent from the journal too —
+        # "you have never named this" is a stronger and more honest claim when it
+        # covers everywhere the reader names feelings, not just the shelf.
+        "blind_spots": sig.blind_spots(vector_sigs),
         "rare": rare,
         "top_pair": top_pair,
         "stated": sig.stated_vs_revealed(sigs, reads_for),
@@ -334,5 +351,9 @@ def build_dna(
         # GET /dna/evolution purely to learn a list length.
         "snapshot_count": snapshot_count,
         "has_two_snapshots": snapshot_count >= 2,
+        # How much of the profile above came from named days rather than books. The
+        # client can say so; without it, a reader couldn't tell why their vectors
+        # moved after a week of journalling.
+        "journal_entry_count": journal_count,
     }
 

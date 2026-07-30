@@ -51,13 +51,21 @@ GATES: dict[str, int] = {
 
 @dataclass
 class EntrySig:
-    """The minimal slice of a book entry the signal math needs."""
+    """The minimal slice of an emotion source the signal math needs.
+
+    Usually a book entry. Since the journal landed it can also be a named day:
+    journal emotions are just another emotion source, so they arrive in this same
+    shape rather than through a parallel pipeline. ``source`` is what lets the
+    caller keep book-specific claims ("you've logged N books", rating style,
+    abandonment) about books alone while the emotion vectors span both.
+    """
     emotions: list[str]          # canonical, deduped
     intensity: int
     ts: datetime                 # finished_at (fallback created_at), tz-aware
     status: str                  # finished | reading | want_to_read
     arc_start: str | None = None
     arc_end: str | None = None
+    source: str = "book"         # book | journal
 
 
 def _canon_list(raw) -> list[str]:
@@ -91,6 +99,7 @@ def entry_sig(raw: dict) -> EntrySig:
         status=raw.get("status", "finished") or "finished",
         arc_start=canonicalize(raw["arc_start"]) if raw.get("arc_start") else None,
         arc_end=canonicalize(raw["arc_end"]) if raw.get("arc_end") else None,
+        source=raw.get("source") or "book",
     )
 
 
