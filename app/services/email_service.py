@@ -14,8 +14,9 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
 from app.config import get_settings
+from app.utils.redact import redact_email
 
-logger = logging.getLogger("bookdna.email")
+logger = logging.getLogger("bibliome.email")
 settings = get_settings()
 
 
@@ -27,10 +28,10 @@ def _generate_token() -> str:
 def _build_verification_email(username: str, token: str) -> tuple[str, str]:
     """Build email verification subject and HTML body."""
     link = f"{settings.FRONTEND_URL}/verify?token={token}"
-    subject = "Verify your Book DNA account"
+    subject = "Verify your Bibliome account"
     body = f"""
     <div style="font-family: Georgia, serif; max-width: 500px; margin: 0 auto; color: #333;">
-      <h2 style="color: #1a1a1e;">Welcome to Book DNA, {username}</h2>
+      <h2 style="color: #1a1a1e;">Welcome to Bibliome, {username}</h2>
       <p>Every reader leaves emotional fingerprints. Yours are waiting to be mapped.</p>
       <p>Click below to verify your email and unlock your reading personality:</p>
       <p style="text-align: center; margin: 30px 0;">
@@ -44,7 +45,7 @@ def _build_verification_email(username: str, token: str) -> tuple[str, str]:
         This link expires in 24 hours.
       </p>
       <p style="color: #aaa; font-size: 11px; margin-top: 30px; border-top: 1px solid #eee; padding-top: 15px;">
-        Book DNA — because the books that change you deserve more than a star rating.
+        Bibliome — because the books that change you deserve more than a star rating.
       </p>
     </div>
     """
@@ -54,7 +55,7 @@ def _build_verification_email(username: str, token: str) -> tuple[str, str]:
 def _build_reset_email(username: str, token: str) -> tuple[str, str]:
     """Build password reset subject and HTML body."""
     link = f"{settings.FRONTEND_URL}/reset-password?token={token}"
-    subject = "Reset your Book DNA password"
+    subject = "Reset your Bibliome password"
     body = f"""
     <div style="font-family: Georgia, serif; max-width: 500px; margin: 0 auto; color: #333;">
       <h2 style="color: #1a1a1e;">Password Reset</h2>
@@ -86,7 +87,7 @@ async def send_email(to_email: str, subject: str, html_body: str) -> bool:
     (P0-4): that made broken production delivery undiagnosable from the outside.
     """
     if not settings.email_enabled:
-        logger.info("EMAIL (dev mode — SMTP not configured):\n  To: %s\n  Subject: %s\n  Body: [HTML email]", to_email, subject)
+        logger.info("EMAIL (dev mode — SMTP not configured):\n  To: %s\n  Subject: %s\n  Body: [HTML email]", redact_email(to_email), subject)
         return True
 
     try:
@@ -106,17 +107,17 @@ async def send_email(to_email: str, subject: str, html_body: str) -> bool:
             password=settings.SMTP_PASSWORD,
             use_tls=True,
         )
-        logger.info("Email sent to %s: %s", to_email, subject)
+        logger.info("Email sent to %s: %s", redact_email(to_email), subject)
         return True
     except ImportError:
         # SMTP is configured but the dependency is missing — a real deploy fault.
         logger.error(
             "SMTP is configured but aiosmtplib is not installed; email to %s NOT sent. "
-            "Add aiosmtplib to the environment.", to_email,
+            "Add aiosmtplib to the environment.", redact_email(to_email),
         )
         return False
     except Exception as e:
-        logger.error("Failed to send email to %s: %s", to_email, e)
+        logger.error("Failed to send email to %s: %s", redact_email(to_email), e)
         return False
 
 

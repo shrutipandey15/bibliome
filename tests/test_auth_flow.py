@@ -9,7 +9,7 @@ import pytest
 
 pytestmark = pytest.mark.asyncio
 
-COOKIE = "bookdna_refresh"
+COOKIE = "bibliome_refresh"
 REG = {"email": "a@example.com", "username": "alice", "password": "hunter2pass", "display_name": "Alice"}
 
 

@@ -14,6 +14,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from app.schemas.echo import CrisisInterstitial
+
 MatchStatus = Literal["suggested", "pending", "connected", "declined"]
 MatchStrength = Literal["strong", "light"]
 # "you_reached" / "they_reached" tell the UI which side of a pending match the
@@ -73,6 +75,9 @@ class MessageResponse(BaseModel):
     is_mine: bool
     body: str
     created_at: datetime
+    # Present only on send, and only when the classifier heard the *sender*
+    # sounding at risk. Same supportive interstitial Echo shows; never a block.
+    crisis: CrisisInterstitial | None = None
 
 
 class MessageListResponse(BaseModel):

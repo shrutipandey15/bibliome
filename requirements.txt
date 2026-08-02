@@ -1,15 +1,19 @@
+# Held at 0.115.0 deliberately. Moving to 0.128.x pulls starlette 0.38 -> 0.52,
+# which clears 8 advisories but is a framework upgrade — it belongs in its own
+# change, not bundled with a security pass. Tracked as an open item.
 fastapi==0.115.0
 uvicorn[standard]==0.30.0
 sqlalchemy[asyncio]==2.0.35
 asyncpg==0.29.0
 alembic==1.13.0
-PyJWT==2.9.0
-passlib[bcrypt]==1.7.4
+PyJWT==2.13.0
+# passlib removed: nothing imported it. auth_service calls bcrypt directly, so
+# the fragile passlib-1.7.4 / bcrypt-4.x pairing was never in the login path.
 bcrypt==4.0.1
 pydantic==2.9.0
 pydantic-settings==2.5.0
 email-validator==2.1.0
-python-multipart==0.0.9
+python-multipart==0.0.31
 httpx>=0.27.0
 redis>=5.0.0
 aiosmtplib==3.0.2

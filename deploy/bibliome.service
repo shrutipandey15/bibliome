@@ -1,0 +1,31 @@
+[Unit]
+Description=Bibliome API
+# Redis backs rate limiting and login lockout across workers. Ordering only —
+# if it is down the app degrades to per-process in-memory limiting and retries.
+After=network.target postgresql.service redis-server.service
+Wants=postgresql.service redis-server.service
+
+[Service]
+Type=exec
+User=www-data
+Group=www-data
+WorkingDirectory=/srv/bibliome/api
+EnvironmentFile=/srv/bibliome/api/.env
+# 2 workers, not 4: the box is a Celeron J4125 (4 cores, no SMT) that also runs
+# Postgres, Redis, nginx and cloudflared. Each worker holds its own DB pool.
+ExecStart=/srv/bibliome/api/venv/bin/uvicorn app.main:app \
+    --host 127.0.0.1 \
+    --port 8100 \
+    --workers 2 \
+    --log-level info
+Restart=always
+RestartSec=5
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/srv/bibliome/api
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

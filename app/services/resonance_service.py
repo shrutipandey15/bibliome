@@ -37,10 +37,11 @@ from app.models.resonance import (
 )
 from app.models.user import User
 from app.services.aggregate_service import ENGAGED_STATUSES
+from app.services.moderation import VERDICT_CRISIS, VERDICT_HOLD, classify_text
 from app.services.social_service import hidden_author_ids, is_blocked_between
 from app.utils.emotions import get_emotion
 
-logger = logging.getLogger("bookdna.resonance")
+logger = logging.getLogger("bibliome.resonance")
 
 # How many suggestions a reader is shown at once. Three is the whole point: this
 # is a quiet invitation, not an inbox. Raising it makes the feature a feed.
@@ -566,8 +567,24 @@ async def list_threads(db: AsyncSession, user_id: uuid.UUID) -> list[ResonanceTh
 
 async def post_message(
     db: AsyncSession, thread: ResonanceThread, sender_id: uuid.UUID, body: str
-) -> ResonanceMessage:
-    """Send a message. Free text: no topic anchor, no emotion tag, no prompt."""
+) -> tuple[ResonanceMessage, str, str | None]:
+    """Send a message. Free text: no topic anchor, no emotion tag, no prompt.
+
+    Returns ``(message, verdict, reason)``. The classifier that guards Echo runs
+    here too — it previously did not, which meant the one surface where a
+    stranger can say anything to one specific person was the only surface with
+    no pre-publish check at all.
+
+    The two verdicts are treated differently than on a public surface:
+
+    - **crisis** (the *sender* sounds at risk): the message sends, and the sender
+      gets the resources back. Care, not punishment — same stance as Echo.
+    - **threat**: refused outright. Echo can hold a threat invisibly because it
+      has a feed to hide it from; a thread has one reader, who is the target.
+      Holding it silently would tell the sender it sent. Refusing is honest.
+    - **pii**: allowed through. Echo holds these because it is public. Two people
+      who both said yes swapping contact details is the thread working.
+    """
     body = (body or "").strip()
     if not body:
         raise ResonanceError("Message body is required")
@@ -578,10 +595,14 @@ async def post_message(
     if await is_blocked_between(db, sender_id, thread.match.other_id(sender_id)):
         raise ResonanceError("This conversation is closed")
 
+    verdict, reason = classify_text(body)
+    if verdict == VERDICT_HOLD and reason == "threat":
+        raise ResonanceError("This message can't be sent.")
+
     message = ResonanceMessage(thread_id=thread.id, sender_id=sender_id, body=body)
     db.add(message)
     await db.flush()
-    return message
+    return message, verdict, reason
 
 
 async def list_messages(

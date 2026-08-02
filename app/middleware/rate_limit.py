@@ -1,5 +1,5 @@
 """
-Rate limiter for Book DNA API.
+Rate limiter for Bibliome API.
 
 Primary: Redis-backed sliding window (production-grade, works across instances).
 Fallback: In-memory if Redis is unavailable (dev/testing).
@@ -22,19 +22,35 @@ from fastapi import HTTPException, Request, status
 
 from app.config import get_settings
 
-logger = logging.getLogger("bookdna.ratelimit")
+logger = logging.getLogger("bibliome.ratelimit")
 
 # Shared Redis connection — initialized lazily
 _redis_client: redis.Redis | None = None
-_redis_failed: bool = False
+
+# Two distinct "no Redis" states, and they must not be conflated:
+#   _redis_disabled — no REDIS_URL at all. A permanent, deliberate opt-out; log
+#                     once and never retry.
+#   _redis_failed_at — a *connection* failure. Transient by nature (Redis
+#                     restarts), so we back off for a window and then retry.
+# Treating the second as permanent is what made in-memory fallback sticky
+# forever: with 2 workers that silently doubles the login-lockout threshold,
+# since each process then counts failures against its own private dict.
+_redis_disabled: bool = False
+_redis_failed_at: float | None = None
+_REDIS_RETRY_SECONDS = 60
 
 
 async def get_redis() -> redis.Redis | None:
     """Get or create Redis connection. Returns None if unavailable."""
-    global _redis_client, _redis_failed
+    global _redis_client, _redis_disabled, _redis_failed_at
 
-    if _redis_failed:
+    if _redis_disabled:
         return None
+
+    if _redis_failed_at is not None:
+        if time.monotonic() - _redis_failed_at < _REDIS_RETRY_SECONDS:
+            return None
+        _redis_failed_at = None  # retry window elapsed — try to reconnect
 
     if _redis_client is not None:
         try:
@@ -47,7 +63,7 @@ async def get_redis() -> redis.Redis | None:
     redis_url = getattr(settings, "REDIS_URL", None)
 
     if not redis_url:
-        _redis_failed = True
+        _redis_disabled = True
         logger.info("No REDIS_URL configured — using in-memory rate limiting")
         return None
 
@@ -59,12 +75,16 @@ async def get_redis() -> redis.Redis | None:
             socket_timeout=2,
         )
         await _redis_client.ping()
+        _redis_failed_at = None
         logger.info("Redis connected for rate limiting")
         return _redis_client
     except Exception as e:
-        _redis_failed = True
+        _redis_failed_at = time.monotonic()
         _redis_client = None
-        logger.warning("Redis unavailable (%s) — falling back to in-memory", e)
+        logger.warning(
+            "Redis unavailable (%s) — in-memory fallback, retrying in %ds",
+            e, _REDIS_RETRY_SECONDS,
+        )
         return None
 
 
@@ -100,7 +120,7 @@ class RateLimiter:
         return get_client_ip(request)
 
     def _redis_key(self, ident: str) -> str:
-        return f"bookdna:{self.prefix}:{ident}"
+        return f"bibliome:{self.prefix}:{ident}"
 
     async def _check_redis(self, r: redis.Redis, ident: str) -> None:
         """Rate limit check using Redis sorted set sliding window."""
@@ -201,7 +221,7 @@ class FailedAttemptTracker:
         self._hits: dict[str, list[float]] = defaultdict(list)
 
     def _key(self, ident: str) -> str:
-        return f"bookdna:{self.prefix}:{ident}"
+        return f"bibliome:{self.prefix}:{ident}"
 
     async def _now_and_scores(self, ident: str):
         """Return (redis_or_None, now, sorted_timestamps_in_window)."""

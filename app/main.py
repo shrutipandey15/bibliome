@@ -1,7 +1,7 @@
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 
@@ -11,7 +11,7 @@ from app.routers import auth, entries, dna, public, user, books, admin, mirror, 
 
 settings = get_settings()
 setup_logging(settings.ENVIRONMENT)
-logger = logging.getLogger("bookdna.main")
+logger = logging.getLogger("bibliome.main")
 
 
 @asynccontextmanager
@@ -31,11 +31,18 @@ async def lifespan(app: FastAPI):
     logger.info("Shutting down %s API — DB pool closed", settings.APP_NAME)
 
 
+_is_prod = settings.ENVIRONMENT == "production"
+
+# The interactive docs enumerate every route, including /api/admin/*. Useful in
+# dev, an inventory for anyone poking at prod.
 app = FastAPI(
     title=settings.APP_NAME,
     description="The emotional fingerprint of your reading life",
     version="0.1.0",
     lifespan=lifespan,
+    docs_url=None if _is_prod else "/docs",
+    redoc_url=None if _is_prod else "/redoc",
+    openapi_url=None if _is_prod else "/openapi.json",
 )
 
 register_error_handlers(app)
@@ -70,5 +77,17 @@ app.include_router(threads.router, prefix=settings.API_V1_PREFIX)
 
 
 @app.get("/health")
-async def health_check():
-    return {"status": "alive", "app": settings.APP_NAME}
+async def health_check(response: Response):
+    """Liveness *and* readiness: uptime monitoring that only checks the process
+    reports green while Postgres is down, which is the outage that matters.
+    """
+    from app.database import async_session
+
+    try:
+        async with async_session() as session:
+            await session.execute(text("SELECT 1"))
+        return {"status": "ok", "app": settings.APP_NAME, "db": "up"}
+    except Exception:
+        logger.exception("Health check failed: database unreachable")
+        response.status_code = 503
+        return {"status": "degraded", "app": settings.APP_NAME, "db": "down"}

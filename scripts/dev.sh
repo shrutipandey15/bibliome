@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# One-command dev start for the Book DNA API.
+# One-command dev start for the Bibliome API.
 #
 #   ./scripts/dev.sh
 #

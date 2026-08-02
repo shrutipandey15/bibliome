@@ -1,5 +1,5 @@
 """
-Global error handling for Book DNA API.
+Global error handling for Bibliome API.
 
 Catches all exceptions and returns a consistent JSON error format:
 {
@@ -24,7 +24,7 @@ from sqlalchemy.exc import IntegrityError
 
 from app.config import get_settings
 
-logger = logging.getLogger("bookdna")
+logger = logging.getLogger("bibliome")
 
 # SQLAlchemy stringifies a failed statement as
 # "... [SQL: INSERT ...] [parameters: (...)] (Background on this error at: ...)".

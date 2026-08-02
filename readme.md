@@ -1,13 +1,13 @@
-# 📖 Book DNA
+# 📖 Bibliome
 
 **Your reading leaves fingerprints. This maps them.**
 
-Book DNA is a reading personality engine. You log books with the emotions they made you feel — not star ratings, not "liked it" — and the system builds a psychological profile of who you are as a reader.
+Bibliome is a reading personality engine. You log books with the emotions they made you feel — not star ratings, not "liked it" — and the system builds a psychological profile of who you are as a reader.
 
-Are you a Grief Romantic? A Control-Seeking Intellectual? A Soft Masochist who keeps picking up books that destroy you? Book DNA will tell you.
+Are you a Grief Romantic? A Control-Seeking Intellectual? A Soft Masochist who keeps picking up books that destroy you? Bibliome will tell you.
 
-🔗 **Live:** [bookdna.fdev31.space](https://bookdna.fdev31.space)  
-🎨 **Frontend repo:** [bookDNA-frontend](https://github.com/shrutipandey15/bookDNA-frontend)
+🔗 **Live:** [bibliome.app](https://bibliome.app)  
+🎨 **Frontend repo:** [bibliome-frontend](https://github.com/shrutipandey15/bibliome-frontend)
 
 ---
 
@@ -16,14 +16,14 @@ Are you a Grief Romantic? A Control-Seeking Intellectual? A Soft Masochist who k
 ```
 You read a book.
 You felt something.
-You tell Book DNA what.
+You tell Bibliome what.
       ↓
-24 emotions × intensity scoring × recency weighting
+18 emotions × intensity scoring × recency weighting
       ↓
 Personality type + emotional profile + shareable DNA card
 ```
 
-The engine tracks emotion frequency, co-occurrence, intensity patterns, and what you *avoid* feeling. Three books and you get your first reading DNA. The more you add, the sharper the portrait.
+The engine tracks emotion frequency, co-occurrence, intensity patterns, and what you *avoid* feeling. Five books and you get your first reading DNA. The more you add, the sharper the portrait.
 
 ---
 
@@ -72,9 +72,8 @@ Stats, user management, book catalog browser (searchable, sortable by popularity
 | API | Python 3.11+, FastAPI, async everywhere |
 | Database | PostgreSQL + asyncpg, pg_trgm for fuzzy search |
 | Migrations | Alembic |
-| Auth | JWT (python-jose) + bcrypt |
+| Auth | JWT (PyJWT) + bcrypt |
 | External | Google Books API, Open Library API (parallel via httpx) |
-| Images | Pillow for OG card generation |
 | Rate limiting | Redis (optional, falls back to in-memory) |
 
 ---
@@ -87,13 +86,18 @@ Base: `/api`
 |-------|-----------|------|
 | **Auth** | register, login, refresh, me | Public |
 | **Entries** | CRUD with cursor pagination | JWT |
-| **DNA** | profile, generate, heatmap, stats, history, recap, twin | JWT |
-| **Books** | search (smart multi-source) | JWT |
+| **DNA** | profile, generate, heatmap, stats, patterns, evolution, history, recap, emotional-calendar, blind-spots | JWT |
+| **Books** | search (smart multi-source), aggregate profile | JWT |
 | **User** | settings (get/patch) | JWT |
-| **Public** | echoes, card data, OG images | None |
+| **Echo** | feed, thread, replies, reactions, reports | JWT |
+| **Public** | shared DNA card by revocable token | None |
 | **Admin** | dashboard, users, catalog, db-health, cleanup | Admin |
 
-Full OpenAPI docs at `/docs` when running locally.
+Full OpenAPI docs at `/docs` when running locally. Disabled in production
+(`/docs`, `/redoc` and `/openapi.json` all 404) — they enumerate every route,
+including `/api/admin/*`.
+
+`GET /api/meta/version` reports the git SHA of the running build.
 
 ---
 
@@ -129,33 +133,81 @@ refresh_tokens ─── JWT tracking
 ## Run Locally
 
 ```bash
-python -m venv venv && source venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env          # set DATABASE_URL + SECRET_KEY
-alembic upgrade head
-uvicorn app.main:app --reload # → localhost:8000/docs
+./scripts/dev.sh              # → localhost:8000/docs
 ```
+
+That's the whole thing. The script is idempotent: it builds the venv if missing
+(or if the repo has been moved, which breaks the venv's absolute shebangs),
+syncs dependencies only when `requirements-dev.txt` changes, checks Postgres is
+up, runs pending migrations, frees the port if a previous run is still on it,
+then starts uvicorn with autoreload. A warm start skips straight to the server.
+
+| Flag | Effect |
+|------|--------|
+| `--port N` | listen on N instead of 8000 |
+| `--sql` | echo every SQL statement (query debugging) |
+| `--rebuild` | force a venv rebuild |
+| `--no-reload` | disable autoreload |
+
+Tests: `venv/bin/pytest`
 
 ### Environment
 
 | Variable | Required | Default |
 |----------|----------|---------|
-| `DATABASE_URL` | Yes | `postgresql+asyncpg://...localhost.../bookdna` |
+| `DATABASE_URL` | Yes | `postgresql+asyncpg://...localhost.../bibliome` |
 | `SECRET_KEY` | Yes | — |
 | `CORS_ORIGINS` | For frontend | — |
-| `REDIS_URL` | No | Falls back to in-memory |
+| `REDIS_URL` | No | Falls back to per-worker in-memory |
 | `ENVIRONMENT` | No | `development` |
+| `TRUSTED_PROXY_COUNT` | Behind a proxy | `0` (trust the socket peer) |
+| `DB_POOL_SIZE` / `DB_MAX_OVERFLOW` | No | `5` / `5` per worker |
+| `GIT_SHA` | No | `unknown` — stamped at deploy time |
+
+Full list with prod defaults: [`.env.example`](./.env.example) and
+[`deploy/env.production`](./deploy/env.production).
 
 ---
 
 ## Deploy
 
-Production: nginx → uvicorn (127.0.0.1:8100) → PostgreSQL
+```
+Cloudflare edge ──▶ cloudflared (loopback) ──▶ nginx :80 ──▶ uvicorn 127.0.0.1:8100 ──▶ PostgreSQL
+                                                                        └──▶ Redis
+```
+
+TLS terminates at Cloudflare and the tunnel dials `http://localhost:80`, so
+there is **no certbot** and no public `:443` — `.app` is HSTS-preloaded, and the
+edge cert covers the browser side. nginx also serves the built SPA, which is why
+the frontend talks to a same-origin `/api`.
+
+`deploy/` holds the single source of truth for both machine configs:
+
+| File | Installed to |
+|------|--------------|
+| `deploy/bibliome.nginx.conf` | `/etc/nginx/sites-available/bibliome` (via `envsubst`) |
+| `deploy/bibliome.service` | `/etc/systemd/system/bibliome.service` |
+
+```bash
+sudo bash deploy/deploy.sh    # first run, or after changing either config above
+sudo bash deploy/update.sh    # code-only: pull, migrate, rebuild, restart
+```
+
+Routine restart:
 
 ```bash
 git pull
 alembic upgrade head
-sudo systemctl restart bookdna
+sudo systemctl restart bibliome
+```
+
+After a deploy, confirm what's actually running and that nginx is passing the
+real client IP through (not `127.0.0.1`, which would rate-limit everyone as one
+client):
+
+```bash
+curl -s https://bibliome.app/api/meta/version
+curl -s https://bibliome.app/health          # {"status":"ok","db":"up"}, 503 if Postgres is down
 ```
 
 ---
@@ -170,8 +222,8 @@ app/
 ├── routers/      auth · entries · dna · user · public · books · admin
 ├── schemas/      auth · entry · dna · public · user
 ├── services/     auth_service · entry_service · dna_engine
-│                 book_search · background · og_image
-└── utils/        emotions (24 emotions, colors, icons)
+│                 book_search · background · echo_service
+└── utils/        emotions (18 emotions, colors, icons)
 ```
 
 ---
@@ -190,4 +242,4 @@ MIT
 
 *"A reader lives a thousand lives before he dies. The man who never reads lives only one."* — George R.R. Martin
 
-*Book DNA remembers all of them.*
+*Bibliome remembers all of them.*

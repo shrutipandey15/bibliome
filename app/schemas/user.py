@@ -14,6 +14,16 @@ class UserSettingsUpdate(BaseModel):
     # the router against VALID_SLUGS; `[]` clears it.
     reads_for: list[str] | None = Field(default=None, max_length=2)
 
+# Typed by the user, verbatim, on top of their password. Deletion is instant and
+# total, so it should be impossible to reach by mis-clicking.
+ACCOUNT_DELETE_CONFIRMATION = "DELETE MY ACCOUNT"
+
+
+class AccountDeleteRequest(BaseModel):
+    password: str = Field(min_length=1)
+    confirm: str = Field(min_length=1)
+
+
 class PasswordChangeRequest(BaseModel):
     current_password: str = Field(min_length=1)
     new_password: str = Field(min_length=8, max_length=128)

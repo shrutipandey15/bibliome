@@ -30,7 +30,8 @@ from app.schemas.resonance import (
     ThreadReportRequest,
     ThreadResponse,
 )
-from app.services.moderation import submit_report
+from app.schemas.echo import CrisisInterstitial
+from app.services.moderation import CRISIS_RESOURCES, VERDICT_CRISIS, submit_report
 from app.services.notification_service import notify
 from app.services.resonance_service import (
     ResonanceError,
@@ -143,7 +144,7 @@ async def send_message(
     await message_limiter.check_key(str(current_user.id))
 
     try:
-        message = await post_message(db, thread, current_user.id, data.body)
+        message, verdict, _reason = await post_message(db, thread, current_user.id, data.body)
     except ResonanceError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
 
@@ -166,6 +167,7 @@ async def send_message(
         is_mine=True,
         body=message.body,
         created_at=message.created_at,
+        crisis=CrisisInterstitial(**CRISIS_RESOURCES) if verdict == VERDICT_CRISIS else None,
     )
 
 

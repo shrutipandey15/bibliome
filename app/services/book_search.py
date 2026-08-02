@@ -29,7 +29,7 @@ from sqlalchemy import func, or_, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-logger = logging.getLogger("bookdna.search")
+logger = logging.getLogger("bibliome.search")
 
 @dataclass
 class BookResult:

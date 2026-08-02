@@ -1,20 +1,24 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────
-# Book DNA — Production Deploy Script
-# Target: Ubuntu/Debian server with nginx + PostgreSQL
-# Domain: bookdna.fdev31.space
+# Bibliome — Production Deploy Script
+# Target: Ubuntu/Debian server with nginx + PostgreSQL + Redis
+# Domain: bibliome.app (served through a Cloudflare Tunnel)
+#
+# This script installs the checked-in config files under deploy/ rather than
+# inlining its own copies. deploy/bibliome.nginx.conf and deploy/bibliome.service
+# are the single source of truth — edit those, not this script.
 # ─────────────────────────────────────────────────────────
 set -euo pipefail
 
 # ── Config ──
-DOMAIN="bookdna.fdev31.space"
-APP_DIR="/srv/bookdna"
+DOMAIN="bibliome.app"
+APP_DIR="/srv/bibliome"
 API_DIR="$APP_DIR/api"
 FE_DIR="$APP_DIR/frontend"
 API_PORT=8100
-DB_NAME="bookdna"
-DB_USER="bookdna"
-SERVICE_NAME="bookdna"
+DB_NAME="bibliome"
+DB_USER="bibliome"
+SERVICE_NAME="bibliome"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -32,11 +36,13 @@ command -v psql     >/dev/null || error "postgresql not installed"
 command -v python3  >/dev/null || error "python3 not installed"
 command -v node     >/dev/null || error "node not installed (needed for frontend build)"
 command -v npm      >/dev/null || error "npm not installed"
+command -v envsubst >/dev/null || error "envsubst not installed (apt install gettext-base)"
+command -v redis-cli >/dev/null || warn "redis not installed — rate limiting will fall back to per-worker in-memory"
 
 echo ""
 echo "  ╔══════════════════════════════════╗"
-echo "  ║     Book DNA — Deploy Script     ║"
-echo "  ║     $DOMAIN        ║"
+echo "  ║     Bibliome — Deploy Script     ║"
+echo "  ║     $DOMAIN                 ║"
 echo "  ╚══════════════════════════════════╝"
 echo ""
 
@@ -80,10 +86,10 @@ else
     # If files exist but no git, back them up
     if [ -f "$API_DIR/app/main.py" ]; then
         warn "Existing API files found without git — backing up .env"
-        [ -f "$API_DIR/.env" ] && cp "$API_DIR/.env" /tmp/bookdna-env-backup
+        [ -f "$API_DIR/.env" ] && cp "$API_DIR/.env" /tmp/bibliome-env-backup
     fi
-    git clone https://github.com/shrutipandey15/bookDNA.git "$API_DIR"
-    [ -f /tmp/bookdna-env-backup ] && mv /tmp/bookdna-env-backup "$API_DIR/.env"
+    git clone https://github.com/shrutipandey15/bibliome.git "$API_DIR"
+    [ -f /tmp/bibliome-env-backup ] && mv /tmp/bibliome-env-backup "$API_DIR/.env"
     info "Backend cloned"
 fi
 
@@ -99,30 +105,43 @@ pip install --quiet --upgrade pip
 pip install --quiet -r requirements.txt
 info "Python dependencies installed"
 
-# Install system fonts for Pillow (OG image generation)
-if ! dpkg -l | grep -q fonts-dejavu-core; then
-    apt-get install -y --no-install-recommends fonts-dejavu-core fonts-liberation >/dev/null 2>&1
-    info "Installed system fonts for image generation"
-fi
-
 # Generate .env if missing
 SECRET=$(openssl rand -hex 32)
+GIT_SHA=$(git -C "$API_DIR" rev-parse --short HEAD)
 if [ ! -f .env ]; then
     cat > .env <<EOF
 DATABASE_URL=postgresql+asyncpg://${DB_USER}:${DB_PASS}@localhost:5432/${DB_NAME}
 SECRET_KEY=${SECRET}
+ENVIRONMENT=production
 ALGORITHM=HS256
 ACCESS_TOKEN_EXPIRE_MINUTES=15
 REFRESH_TOKEN_EXPIRE_DAYS=30
 CORS_ORIGINS=https://${DOMAIN}
-ENVIRONMENT=production
+FRONTEND_URL=https://${DOMAIN}
 TRUSTED_PROXY_COUNT=1
+REDIS_URL=redis://localhost:6379/0
+GOOGLE_BOOKS_API_KEY=
+SMTP_HOST=smtp.resend.com
+SMTP_PORT=587
+SMTP_USER=resend
+SMTP_PASSWORD=
+SMTP_FROM=noreply@${DOMAIN}
+DB_POOL_SIZE=5
+DB_MAX_OVERFLOW=5
+SQL_ECHO=0
+GIT_SHA=${GIT_SHA}
 EOF
     info "Generated .env with secure credentials"
+    warn "SMTP_PASSWORD is empty — set your Resend key in $API_DIR/.env"
 else
-    # Update DB password in existing .env
+    # Update DB password and build SHA in the existing .env
     sed -i "s|postgresql+asyncpg://.*@localhost|postgresql+asyncpg://${DB_USER}:${DB_PASS}@localhost|" .env
-    warn ".env exists — updated DB password"
+    if grep -q '^GIT_SHA=' .env; then
+        sed -i "s|^GIT_SHA=.*|GIT_SHA=${GIT_SHA}|" .env
+    else
+        echo "GIT_SHA=${GIT_SHA}" >> .env
+    fi
+    warn ".env exists — updated DB password and GIT_SHA"
 fi
 
 # Ensure www-data owns everything
@@ -140,10 +159,11 @@ deactivate
 info "Building frontend..."
 
 TEMP_FE=$(mktemp -d)
-git clone https://github.com/shrutipandey15/bookDNA-frontend.git "$TEMP_FE"
+git clone https://github.com/shrutipandey15/bibliome-frontend.git "$TEMP_FE"
 cd "$TEMP_FE"
 
 npm ci --silent
+# Same-origin: nginx serves the SPA and proxies /api/ to uvicorn.
 VITE_API_URL="/api" npm run build
 
 # Deploy built files
@@ -154,37 +174,11 @@ rm -rf "$TEMP_FE"
 info "Frontend built and deployed to $FE_DIR"
 
 # ─────────────────────────────────────────
-# 5. Systemd service
+# 5. Systemd service (from deploy/bibliome.service)
 # ─────────────────────────────────────────
-info "Setting up systemd service..."
+info "Installing systemd service..."
 
-cat > /etc/systemd/system/${SERVICE_NAME}.service <<EOF
-[Unit]
-Description=Book DNA API
-After=network.target postgresql.service
-Wants=postgresql.service
-
-[Service]
-Type=exec
-User=www-data
-Group=www-data
-WorkingDirectory=${API_DIR}
-EnvironmentFile=${API_DIR}/.env
-ExecStart=${API_DIR}/venv/bin/uvicorn app.main:app \\
-    --host 127.0.0.1 \\
-    --port ${API_PORT} \\
-    --workers 2 \\
-    --log-level info
-Restart=always
-RestartSec=5
-NoNewPrivileges=true
-ProtectSystem=strict
-ReadWritePaths=${API_DIR}
-PrivateTmp=true
-
-[Install]
-WantedBy=multi-user.target
-EOF
+cp "$API_DIR/deploy/bibliome.service" "/etc/systemd/system/${SERVICE_NAME}.service"
 
 systemctl daemon-reload
 systemctl enable "$SERVICE_NAME"
@@ -192,66 +186,28 @@ systemctl restart "$SERVICE_NAME"
 info "Service $SERVICE_NAME started"
 
 # ─────────────────────────────────────────
-# 6. Nginx config
+# 6. Nginx config (from deploy/bibliome.nginx.conf)
 # ─────────────────────────────────────────
 info "Configuring nginx..."
 
-cat > /etc/nginx/sites-available/bookdna <<NGINX
-server {
-    server_name ${DOMAIN};
+# Substitute ONLY our three placeholders — everything else ($uri, $host,
+# $remote_addr, …) is an nginx runtime variable and must pass through untouched.
+DOMAIN="$DOMAIN" FE_DIR="$FE_DIR" API_PORT="$API_PORT" \
+    envsubst '${DOMAIN} ${FE_DIR} ${API_PORT}' \
+    < "$API_DIR/deploy/bibliome.nginx.conf" \
+    > "/etc/nginx/sites-available/${SERVICE_NAME}"
 
-    # Frontend: static SPA
-    location / {
-        root ${FE_DIR};
-        index index.html;
-        try_files \$uri \$uri/ /index.html;
-
-        location ~* \\.(js|css|png|jpg|jpeg|gif|ico|svg|woff2?)$ {
-            expires 30d;
-            add_header Cache-Control "public, immutable";
-        }
-    }
-
-    # Backend API
-    location /api/ {
-        proxy_pass http://127.0.0.1:${API_PORT};
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-        proxy_read_timeout 30s;
-    }
-
-    # Health check
-    location /health {
-        proxy_pass http://127.0.0.1:${API_PORT};
-    }
-
-    # Gzip
-    gzip on;
-    gzip_types text/plain text/css application/json application/javascript text/xml image/svg+xml;
-    gzip_min_length 1000;
-
-    listen 80;
-}
-NGINX
-
-# Enable site
-ln -sf /etc/nginx/sites-available/bookdna /etc/nginx/sites-enabled/
+ln -sf "/etc/nginx/sites-available/${SERVICE_NAME}" /etc/nginx/sites-enabled/
 nginx -t || error "nginx config test failed"
 systemctl reload nginx
 info "Nginx configured and reloaded"
 
 # ─────────────────────────────────────────
-# 7. TLS with Certbot
+# 7. TLS
 # ─────────────────────────────────────────
-if command -v certbot >/dev/null; then
-    info "Setting up HTTPS with Certbot..."
-    certbot --nginx -d "$DOMAIN" --non-interactive --agree-tos --redirect \
-        --email "admin@fdev31.space" || warn "Certbot failed — run manually: sudo certbot --nginx -d $DOMAIN"
-else
-    warn "Certbot not installed. Install and run: sudo certbot --nginx -d $DOMAIN"
-fi
+# Nothing to do. TLS terminates at Cloudflare; cloudflared connects to
+# http://localhost:80. Do NOT run certbot — there is no public :443 to validate
+# against, and .app is HSTS-preloaded so the edge cert covers the browser side.
 
 # ─────────────────────────────────────────
 # 8. Verify
@@ -259,20 +215,24 @@ fi
 echo ""
 sleep 2
 if curl -sf "http://127.0.0.1:${API_PORT}/health" >/dev/null 2>&1; then
-    info "API health check passed"
+    info "API health check passed (process + database)"
 else
-    warn "API not responding yet — check: journalctl -u $SERVICE_NAME -f"
+    warn "API not healthy — check: journalctl -u $SERVICE_NAME -f"
 fi
 
 echo ""
-echo "  ╔══════════════════════════════════════════╗"
-echo "  ║          Deploy complete!                ║"
-echo "  ║                                          ║"
-echo "  ║  Site: https://${DOMAIN}      ║"
-echo "  ║                                          ║"
-echo "  ║  Useful commands:                        ║"
-echo "  ║  journalctl -u bookdna -f    (API logs)  ║"
-echo "  ║  systemctl restart bookdna   (restart)   ║"
-echo "  ║  sudo bash deploy.sh         (redeploy)  ║"
-echo "  ╚══════════════════════════════════════════╝"
+echo "  ╔══════════════════════════════════════════════╗"
+echo "  ║          Deploy complete!                    ║"
+echo "  ║                                              ║"
+echo "  ║  Site: https://${DOMAIN}                     ║"
+echo "  ║                                              ║"
+echo "  ║  Useful commands:                            ║"
+echo "  ║  journalctl -u bibliome -f     (API logs)    ║"
+echo "  ║  systemctl restart bibliome    (restart)     ║"
+echo "  ║  sudo bash deploy.sh           (redeploy)    ║"
+echo "  ╚══════════════════════════════════════════════╝"
+echo ""
+echo "  Next: confirm the tunnel is up, then verify the real client IP —"
+echo "    curl -s https://${DOMAIN}/api/meta/version"
+echo "    journalctl -u ${SERVICE_NAME} | grep -i 'rate'   # should show real IPs, not 127.0.0.1"
 echo ""

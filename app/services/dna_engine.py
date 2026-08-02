@@ -1,5 +1,5 @@
 """
-Book DNA Engine — The Secret Sauce
+Bibliome Engine — The Secret Sauce
 
 Calculates a user's reading personality based on their emotional history.
 Phase 1: Rule-based pattern matching with weighted scoring.
