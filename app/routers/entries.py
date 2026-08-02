@@ -56,7 +56,7 @@ from app.services.background import recalculate_dna, recompute_resonance
 from app.services.book_search import bump_popularity
 from app.utils.emotions import VALID_SLUGS
 
-logger = logging.getLogger("bookdna.entries")
+logger = logging.getLogger("bibliome.entries")
 
 async def _feed_catalog(title: str, author: str | None, cover_url: str | None, isbn: str | None):
     """Background task: add/update book in catalog using its own db session."""

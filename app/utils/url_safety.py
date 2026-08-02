@@ -19,7 +19,7 @@ from urllib.parse import urlparse
 
 import httpx
 
-logger = logging.getLogger("bookdna.url_safety")
+logger = logging.getLogger("bibliome.url_safety")
 
 # Hosts trusted to serve book covers. Suffix-matched: host == suffix or a subdomain of it.
 ALLOWED_COVER_HOST_SUFFIXES = (

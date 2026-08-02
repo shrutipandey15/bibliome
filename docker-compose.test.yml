@@ -1,10 +1,10 @@
 # Local test database so the full suite runs (not silently skipped).
 #
 #   docker compose -f docker-compose.test.yml up -d
-#   TEST_DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:5432/bookdna_test pytest
+#   TEST_DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:5432/bibliome_test pytest
 #   docker compose -f docker-compose.test.yml down
 #
-# conftest.py connects here to create/drop a throwaway `bookdna_test` database.
+# conftest.py connects here to create/drop a throwaway `bibliome_test` database.
 services:
   test-db:
     image: postgres:16

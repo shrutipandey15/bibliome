@@ -4,9 +4,12 @@ the emotion vocabulary can't drift between client and server (B2.10 / P2-9)."""
 from fastapi import APIRouter
 from pydantic import BaseModel
 
+from app.config import get_settings
 from app.utils.emotions import EMOTIONS
 
 router = APIRouter(tags=["meta"])
+
+settings = get_settings()
 
 
 class EmotionVocabItem(BaseModel):
@@ -42,4 +45,24 @@ async def get_emotion_vocabulary():
         version=EMOTION_VOCAB_VERSION,
         count=len(EMOTIONS),
         emotions=EMOTIONS,
+    )
+
+
+class VersionResponse(BaseModel):
+    app: str
+    version: str
+    git_sha: str
+    environment: str
+
+
+@router.get("/meta/version", response_model=VersionResponse)
+async def get_version():
+    """What is actually running. `git_sha` is stamped into the env at deploy time;
+    it reads "unknown" on a dev box or when the deploy forgot to set it.
+    """
+    return VersionResponse(
+        app=settings.APP_NAME,
+        version="0.1.0",
+        git_sha=settings.GIT_SHA,
+        environment=settings.ENVIRONMENT,
     )

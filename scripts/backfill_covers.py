@@ -216,7 +216,7 @@ async def run(user_email: str, limit: int | None, commit: bool) -> int:
             return 0
 
         sem = asyncio.Semaphore(CONCURRENCY)
-        async with httpx.AsyncClient(headers={"User-Agent": "bookdna-cover-backfill/1.0"}) as client:
+        async with httpx.AsyncClient(headers={"User-Agent": "bibliome-cover-backfill/1.0"}) as client:
             resolved = await asyncio.gather(*(_resolve(client, sem, e) for e in entries))
 
         found = [r for r in resolved if r["ok"]]

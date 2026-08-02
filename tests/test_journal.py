@@ -539,7 +539,7 @@ async def test_a_failed_journal_write_does_not_log_ciphertext(client, caplog):
     )
     # Starlette re-raises server exceptions under ASGITransport, but only *after*
     # our handler has logged — which is the thing under test here.
-    with caplog.at_level(logging.ERROR, logger="bookdna"), \
+    with caplog.at_level(logging.ERROR, logger="bibliome"), \
             patch("app.routers.journal.create_entry", side_effect=boom), \
             pytest.raises(DataError):
         await client.post("/api/journal/entries", json={
@@ -547,7 +547,7 @@ async def test_a_failed_journal_write_does_not_log_ciphertext(client, caplog):
         }, headers=h)
 
     logged = "\n".join(
-        r.getMessage() for r in caplog.records if r.name.startswith("bookdna")
+        r.getMessage() for r in caplog.records if r.name.startswith("bibliome")
     )
     assert "Unhandled exception" in logged, "expected the failure to be logged at all"
     assert blob not in logged

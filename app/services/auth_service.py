@@ -89,13 +89,37 @@ async def register_user(
     return user
 
 
+_dummy_hash: str | None = None
+
+
+def _timing_equalizer_hash() -> str:
+    """A real bcrypt hash of a fixed string, at the same cost as a live one.
+
+    Verified against when the email matches no account, so the login path pays
+    the bcrypt cost either way. Built lazily on first miss rather than at import
+    so startup and test collection don't eat a KDF.
+    """
+    global _dummy_hash
+    if _dummy_hash is None:
+        _dummy_hash = bcrypt.hashpw(b"timing-equalizer", bcrypt.gensalt()).decode("utf-8")
+    return _dummy_hash
+
+
 async def authenticate_user(db: AsyncSession, email: str, password: str) -> User | None:
-    """Verify credentials. Returns User or None."""
+    """Verify credentials. Returns User or None.
+
+    Deliberately does *not* short-circuit on a missing user. The obvious
+    `if not user or not verify(...)` skips bcrypt entirely for an unknown email,
+    which makes "no such account" measurably faster than "wrong password" — an
+    account-enumeration oracle, and one the README claimed we didn't have (A6).
+    """
     result = await db.execute(select(User).where(User.email == email))
     user = result.scalar_one_or_none()
-    if not user or not await verify_password(password, user.password_hash):
-        return None
-    return user
+
+    stored = user.password_hash if user else _timing_equalizer_hash()
+    matched = await verify_password(password, stored)
+
+    return user if user and matched else None
 
 
 def hash_token(token: str) -> str:
@@ -122,13 +146,18 @@ async def validate_refresh_token(db: AsyncSession, token: str) -> User | None:
         return None
 
     result = await db.execute(
-        select(RefreshToken).where(
-            RefreshToken.token == hash_token(token),
-            RefreshToken.is_revoked == False,
-        )
+        select(RefreshToken).where(RefreshToken.token == hash_token(token))
     )
     rt = result.scalar_one_or_none()
     if not rt:
+        return None
+
+    if rt.is_revoked:
+        # Reuse detection. A correctly-signed token we already rotated away means
+        # either a stolen cookie being replayed or a client racing itself. We
+        # can't tell which, so we assume the worse one and kill the whole family —
+        # the legitimate user re-logs in, the thief gets nothing.
+        await revoke_all_refresh_tokens(db, rt.user_id)
         return None
 
     if rt.expires_at.replace(tzinfo=timezone.utc) < datetime.now(timezone.utc):

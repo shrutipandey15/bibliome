@@ -1,4 +1,4 @@
-"""Canonical 18-emotion vocabulary — single source of truth for Book DNA.
+"""Canonical 18-emotion vocabulary — single source of truth for Bibliome.
 
 The five *families* ("It hurt", "It held me", …) are a UI grouping only. We store
 and reason over the flat ``slug``; the ``family`` field is served so the frontend

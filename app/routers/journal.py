@@ -55,7 +55,7 @@ from app.services.journal_service import (
     update_entry,
 )
 
-logger = logging.getLogger("bookdna.journal")
+logger = logging.getLogger("bibliome.journal")
 
 # Writes are per-user and unshared, so the cap only needs to stop runaway clients
 # and blob-storage abuse — not spam, since there is no one to spam.

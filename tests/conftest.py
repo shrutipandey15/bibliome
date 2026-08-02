@@ -1,7 +1,7 @@
 """Shared pytest fixtures.
 
 DB-backed tests (auth flow, API smoke) point the whole app at a throwaway
-`bookdna_test` Postgres database. Pure-unit tests (engine, tokens, cursor codec,
+`bibliome_test` Postgres database. Pure-unit tests (engine, tokens, cursor codec,
 rate-limit) don't touch the DB and are unaffected.
 
 Requires a reachable Postgres. Locally that's the default localhost:5432; in CI a
@@ -13,7 +13,7 @@ import os
 
 import pytest
 
-TEST_DB = "bookdna_test"
+TEST_DB = "bibliome_test"
 _DEFAULT_URL = f"postgresql+asyncpg://postgres:postgres@localhost:5432/{TEST_DB}"
 
 # Must be set before anything imports app.database (which binds the engine).

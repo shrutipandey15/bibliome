@@ -26,7 +26,7 @@ from app.models.book_aggregate import (
 from app.models.book_entry import BookEntry, EntryEmotion
 from app.utils.emotions import canonicalize
 
-logger = logging.getLogger("bookdna.aggregate")
+logger = logging.getLogger("bibliome.aggregate")
 
 # A want_to_read has no emotional data yet; only books someone actually engaged
 # with can say what the book does to people. Re-reads and pauses count — the

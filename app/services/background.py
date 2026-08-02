@@ -18,7 +18,7 @@ from app.models.user import User
 from app.services.dna_service import compute_and_cache, maybe_snapshot_and_notify
 from app.services.resonance_service import refresh_matches_for_user
 
-logger = logging.getLogger("bookdna.background")
+logger = logging.getLogger("bibliome.background")
 
 # Track in-flight recalculations per user — prevents redundant concurrent DB work
 _recalc_running: set[uuid.UUID] = set()

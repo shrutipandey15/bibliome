@@ -48,14 +48,21 @@ class EmotionOut(BaseModel):
         return v
 
 
+# `quote` and `notes` are TEXT columns, so nothing downstream would have stopped
+# a multi-megabyte value reaching the DB. Generous enough for a long passage and
+# a real set of notes; finite so the shelf can't be used as a blob store.
+MAX_QUOTE_CHARS = 5_000
+MAX_NOTES_CHARS = 20_000
+
+
 class EntryCreate(BaseModel):
     title: str = Field(min_length=1, max_length=300)
     author: str | None = Field(default=None, max_length=200)
     cover_url: str | None = Field(default=None, max_length=500)
     isbn: str | None = Field(default=None, max_length=13)
     intensity: int = Field(default=5, ge=1, le=10)
-    quote: str | None = None
-    notes: str | None = None
+    quote: str | None = Field(default=None, max_length=MAX_QUOTE_CHARS)
+    notes: str | None = Field(default=None, max_length=MAX_NOTES_CHARS)
     emotions: list[EmotionIn] = Field(default_factory=list)
     started_at: date | None = None
     finished_at: date | None = None
@@ -67,13 +74,15 @@ class EntryCreate(BaseModel):
 
 
 class EntryUpdate(BaseModel):
+    # Bounds mirror EntryCreate exactly. They were missing here, so an update
+    # could put a value past the column width and turn a 422 into a 500.
     title: str | None = Field(default=None, min_length=1, max_length=300)
-    author: str | None = None
-    cover_url: str | None = None
-    isbn: str | None = None
+    author: str | None = Field(default=None, max_length=200)
+    cover_url: str | None = Field(default=None, max_length=500)
+    isbn: str | None = Field(default=None, max_length=13)
     intensity: int | None = Field(default=None, ge=1, le=10)
-    quote: str | None = None
-    notes: str | None = None
+    quote: str | None = Field(default=None, max_length=MAX_QUOTE_CHARS)
+    notes: str | None = Field(default=None, max_length=MAX_NOTES_CHARS)
     emotions: list[EmotionIn] | None = None
     started_at: date | None = None
     finished_at: date | None = None

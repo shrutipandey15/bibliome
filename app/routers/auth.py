@@ -3,6 +3,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Response, status
+from fastapi.responses import JSONResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -36,6 +37,7 @@ from app.services.auth_service import (
 from app.services.email_service import send_reset_email, _generate_token
 from app.services.journal_service import mark_password_wrap_stale
 from app.utils.cookies import set_refresh_cookie, clear_refresh_cookie
+from app.utils.redact import redact_email
 from app.models.notification import TIER_SECURITY
 from app.services.notification_service import notify
 
@@ -57,7 +59,7 @@ async def _start_session(db: AsyncSession, user: User, response: Response) -> st
     set_refresh_cookie(response, refresh_token)
     return access_token
 
-logger = logging.getLogger("bookdna.auth")
+logger = logging.getLogger("bibliome.auth")
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 register_limiter = RateLimiter(max_requests=3, window_seconds=3600, prefix="register")
@@ -92,7 +94,7 @@ async def register(
             detail="That email or username is not available.",
         )
 
-    logger.info("New registration: %s (%s)", username, email)
+    logger.info("New registration: %s (%s)", username, redact_email(email))
     access_token = await _start_session(db, user, response)
     return AuthResponse(access_token=access_token, expires_in=_access_expiry_seconds(), user=_auth_user(user))
 
@@ -164,7 +166,7 @@ async def reset_password(data: ResetPasswordRequest, response: Response, db: Asy
     await notify(db, user.id, TIER_SECURITY, "password_reset",
                  payload={"message": "Your password was reset."})
 
-    logger.info("Password reset for %s", user.email)
+    logger.info("Password reset for user %s (%s)", user.id, redact_email(user.email))
     body: dict = {"message": "Password updated successfully"}
     if had_journal:
         body["journal"] = {
@@ -201,7 +203,7 @@ async def login(
     user = await authenticate_user(db, email, data.password)
     if not user:
         await login_lockout.record(lockout_key)
-        logger.warning("Failed login for %s", email)
+        logger.warning("Failed login for %s", redact_email(email))
         await asyncio.sleep(0.3)
         # Generic — no "N attempts remaining", which confirmed the account existed.
         raise HTTPException(
@@ -228,11 +230,16 @@ async def refresh(request: Request, response: Response, db: AsyncSession = Depen
 
     user = await validate_refresh_token(db, token)  # rotation: revokes the used token
     if not user:
-        clear_refresh_cookie(response)
-        raise HTTPException(
+        # Returned, not raised. Raising HTTPException makes FastAPI build a fresh
+        # response and drop everything set on the injected one — including the
+        # cookie deletion, which left a dead cookie in the browser that re-failed
+        # every subsequent refresh.
+        failed = JSONResponse(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or expired refresh token",
+            content={"detail": "Invalid or expired refresh token"},
         )
+        clear_refresh_cookie(failed)
+        return failed
 
     access_token = await _start_session(db, user, response)
     return AccessTokenResponse(access_token=access_token, expires_in=_access_expiry_seconds())

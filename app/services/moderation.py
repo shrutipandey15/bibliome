@@ -14,8 +14,10 @@ import uuid
 from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.models.echo import Echo, EchoReply
+from app.models.resonance import ResonanceThread
 from app.models.social import Report
 
 # Verdicts from the pre-publish classifier.
@@ -88,8 +90,10 @@ async def reporter_weight(db: AsyncSession, reporter_id: uuid.UUID) -> float:
     return max(0.2, min(1.5, (resolved + 1) / (total + 1)))
 
 
-async def _target_status_model(target_type: str):
-    return Echo if target_type == "echo" else EchoReply
+# Public surfaces: throttleable (hiding one costs nobody a conversation) and
+# resolvable by removal. Private threads are neither — see resolve_target.
+PUBLIC_MODELS = {"echo": Echo, "reply": EchoReply}
+REPORTABLE_TYPES = frozenset({*PUBLIC_MODELS, "thread"})
 
 
 async def _weighted_open_pressure(db: AsyncSession, target_type: str, target_id: uuid.UUID) -> float:
@@ -138,7 +142,7 @@ async def submit_report(
     # to the queue, but auto-hiding it would silence a conversation on one
     # party's say-so. There, blocking (which the reporter does themselves) is the
     # remedy, not moderation pressure.
-    Model = {"echo": Echo, "reply": EchoReply}.get(target_type)
+    Model = PUBLIC_MODELS.get(target_type)
     if Model is not None:
         pressure = await _weighted_open_pressure(db, target_type, target_id)
         if pressure >= REPORT_THROTTLE_THRESHOLD:
@@ -192,8 +196,19 @@ async def resolve_target(
     action: str,
 ) -> bool:
     """Resolve a reported target. action='remove' takes it down; 'dismiss' clears
-    the reports and restores a held item. Returns False if the target is unknown."""
-    Model = Echo if target_type == "echo" else EchoReply
+    the reports and restores a held item. Returns False if the target is unknown.
+
+    Handles threads as well as echoes and replies. The old version fell back to
+    ``EchoReply`` for any unrecognised type, so a reported *thread* was looked up
+    in the replies table, never found, and could never be closed out — every DM
+    report sat open in the queue forever.
+    """
+    if target_type == "thread":
+        return await _resolve_thread(db, admin_id, target_id, action)
+
+    Model = PUBLIC_MODELS.get(target_type)
+    if Model is None:
+        return False
     obj = (await db.execute(select(Model).where(Model.id == target_id))).scalar_one_or_none()
     if obj is None:
         return False
@@ -212,5 +227,55 @@ async def resolve_target(
         rep.resolution = action
 
     obj.status = "removed" if action == "remove" else "active"
+    await db.flush()
+    return True
+
+
+async def _close_open_reports(
+    db: AsyncSession, admin_id: uuid.UUID, target_type: str, target_id: uuid.UUID, action: str
+) -> None:
+    new_status = "resolved" if action == "remove" else "dismissed"
+    reports = (await db.execute(
+        select(Report).where(
+            Report.target_type == target_type,
+            Report.target_id == target_id,
+            Report.status == "open",
+        )
+    )).scalars().all()
+    for rep in reports:
+        rep.status = new_status
+        rep.resolved_by = admin_id
+        rep.resolution = action
+
+
+async def _resolve_thread(
+    db: AsyncSession, admin_id: uuid.UUID, thread_id: uuid.UUID, action: str
+) -> bool:
+    """Resolve a reported private thread.
+
+    'remove' shuts the conversation down and declines the match, so the pair is
+    never suggested to each other again. 'dismiss' only clears the reports: a
+    thread is never auto-held (submit_report deliberately doesn't throttle
+    private surfaces), so there is nothing to restore.
+
+    Message bodies are left alone. Deleting one side of a two-party transcript
+    would destroy the evidence the report was filed about.
+    """
+    thread = (await db.execute(
+        select(ResonanceThread)
+        .options(selectinload(ResonanceThread.match))
+        .where(ResonanceThread.id == thread_id)
+    )).scalar_one_or_none()
+    if thread is None:
+        return False
+
+    await _close_open_reports(db, admin_id, "thread", thread_id, action)
+
+    if action == "remove":
+        thread.status = "closed"
+        thread.closed_by = admin_id
+        thread.match.status = "declined"
+        thread.match.declined_by = admin_id
+
     await db.flush()
     return True

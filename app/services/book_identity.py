@@ -31,7 +31,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.book import Book
 from app.services.book_search import normalize
 
-logger = logging.getLogger("bookdna.identity")
+logger = logging.getLogger("bibliome.identity")
 
 
 def _clean_isbn(raw: str | None) -> str | None:

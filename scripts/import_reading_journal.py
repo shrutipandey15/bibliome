@@ -1,5 +1,5 @@
 """
-Import a reading-journal .xlsx (Books + Echoes sheets) into Book DNA.
+Import a reading-journal .xlsx (Books + Echoes sheets) into Bibliome.
 
 The workbook's vocabulary is the app's own vocabulary, so the mapping is direct:
 

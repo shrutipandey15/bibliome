@@ -21,7 +21,7 @@ from typing import Any
 import redis.asyncio as redis
 from fastapi.encoders import jsonable_encoder
 
-logger = logging.getLogger("bookdna.cache")
+logger = logging.getLogger("bibliome.cache")
 
 
 class TTLCache:
@@ -68,7 +68,7 @@ class RedisDNACache:
     Mirrors the RateLimiter pattern — requires no config changes to work.
     """
 
-    def __init__(self, ttl_seconds: int = 600, namespace: str = "bookdna:dna"):
+    def __init__(self, ttl_seconds: int = 600, namespace: str = "bibliome:dna"):
         self._ttl = ttl_seconds
         self._ns = namespace
         self._fallback = TTLCache(ttl_seconds=ttl_seconds, max_size=100)
@@ -157,10 +157,10 @@ class RedisDNACache:
 dna_cache = RedisDNACache(ttl_seconds=600)
 # Book-search results, shared across workers so a query hits external APIs once
 # for the whole fleet, not once per worker (P4-5).
-book_search_cache = RedisDNACache(ttl_seconds=300, namespace="bookdna:search")
+book_search_cache = RedisDNACache(ttl_seconds=300, namespace="bibliome:search")
 # Per-book emotional aggregates (B8.3). Longer TTL than DNA: an aggregate only
 # moves when some reader tags that specific book, and writes invalidate directly.
-book_aggregate_cache = RedisDNACache(ttl_seconds=1800, namespace="bookdna:aggregate")
+book_aggregate_cache = RedisDNACache(ttl_seconds=1800, namespace="bibliome:aggregate")
 
 
 async def invalidate_dna(user_id) -> None:
