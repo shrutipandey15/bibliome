@@ -17,8 +17,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.models.echo import Echo, EchoReply
-from app.models.resonance import ResonanceThread
+from app.models.resonance import ResonanceMessage, ResonanceThread
 from app.models.social import Report
+from app.models.user import User
 
 # Verdicts from the pre-publish classifier.
 VERDICT_OK = "ok"
@@ -154,14 +155,95 @@ async def submit_report(
     return created
 
 
+# How much of a reported body the queue shows. Enough to judge a report on
+# without turning the queue into a reading surface for held content.
+PREVIEW_CHARS = 280
+
+
+async def _public_context(
+    db: AsyncSession, target_type: str, ids: list[uuid.UUID]
+) -> dict[uuid.UUID, dict]:
+    """Body preview + author handle + live status for echoes/replies, in one query."""
+    Model = PUBLIC_MODELS[target_type]
+    rows = (await db.execute(
+        select(Model.id, Model.body, Model.status, User.handle)
+        .join(User, User.id == Model.author_id)
+        .where(Model.id.in_(ids))
+    )).all()
+    return {
+        row_id: {
+            "status": status,
+            "author_handle": handle,
+            "preview": body[:PREVIEW_CHARS],
+            "truncated": len(body) > PREVIEW_CHARS,
+        }
+        for row_id, body, status, handle in rows
+    }
+
+
+async def _thread_context(db: AsyncSession, ids: list[uuid.UUID]) -> dict[uuid.UUID, dict]:
+    """Context for a reported private thread: who is in it and how big it is.
+
+    Deliberately no body preview. _resolve_thread declines to delete message
+    bodies because the transcript is the evidence; listing that transcript in an
+    admin queue is a *different* privacy decision, and resolving a report does
+    not require it. An admin who genuinely needs the contents should have to go
+    get them deliberately, not have them arrive in a table.
+    """
+    threads = (await db.execute(
+        select(ResonanceThread)
+        .options(selectinload(ResonanceThread.match))
+        .where(ResonanceThread.id.in_(ids))
+    )).scalars().all()
+    if not threads:
+        return {}
+
+    counts = dict((await db.execute(
+        select(ResonanceMessage.thread_id, func.count(ResonanceMessage.id))
+        .where(ResonanceMessage.thread_id.in_(ids))
+        .group_by(ResonanceMessage.thread_id)
+    )).all())
+
+    party_ids = {uid for t in threads for uid in (t.match.user_a, t.match.user_b)}
+    handles = dict((await db.execute(
+        select(User.id, User.handle).where(User.id.in_(party_ids))
+    )).all())
+
+    return {
+        t.id: {
+            "status": t.status,
+            "author_handle": None,
+            "preview": None,
+            "truncated": False,
+            "participants": sorted(
+                h for h in (handles.get(t.match.user_a), handles.get(t.match.user_b)) if h
+            ),
+            "message_count": counts.get(t.id, 0),
+        }
+        for t in threads
+    }
+
+
 async def list_open_reports(db: AsyncSession, limit: int = 100) -> list[dict]:
-    """Moderation queue: distinct targets with open reports, most-reported first."""
+    """Moderation queue: distinct targets with open reports, most-reported first.
+
+    Each row carries enough context to actually adjudicate on — a body preview,
+    the author, and the target's live status. Without those an admin is choosing
+    remove-vs-dismiss against a bare UUID, and held content is filtered out of
+    the public feed, so there is nowhere else to go look it up.
+
+    ``target_exists`` is not cosmetic: resolve_target returns False for a target
+    whose author already deleted it, which the router turns into a 404. Such a
+    report can never be closed through the API, so the queue has to show it as
+    unresolvable rather than offering a button that fails.
+    """
     r = await db.execute(
         select(
             Report.target_type,
             Report.target_id,
             func.count(Report.id).label("n"),
             func.min(Report.created_at).label("first"),
+            func.array_agg(func.distinct(Report.category)).label("cats"),
         )
         .where(Report.status == "open")
         .group_by(Report.target_type, Report.target_id)
@@ -169,21 +251,34 @@ async def list_open_reports(db: AsyncSession, limit: int = 100) -> list[dict]:
         .limit(limit)
     )
     rows = r.all()
+    if not rows:
+        return []
+
+    # Batch the context lookups by target type — one query per type, not per row.
+    by_type: dict[str, list[uuid.UUID]] = {}
+    for target_type, target_id, *_ in rows:
+        by_type.setdefault(target_type, []).append(target_id)
+
+    context: dict[str, dict[uuid.UUID, dict]] = {}
+    for target_type, ids in by_type.items():
+        if target_type in PUBLIC_MODELS:
+            context[target_type] = await _public_context(db, target_type, ids)
+        elif target_type == "thread":
+            context[target_type] = await _thread_context(db, ids)
+        else:
+            context[target_type] = {}
+
     out = []
-    for target_type, target_id, n, first in rows:
-        cats = await db.execute(
-            select(Report.category).where(
-                Report.target_type == target_type,
-                Report.target_id == target_id,
-                Report.status == "open",
-            )
-        )
+    for target_type, target_id, n, first, cats in rows:
+        ctx = context.get(target_type, {}).get(target_id)
         out.append({
             "target_type": target_type,
             "target_id": str(target_id),
             "report_count": n,
-            "categories": sorted(set(cats.scalars().all())),
+            "categories": sorted(cats or []),
             "first_reported_at": first.isoformat() if first else None,
+            "target_exists": ctx is not None,
+            **(ctx or {"status": None, "author_handle": None, "preview": None, "truncated": False}),
         })
     return out
 
@@ -196,13 +291,20 @@ async def resolve_target(
     action: str,
 ) -> bool:
     """Resolve a reported target. action='remove' takes it down; 'dismiss' clears
-    the reports and restores a held item. Returns False if the target is unknown.
+    the reports and restores a held item; 'clear' closes reports whose target is
+    already gone. Returns False if the target is unknown.
 
     Handles threads as well as echoes and replies. The old version fell back to
     ``EchoReply`` for any unrecognised type, so a reported *thread* was looked up
     in the replies table, never found, and could never be closed out — every DM
     report sat open in the queue forever.
+
+    A target that has since been deleted by its author is the other way into that
+    same dead end; see _close_orphaned_reports.
     """
+    if action == "clear":
+        return await _clear_orphaned_reports(db, admin_id, target_type, target_id)
+
     if target_type == "thread":
         return await _resolve_thread(db, admin_id, target_id, action)
 
@@ -213,7 +315,43 @@ async def resolve_target(
     if obj is None:
         return False
 
-    new_report_status = "resolved" if action == "remove" else "dismissed"
+    await _close_open_reports(db, admin_id, target_type, target_id, action)
+    obj.status = "removed" if action == "remove" else "active"
+    await db.flush()
+    return True
+
+
+async def _target_exists(db: AsyncSession, target_type: str, target_id: uuid.UUID) -> bool:
+    if target_type == "thread":
+        Model = ResonanceThread
+    else:
+        Model = PUBLIC_MODELS.get(target_type)
+        if Model is None:
+            return False
+    return (await db.execute(
+        select(Model.id).where(Model.id == target_id)
+    )).scalar_one_or_none() is not None
+
+
+async def _clear_orphaned_reports(
+    db: AsyncSession, admin_id: uuid.UUID, target_type: str, target_id: uuid.UUID
+) -> bool:
+    """Close reports whose target no longer exists ('clear').
+
+    An author deleting their own content is usually the outcome the report was
+    asking for, but it leaves the reports open with nothing left to act on — the
+    same permanently-stuck queue the thread bug caused, reached by a different
+    route. There is no object left to remove or restore, so this is a distinct
+    action rather than an overload of remove/dismiss: 'remove' on a missing
+    target still returns False, because silently succeeding there would hide a
+    genuinely bad target id.
+
+    Refuses to clear a target that still exists — that would close reports
+    without anyone having looked at the content.
+    """
+    if await _target_exists(db, target_type, target_id):
+        return False
+
     reports = (await db.execute(
         select(Report).where(
             Report.target_type == target_type,
@@ -221,12 +359,12 @@ async def resolve_target(
             Report.status == "open",
         )
     )).scalars().all()
+    if not reports:
+        return False
     for rep in reports:
-        rep.status = new_report_status
+        rep.status = "resolved"
         rep.resolved_by = admin_id
-        rep.resolution = action
-
-    obj.status = "removed" if action == "remove" else "active"
+        rep.resolution = "target_gone"
     await db.flush()
     return True
 

@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
-from sqlalchemy import delete, func, select, text
+from sqlalchemy import String, delete, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -22,6 +22,7 @@ from app.models.book_entry import BookEntry
 from app.models.dna_snapshot import DNASnapshot
 from app.models.echo import Echo
 from app.models.refresh_token import RefreshToken
+from app.models.social import Report
 from app.models.user import User
 
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -63,6 +64,9 @@ class DashboardStats(BaseModel):
     db_size_mb: float
     expired_refresh_tokens: int
     catalog_books: int
+    # Distinct targets with open reports — the moderation tab's badge reads this
+    # off the dashboard load rather than paying for a second round trip.
+    open_reports: int
 
 
 class AdminUser(BaseModel):
@@ -129,6 +133,12 @@ async def dashboard(
         )
     )).scalar_one()
 
+    open_reports = (await db.execute(
+        select(func.count(func.distinct(func.concat(
+            Report.target_type, ":", func.cast(Report.target_id, String)
+        )))).where(Report.status == "open")
+    )).scalar_one()
+
     return DashboardStats(
         total_users=total_users,
         total_entries=total_entries,
@@ -139,6 +149,7 @@ async def dashboard(
         db_size_mb=db_size,
         expired_refresh_tokens=expired,
         catalog_books=catalog_books,
+        open_reports=open_reports,
     )
 
 
@@ -250,7 +261,24 @@ class ResolveReportRequest(BaseModel):
     action: str  # "remove" | "dismiss"
 
 
-@router.get("/moderation/queue")
+class ModerationQueueItem(BaseModel):
+    target_type: str
+    target_id: str
+    report_count: int
+    categories: list[str]
+    first_reported_at: str | None
+    # Context to adjudicate on. `preview` and `author_handle` are None for
+    # threads (private transcripts are not listed) and for deleted targets.
+    target_exists: bool
+    status: str | None
+    author_handle: str | None
+    preview: str | None
+    truncated: bool = False
+    participants: list[str] | None = None
+    message_count: int | None = None
+
+
+@router.get("/moderation/queue", response_model=list[ModerationQueueItem])
 async def moderation_queue(
     db: AsyncSession = Depends(get_db),
     admin: User = Depends(require_admin),
@@ -266,8 +294,11 @@ async def moderation_resolve(
     admin: User = Depends(require_admin),
 ):
     """Resolve a reported target: remove it, or dismiss the reports (restoring a held item)."""
-    if data.action not in ("remove", "dismiss"):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="action must be 'remove' or 'dismiss'")
+    if data.action not in ("remove", "dismiss", "clear"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="action must be 'remove', 'dismiss' or 'clear'",
+        )
     ok = await resolve_target(db, admin.id, data.target_type, data.target_id, data.action)
     if not ok:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Target not found")
