@@ -188,7 +188,17 @@ async def test_moderation_queue_and_dismiss_restores(client, db):
 
     r = await client.get("/api/admin/moderation/queue", headers=admin)
     assert r.status_code == 200
-    assert any(item["target_id"] == echo_id for item in r.json())
+    item = next(i for i in r.json() if i["target_id"] == echo_id)
+
+    # The queue has to carry enough to adjudicate on. Held content is filtered
+    # out of the public feed, so if the preview isn't here there is nowhere else
+    # an admin could go look before choosing remove-vs-dismiss.
+    assert item["preview"] == "held then restored"
+    assert item["author_handle"] == "opal"
+    assert item["status"] == "held"
+    assert item["target_exists"] is True
+    assert item["report_count"] == 3
+    assert item["categories"] == ["spam"]
 
     r = await client.post("/api/admin/moderation/resolve",
                           json={"target_type": "echo", "target_id": echo_id, "action": "dismiss"},

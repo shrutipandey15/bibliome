@@ -206,6 +206,16 @@ async def test_thread_reports_are_resolvable_by_an_admin(client, db):
     # And an unrecognised type is rejected rather than defaulting to EchoReply.
     assert await resolve_target(db, me.id, "nonsense", fake_thread_id, "remove") is False
 
+    # 'clear' is the one way out for a report whose target is already gone.
+    # Without it the row above sits open forever — the same dead end the thread
+    # bug caused, reached by the target being deleted instead of mis-looked-up.
+    assert await resolve_target(db, me.id, "thread", fake_thread_id, "clear") is True
+    await db.commit()
+    still_open = [r for r in (await db.execute(
+        select(Report).where(Report.status == "open")
+    )).scalars().all() if r.target_type == "thread"]
+    assert still_open == [], "a cleared orphan report must leave the queue"
+
 
 def test_threats_are_classified_and_self_harm_routes_to_care():
     """post_message now runs this; before, DMs were the one unclassified surface."""
