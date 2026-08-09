@@ -94,6 +94,7 @@ def _entry_to_response(entry) -> EntryResponse:
         status=entry.status,
         verdict=entry.verdict,
         dnf_reason=entry.dnf_reason,
+        progress=entry.progress,
         arc_start_emotion_id=entry.arc_start_emotion_id,
         arc_middle_emotion_id=entry.arc_middle_emotion_id,
         arc_end_emotion_id=entry.arc_end_emotion_id,
