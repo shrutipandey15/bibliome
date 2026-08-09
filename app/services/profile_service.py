@@ -281,9 +281,31 @@ def _identity_strip(user: User) -> dict:
         "bio": user.bio,
         "profile_visibility": user.profile_visibility,
         "personality_type": user.personality_type,
-        # When the shelf started. Pseudonymous — a join date, not an identity.
+        # When the account was opened. Pseudonymous — a join date, not an identity.
         "member_since": user.created_at.isoformat() if user.created_at else None,
     }
+
+
+def _shelf_since(user: User, entries: list[BookEntry]) -> str | None:
+    """When this shelf actually starts.
+
+    NOT the join date. A reader who imported a decade of Goodreads history on
+    their first afternoon has a shelf reaching back to 2014, and stamping it
+    "keeping this shelf since 2026" contradicts the very books printed under it.
+    So: the earliest date the shelf can evidence — a finish date, a start date,
+    or failing both the day the entry was logged — and the account's own birthday
+    only when there is nothing on the shelf at all.
+    """
+    candidates = []
+    for e in entries:
+        for value in (e.finished_at, e.started_at):
+            if value:
+                candidates.append(value)
+        if e.created_at:
+            candidates.append(e.created_at.date())
+    if user.created_at:
+        candidates.append(user.created_at.date())
+    return min(candidates).isoformat() if candidates else None
 
 
 async def compose_profile(db: AsyncSession, viewer_id: uuid.UUID | None, owner: User) -> dict | None:
@@ -314,6 +336,7 @@ async def compose_profile(db: AsyncSession, viewer_id: uuid.UUID | None, owner: 
         "restricted": False,
         **_identity_strip(owner),
         "is_self": is_self,
+        "shelf_since": _shelf_since(owner, entries),
         "signature": owner.cached_dna_profile,  # reuse cache; never recompute here (P2-3)
         "now_reading": now_reading,
         "collections": await _visible_collections(db, owner.id, viewer_class, entries_by_id),

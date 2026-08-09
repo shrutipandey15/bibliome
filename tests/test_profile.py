@@ -163,6 +163,28 @@ async def test_figures_count_registers_intensity_and_books_set_down(client):
     assert p["member_since"]
 
 
+async def test_shelf_since_reaches_back_to_the_oldest_book_not_the_signup(client):
+    """A reader who imports a decade of history on their first afternoon has a
+    shelf that starts in 2014, however new the account is. Stamping it with the
+    join date contradicted the books printed underneath it."""
+    h = await _user(client, "importer")
+    await client.post("/api/entries", json={
+        "title": "Read Long Ago", "intensity": 6,
+        "started_at": "2014-05-02", "finished_at": "2014-06-01",
+        "emotions": [{"emotion_id": "awe", "strength": 7}],
+    }, headers=h)
+
+    p = (await client.get("/api/me/profile", headers=h)).json()
+    assert p["shelf_since"].startswith("2014-05-02")
+    assert p["member_since"] > p["shelf_since"]  # the account is younger than the shelf
+
+
+async def test_shelf_since_falls_back_to_the_join_date_when_nothing_is_shelved(client):
+    h = await _user(client, "brandnew")
+    p = (await client.get("/api/me/profile", headers=h)).json()
+    assert p["shelf_since"][:10] == p["member_since"][:10]
+
+
 async def test_avg_intensity_is_null_on_an_empty_shelf(client):
     h = await _user(client, "emptyshelf")
     p = (await client.get("/api/me/profile", headers=h)).json()
