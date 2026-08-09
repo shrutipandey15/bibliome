@@ -62,6 +62,9 @@ class BookEntry(Base):
     arc_end_emotion_id: Mapped[str | None] = mapped_column(String(30))
     finish_thought: Mapped[str | None] = mapped_column(String(120))
     shelf_position: Mapped[int | None] = mapped_column(Integer)
+    # How far in, 0–100. NULL means "hasn't said", which is not the same as 0% and
+    # must not render as a bar at zero. Only meaningful while a book is open.
+    progress: Mapped[int | None] = mapped_column(Integer)
 
     __table_args__ = (
         CheckConstraint("intensity >= 1 AND intensity <= 10", name="check_intensity_range"),
@@ -77,6 +80,10 @@ class BookEntry(Base):
             "dnf_reason IS NULL OR dnf_reason IN "
             "('bored','too_much','badly_written','wrong_time','lost_me','drifted')",
             name="check_entry_dnf_reason",
+        ),
+        CheckConstraint(
+            "progress IS NULL OR (progress >= 0 AND progress <= 100)",
+            name="ck_book_entries_progress_range",
         ),
     )
 

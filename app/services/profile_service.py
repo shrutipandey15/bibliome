@@ -21,34 +21,60 @@ from app.utils.emotions import VALID_SLUGS, canonicalize
 
 
 # Substance-based milestones only. Each predicate reads real data; nothing invented.
+#
+# Each earned milestone carries the date it was actually earned — found by walking
+# the shelf oldest-first and stamping the entry that tipped the predicate over, not
+# by dating the whole list "today". Unearned ones are returned too, with
+# `achieved: False` and no date, so the study can show what is still ahead without
+# the frontend having to guess which of the five are missing. [F2.8]
+_MILESTONE_LABELS = {
+    "first_book": "Logged your first book",
+    "first_finish": "Completed a full emotional arc",
+    "deep_range": "Felt across 10+ emotional registers",
+    "full_spectrum": f"Read across all {len(VALID_SLUGS)} emotional registers",
+    "year_of_reflection": "A year of consistent reflection",
+}
+_MILESTONE_ORDER = list(_MILESTONE_LABELS)
+
+
 def compute_milestones(entries: list[BookEntry]) -> list[dict]:
     if not entries:
         return []
 
+    # Oldest first: a milestone is dated by the entry that earned it.
+    chronological = sorted(entries, key=lambda e: e.created_at or datetime.max.replace(tzinfo=timezone.utc))
+    earned: dict[str, datetime | None] = {}
+
+    def earn(kind: str, when: datetime | None) -> None:
+        earned.setdefault(kind, when)
+
     tagged: set[str] = set()
-    used_finish = False
-    dates = []
-    for e in entries:
+    first_date = chronological[0].created_at if chronological else None
+    for e in chronological:
+        when = e.created_at
+        earn("first_book", when)
         for em in e.emotions:
             canon = canonicalize(em.emotion_id)
             if canon:
                 tagged.add(canon)
         if e.arc_start_emotion_id or e.finish_thought:
-            used_finish = True
-        if e.created_at:
-            dates.append(e.created_at)
+            earn("first_finish", when)
+        if len(tagged) >= 10:
+            earn("deep_range", when)
+        if tagged >= VALID_SLUGS:
+            earn("full_spectrum", when)
+        if first_date and when and (when - first_date).days >= 365:
+            earn("year_of_reflection", when)
 
-    milestones: list[dict] = []
-    milestones.append({"kind": "first_book", "label": "Logged your first book"})
-    if used_finish:
-        milestones.append({"kind": "first_finish", "label": "Completed a full emotional arc"})
-    if len(tagged) >= 10:
-        milestones.append({"kind": "deep_range", "label": "Felt across 10+ emotional registers"})
-    if tagged >= VALID_SLUGS:
-        milestones.append({"kind": "full_spectrum", "label": f"Read across all {len(VALID_SLUGS)} emotional registers"})
-    if dates and (max(dates) - min(dates)).days >= 365:
-        milestones.append({"kind": "year_of_reflection", "label": "A year of consistent reflection"})
-    return milestones
+    return [
+        {
+            "kind": kind,
+            "label": _MILESTONE_LABELS[kind],
+            "achieved": kind in earned,
+            "achieved_at": earned[kind].isoformat() if earned.get(kind) else None,
+        }
+        for kind in _MILESTONE_ORDER
+    ]
 
 
 def _viewer_class(viewer_id: uuid.UUID | None, owner_id: uuid.UUID) -> str:
@@ -62,14 +88,28 @@ def _viewer_class(viewer_id: uuid.UUID | None, owner_id: uuid.UUID) -> str:
 async def _load_entries(db: AsyncSession, user_id: uuid.UUID) -> list[BookEntry]:
     result = await db.execute(
         select(BookEntry)
-        .options(selectinload(BookEntry.emotions))
+        .options(selectinload(BookEntry.emotions), selectinload(BookEntry.checkins))
         .where(BookEntry.user_id == user_id)
         .order_by(BookEntry.created_at.desc())
     )
     return list(result.scalars().all())
 
 
-def _entry_card(e: BookEntry) -> dict:
+def _latest_checkin(e: BookEntry) -> dict | None:
+    """The most recent weather report on a book in progress. The note is the
+    reader's own 80 characters, so it rides along ONLY on the owner's now-reading
+    rail — never on a collection or a stranger's view."""
+    if not e.checkins:
+        return None
+    last = max(e.checkins, key=lambda c: c.created_at)
+    return {
+        "emotion": canonicalize(last.emotion_id),
+        "note": last.note,
+        "at": last.created_at.isoformat() if last.created_at else None,
+    }
+
+
+def _entry_card(e: BookEntry, *, with_checkin: bool = False) -> dict:
     """A book card for a profile — never exposes private notes/echo, only the
     shelf-safe fields (blueprint: a private review stays hidden even in a public
     collection)."""
@@ -77,14 +117,20 @@ def _entry_card(e: BookEntry) -> dict:
     if e.emotions:
         top = max(e.emotions, key=lambda x: x.strength)
         dominant = canonicalize(top.emotion_id)
-    return {
+    card = {
         "entry_id": str(e.id),
         "title": e.title,
         "author": e.author,
         "cover_url": e.cover_url,
         "dominant_emotion": dominant,
         "status": e.status,
+        # Null unless the reader said — the study draws no bar for a book that
+        # hasn't been placed.
+        "progress": e.progress,
     }
+    if with_checkin:
+        card["last_checkin"] = _latest_checkin(e)
+    return card
 
 
 async def _visible_collections(
@@ -118,6 +164,115 @@ async def _visible_collections(
     return out
 
 
+def _book_key(e: BookEntry) -> tuple[str, str]:
+    return ((e.title or "").strip().lower(), (e.author or "").strip().lower())
+
+
+# How many saved lines the study carries. The page shows two and offers the rest
+# behind "more"; past this the response stops being a profile and starts being an
+# export.
+MARGINS_LIMIT = 24
+
+
+def _margins(entries: list[BookEntry]) -> list[dict]:
+    """The lines a reader kept — `entry.quote`, one per book.
+
+    A book can appear on the shelf more than once (a reread is a separate record,
+    deliberately), so the same title can carry two quotes. The FIRST one wins: the
+    line that struck you the first time through. Ordered newest-kept first.
+
+    OWNER ONLY. The quote is written in the same breath as the private notes, and
+    `_entry_card` strips those on purpose — this must never be composed into a
+    view someone else can read.
+    """
+    seen: set[tuple[str, str]] = set()
+    kept: list[tuple[datetime, dict]] = []
+    # Oldest first, so the earliest record of a book is the one we keep.
+    for e in sorted(entries, key=lambda x: x.created_at or datetime.max.replace(tzinfo=timezone.utc)):
+        if not (e.quote or "").strip():
+            continue
+        key = _book_key(e)
+        if key in seen:
+            continue
+        seen.add(key)
+        at = e.finished_at or (e.created_at.date() if e.created_at else None)
+        dominant = None
+        if e.emotions:
+            dominant = canonicalize(max(e.emotions, key=lambda x: x.strength).emotion_id)
+        kept.append((e.created_at, {
+            "entry_id": str(e.id),
+            "title": e.title,
+            "author": e.author,
+            "quote": e.quote.strip(),
+            "at": at.isoformat() if at else None,
+            "dominant_emotion": dominant,
+        }))
+    kept.sort(key=lambda pair: pair[0] or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
+    return [card for _, card in kept[:MARGINS_LIMIT]]
+
+
+def _figures(entries: list[BookEntry]) -> dict:
+    """The four numbers across the top of the study. Every one is counted from
+    the shelf in front of us — there is no figure here the reader could not
+    recount by hand."""
+    registers: set[str] = set()
+    intensities: list[int] = []
+    set_down = 0
+    for e in entries:
+        for em in e.emotions:
+            canon = canonicalize(em.emotion_id)
+            if canon:
+                registers.add(canon)
+        if e.intensity is not None:
+            intensities.append(e.intensity)
+        if e.status == "abandoned":
+            set_down += 1
+    return {
+        "registers_felt": len(registers),
+        "avg_intensity": round(sum(intensities) / len(intensities), 1) if intensities else None,
+        "set_down": set_down,
+    }
+
+
+def _emotion_counts(entries: list[BookEntry]) -> dict[str, int]:
+    """Books per emotional register, counted once per book.
+
+    This is the fingerprint the signature card draws. It is a real tally over the
+    reader's own shelf — every register in the vocabulary is answerable from it,
+    including the ones that come back zero, which is the half of the picture that
+    actually says something.
+    """
+    counts: dict[str, int] = {}
+    for e in entries:
+        for slug in {canonicalize(em.emotion_id) for em in e.emotions}:
+            if slug:
+                counts[slug] = counts.get(slug, 0) + 1
+    return counts
+
+
+# Below this many readers with a settled archetype, a share is noise dressed as a
+# statistic — "one of eight" out of nine readers means nothing. The card omits the
+# line entirely rather than printing a number that will swing wildly next week.
+ARCHETYPE_SHARE_FLOOR = 50
+
+
+async def archetype_share(db: AsyncSession, personality_type: str | None) -> int | None:
+    """What percent of readers share this archetype, or None if it can't be said
+    honestly yet. Whole percent — the extra decimal would imply a precision this
+    does not have."""
+    if not personality_type:
+        return None
+    total = await db.scalar(select(func.count()).select_from(User).where(User.personality_type.isnot(None)))
+    if not total or total < ARCHETYPE_SHARE_FLOOR:
+        return None
+    mine = await db.scalar(
+        select(func.count()).select_from(User).where(User.personality_type == personality_type)
+    )
+    if not mine:
+        return None
+    return max(1, round(100 * mine / total))
+
+
 def _identity_strip(user: User) -> dict:
     """Only pseudonymous, shelf-safe identity — never email or real data."""
     return {
@@ -126,6 +281,8 @@ def _identity_strip(user: User) -> dict:
         "bio": user.bio,
         "profile_visibility": user.profile_visibility,
         "personality_type": user.personality_type,
+        # When the shelf started. Pseudonymous — a join date, not an identity.
+        "member_since": user.created_at.isoformat() if user.created_at else None,
     }
 
 
@@ -148,17 +305,26 @@ async def compose_profile(db: AsyncSession, viewer_id: uuid.UUID | None, owner: 
 
     entries = await _load_entries(db, owner.id)
     entries_by_id = {e.id: e for e in entries}
-    now_reading = [_entry_card(e) for e in entries if e.status == "reading"]
+    is_self = viewer_class == VIEWER_OWNER
+    # The check-in note is the reader's private shorthand, so only their own
+    # now-reading rail carries it.
+    now_reading = [_entry_card(e, with_checkin=is_self) for e in entries if e.status == "reading"]
 
     profile = {
         "restricted": False,
         **_identity_strip(owner),
-        "is_self": viewer_class == VIEWER_OWNER,
+        "is_self": is_self,
         "signature": owner.cached_dna_profile,  # reuse cache; never recompute here (P2-3)
         "now_reading": now_reading,
         "collections": await _visible_collections(db, owner.id, viewer_class, entries_by_id),
         "milestones": compute_milestones(entries),
         "book_count": len(entries),
+        **_figures(entries),
+        # The signature card's fingerprint, drawn from this reader's own shelf.
+        "emotion_counts": _emotion_counts(entries),
+        "archetype_share": await archetype_share(db, owner.personality_type),
         "recent": [_entry_card(e) for e in entries[:12]],
+        # Kept lines are written alongside the private notes — owner only. [F2.8]
+        "margins": _margins(entries) if is_self else [],
     }
     return profile

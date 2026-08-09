@@ -55,6 +55,9 @@ async def create_entry(db: AsyncSession, user_id: uuid.UUID, data: EntryCreate) 
         status=status,
         verdict=data.verdict,
         dnf_reason=data.dnf_reason,
+        # Only an open book carries a progress figure — on a finished one the
+        # status already says where you are, and a stale 61% would contradict it.
+        progress=data.progress if status in ("reading", "paused") else None,
         started_at=data.started_at,
         finished_at=_default_finished_at(status, data.finished_at),
     )
@@ -192,6 +195,11 @@ async def update_entry(
         elif entry.status != "finished" and "status" in update_data and "finished_at" not in update_data:
             entry.finished_at = None
 
+    # A closed book has no "how far in" — the status is the answer. Leaving the
+    # old figure behind would put "43%" next to a book you finished last March.
+    if "status" in update_data and entry.status not in ("reading", "paused"):
+        entry.progress = None
+
     # Update emotions if provided
     if data.emotions is not None:
         # Remove existing emotions
@@ -211,6 +219,13 @@ async def update_entry(
             new_emotions.append(entry_emotion)
 
         await db.flush()
+
+    # Flush BEFORE expiring. `expire()` on a dirty instance throws away pending
+    # in-memory changes rather than writing them, so an update that touched only
+    # scalars — and therefore never tripped the autoflush inside `resolve_book`
+    # or the emotions rewrite — was silently discarded. A PUT of {"progress": 41}
+    # or {"notes": "..."} alone returned 200 and saved nothing.
+    await db.flush()
 
     # Expire the entry to bust SQLAlchemy's identity map cache,
     # then reload fresh with eager-loaded emotions

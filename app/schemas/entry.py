@@ -69,6 +69,8 @@ class EntryCreate(BaseModel):
     status: EntryStatus | None = None
     verdict: Verdict | None = None
     dnf_reason: DnfReason | None = None
+    # How far in, 0-100. Omitted means "hasn't said" and stays NULL. [F2.8]
+    progress: int | None = Field(default=None, ge=0, le=100)
 
     _check_cover = field_validator("cover_url")(_validate_cover)
 
@@ -89,6 +91,8 @@ class EntryUpdate(BaseModel):
     status: EntryStatus | None = None
     verdict: Verdict | None = None
     dnf_reason: DnfReason | None = None
+    # How far in, 0-100. Omitted means "hasn't said" and stays NULL. [F2.8]
+    progress: int | None = Field(default=None, ge=0, le=100)
 
     _check_cover = field_validator("cover_url")(_validate_cover)
 
@@ -113,6 +117,7 @@ class EntryResponse(BaseModel):
     status: EntryStatus = "finished"
     verdict: Verdict | None = None
     dnf_reason: DnfReason | None = None
+    progress: int | None = None
     arc_start_emotion_id: str | None = None
     arc_middle_emotion_id: str | None = None
     arc_end_emotion_id: str | None = None

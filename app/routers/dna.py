@@ -27,6 +27,7 @@ from app.schemas.dna import (
 )
 from app.services.blind_spots_service import get_blind_spots
 from app.services.dna_service import compute_and_cache
+from app.services.profile_service import archetype_share
 from app.services.calendar_service import get_emotional_calendar
 from app.services.dna_engine import (
     build_heatmap_data,
@@ -81,8 +82,18 @@ async def get_dna_profile(
     # the shape we serve. Recompute once rather than serving a response missing a
     # field the client now depends on.
     if not current_user.dna_dirty and cached and "snapshot_count" in cached:
-        return cached
-    return await compute_and_cache(db, current_user)
+        payload = cached
+    else:
+        payload = await compute_and_cache(db, current_user)
+
+    # How many readers share this archetype moves with the POPULATION, not with
+    # this reader — so it is computed per request and merged on top rather than
+    # baked into their cache, where it would freeze on the day they last logged a
+    # book. Two counts; None until there are enough readers to mean anything.
+    return {
+        **payload,
+        "archetype_share": await archetype_share(db, current_user.personality_type),
+    }
 
 
 @router.post("/generate", response_model=DNAGenerateResponse)
