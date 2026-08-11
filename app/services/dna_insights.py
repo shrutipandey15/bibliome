@@ -280,12 +280,18 @@ def build_dna(
     # the whole editorial decision above.
     vector_sigs = sigs + (journal_sigs or [])
     journal_count = len(journal_sigs or [])
-    if book_count < MIN_BOOKS_FOR_DNA:
+    # The gate counts books that carry a feeling, not books. Five untagged imports
+    # are five titles we know nothing about — computing a profile from them would
+    # be reading tea leaves in an empty cup.
+    tagged = [s for s in sigs if s.emotions]
+    if len(tagged) < MIN_BOOKS_FOR_DNA:
         return {
             "enough": False,
             "book_count": book_count,
+            "tagged_count": len(tagged),
             "needed": MIN_BOOKS_FOR_DNA,
-            "message": f"{book_count} books in. At {MIN_BOOKS_FOR_DNA}, the mirror starts to see you.",
+            "message": f"{len(tagged)} books with a feeling logged. "
+                       f"At {MIN_BOOKS_FOR_DNA}, the mirror starts to see you.",
             # Present on both branches so the client never has to check `enough`
             # before reading it.
             "snapshot_count": snapshot_count,
@@ -334,16 +340,30 @@ def build_dna(
     }
 
     unlocked, locked = generate_insights(ctx, limit=insight_limit)
-    archetype_id, scores = sig.score_archetype(current)
+    archetype_id, scores, margin = sig.score_archetype(current)
 
     return {
         "enough": True,
         "book_count": book_count,
+        "tagged_count": len(tagged),
         "insights": unlocked,
         "locked": locked,
-        "archetype": sig.archetype_dict(archetype_id),
+        # None is a legitimate answer here: the reader can be past the gate and
+        # still have a tally that names nobody. The client must handle it.
+        "archetype": sig.archetype_dict(archetype_id) if archetype_id else None,
         "archetype_scores": scores,
-        "profiles": {"enduring": enduring, "current": current},
+        "margin": margin,
+        # When the leader barely clears the field, say so rather than pretending
+        # the label was decisive.
+        "runner_up": (
+            sig.archetype_dict(sorted(scores, key=scores.get, reverse=True)[1])["name"]
+            if archetype_id and margin < 0.10 else None
+        ),
+        # `current_books` is the recency-weighted vector over books ALONE. The
+        # other two span the journal, and the journal is private: this is the only
+        # vector a public surface is allowed to read (see card_payload).
+        "profiles": {"enduring": enduring, "current": current,
+                     "current_books": sig.frequency_vector(sigs, weighted=True)},
         "drift": drift_val,
         "reads_for": sig._canon_list(reads_for),
         # Already known here (it gates `has_two_snapshots` above), so returning it

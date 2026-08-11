@@ -15,6 +15,7 @@ from sqlalchemy.orm import selectinload
 from app.models.book_entry import BookEntry
 from app.models.collection import Collection
 from app.models.user import User
+from app.services.dna_service import card_payload
 from app.services.social_service import hidden_author_ids, is_blocked_between
 from app.services.visibility import VIEWER_ANON, VIEWER_MEMBER, VIEWER_OWNER, can_view_profile
 from app.utils.emotions import VALID_SLUGS, canonicalize
@@ -337,7 +338,10 @@ async def compose_profile(db: AsyncSession, viewer_id: uuid.UUID | None, owner: 
         **_identity_strip(owner),
         "is_self": is_self,
         "shelf_since": _shelf_since(owner, entries),
-        "signature": owner.cached_dna_profile,  # reuse cache; never recompute here (P2-3)
+        # Cache read, never a recompute (P2-3) — and the same card every other
+        # public surface renders, so the profile can't contradict the share link
+        # or the owner's own DNA tab. None until the DNA is ready.
+        "signature": card_payload(owner),
         "now_reading": now_reading,
         "collections": await _visible_collections(db, owner.id, viewer_class, entries_by_id),
         "milestones": compute_milestones(entries),
