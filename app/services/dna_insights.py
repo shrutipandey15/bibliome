@@ -50,9 +50,26 @@ class InsightTemplate:
 
 
 # ── 1. Contradiction — the gold (gate 10, needs reads_for) ──
+#
+# `stated` now carries a VERDICT, not just a gap: contradicted / confirmed /
+# inconclusive. Every template reading it must check which, or a reader who was
+# right about themselves gets handed the accusation copy.
+def _verdict(c) -> str | None:
+    s = c.get("stated")
+    return s.get("verdict") if s else None
+
+
+def _out_frequented(c) -> bool:
+    """Strictly more books, not merely a higher rank. `revealed_top` ties silently,
+    and "you reach for it more often" is false on equal counts."""
+    s = c["stated"]
+    return bool(s.get("revealed_top") and s["revealed_top"] != s["stated"]
+                and s.get("revealed_top_books", 0) > s.get("stated_books", 0))
+
+
 def _contra_ok(c):
     s = c.get("stated")
-    return bool(s and s.get("delta") is not None and s.get("delta") > 0.5
+    return bool(s and _verdict(c) == "contradicted"
                 and s.get("revealed_hi") and s["revealed_hi"] != s["stated"])
 
 CONTRADICTION = [
@@ -64,12 +81,59 @@ CONTRADICTION = [
         lambda c: min(1.0, c["stated"]["delta"] / 4.0),
     ),
     InsightTemplate(
+        # A FREQUENCY claim, not an intensity one, so it stands on its own for an
+        # inconclusive verdict. But it must not fire alongside `confirmed`: "your
+        # centre of gravity is elsewhere" filed under contradiction, next to a
+        # confirmation, is the two halves of the payload arguing with each other.
         "contradiction", "center_of_gravity", GATES["contradiction"], True,
-        lambda c: bool(c.get("stated") and c["stated"].get("revealed_top")
-                       and c["stated"]["revealed_top"] != c["stated"]["stated"]),
+        lambda c: bool(c.get("stated") and _verdict(c) != "confirmed"
+                       and _out_frequented(c)),
         lambda c: (f"You told me {_name(c['stated']['stated'])}. "
                    f"Your shelf's center of gravity is {_name(c['stated']['revealed_top'])}."),
         lambda c: 0.7,
+    ),
+]
+
+
+# ── 1b. Confirmation — the same measurement, the other sign ──
+#
+# Deliberately NOT a compliment. "You know yourself well" is a sentence that could
+# be true of any reader; "your comfort books average 8.1 and the nearest thing to
+# them averages 6.4" is true of this one. Both numbers are shown so the reader can
+# check the verdict rather than accept it.
+def _confirmed_ok(c):
+    s = c.get("stated")
+    return bool(s and _verdict(c) == "confirmed" and s.get("evidence"))
+
+
+def _ev(c):
+    return c["stated"]["evidence"]
+
+
+CONFIRMATION = [
+    InsightTemplate(
+        "confirmation", "holds_up", GATES["contradiction"], True,
+        lambda c: _confirmed_ok(c) and not _out_frequented(c),
+        lambda c: (f"You said you read for {_name(_ev(c)['stated']['emotion'])}. "
+                   f"Those books average {_ev(c)['stated']['avg']} across "
+                   f"{_ev(c)['stated']['books']}; the closest thing to them, "
+                   f"{_name(_ev(c)['compared']['emotion'])}, averages "
+                   f"{_ev(c)['compared']['avg']}."),
+        lambda c: min(0.55, abs(c["stated"]["delta"]) / 4.0),
+    ),
+    InsightTemplate(
+        # Reaches for one thing more often, rates another higher. Both facts, one
+        # sentence — and the reason `center_of_gravity` is suppressed here.
+        "confirmation", "rates_above_what_it_reaches_for", GATES["contradiction"], True,
+        lambda c: _confirmed_ok(c) and _out_frequented(c),
+        lambda c: (f"You reach for {_name(c['stated']['revealed_top'])} more often — "
+                   f"{c['stated']['revealed_top_books']} books against "
+                   f"{c['stated']['stated_books']}. "
+                   f"You rate {_name(_ev(c)['stated']['emotion'])} higher: "
+                   f"{_ev(c)['stated']['avg']} against "
+                   f"{_ev(c)['compared']['avg']} for "
+                   f"{_name(_ev(c)['compared']['emotion'])}."),
+        lambda c: min(0.55, abs(c["stated"]["delta"]) / 4.0),
     ),
 ]
 
@@ -185,12 +249,18 @@ ARC = [
 # Registry, ordered by category power (B7.7). Seasonality is intentionally absent
 # from the *renderable* registry — it is only ever a locked entry this pass.
 REGISTRY: list[InsightTemplate] = (
-    CONTRADICTION + BLIND_SPOT + DRIFT + INTENSITY + PAIRING + ABANDONMENT + RANGE + ARC
+    CONTRADICTION + CONFIRMATION + BLIND_SPOT + DRIFT + INTENSITY + PAIRING
+    + ABANDONMENT + RANGE + ARC
 )
 
 # Category order for stable ranking ties + the locked list.
+#
+# `confirmation` sits here because the sort indexes into this list, but it is
+# deliberately absent from GATES: the locked loop skips gate-less categories, and
+# since it is the same measurement as `contradiction` with the sign reversed,
+# listing both would tell a 6-book reader twice that one thing isn't ready yet.
 CATEGORY_ORDER = [
-    "contradiction", "blind_spot", "drift", "intensity_signature",
+    "contradiction", "confirmation", "blind_spot", "drift", "intensity_signature",
     "pairing", "abandonment", "range", "arc", "seasonality",
 ]
 
@@ -359,6 +429,9 @@ def build_dna(
             sig.archetype_dict(sorted(scores, key=scores.get, reverse=True)[1])["name"]
             if archetype_id and margin < 0.10 else None
         ),
+        # The receipt. Books only — `sigs`, not `vector_sigs` — because this line
+        # is rendered on public surfaces and counts things it calls "your books".
+        "basis": sig.basis_for(archetype_id, sigs) if archetype_id else None,
         # `current_books` is the recency-weighted vector over books ALONE. The
         # other two span the journal, and the journal is private: this is the only
         # vector a public surface is allowed to read (see card_payload).
