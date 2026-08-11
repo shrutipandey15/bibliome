@@ -14,7 +14,11 @@ engine = create_async_engine(
     echo=settings.SQL_ECHO,
     pool_size=settings.DB_POOL_SIZE,
     max_overflow=settings.DB_MAX_OVERFLOW,
-    pool_timeout=30,
+    # Below nginx's proxy_read_timeout (30s) on purpose. When they were equal, a
+    # saturated pool made every queued request wait the full 30s, nginx hung up at
+    # exactly that moment, and the worker then ran a query for a client that was
+    # already gone — burning capacity to produce 504s. Failing fast sheds load.
+    pool_timeout=8,
     pool_pre_ping=True,
 )
 

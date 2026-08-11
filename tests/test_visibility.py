@@ -49,8 +49,20 @@ async def test_invalid_visibility_rejected(client):
     assert r.status_code == 422
 
 
+async def _seed_dna(client, headers, n=5):
+    """Enough tagged books for a card to exist. The share endpoint serves the
+    owner's cached DNA now, so a reader with nothing logged has nothing to share."""
+    for i in range(n):
+        await client.post("/api/entries", json={
+            "title": f"Book {i}", "intensity": 7,
+            "emotions": [{"emotion_id": "comfort", "strength": 7}],
+        }, headers=headers)
+    await client.get("/api/dna/profile", headers=headers)   # warm the cache
+
+
 async def test_share_link_grants_access_then_revoke_kills_it(client):
     headers = await _register_login(client, "s@example.com", "sharer")
+    await _seed_dna(client, headers)
     # Even though the profile is private, a share link works...
     r = await client.post("/api/user/share-token", headers=headers)
     assert r.status_code == 200

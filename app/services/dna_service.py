@@ -85,6 +85,38 @@ async def _snapshot_context(db: AsyncSession, user_id: uuid.UUID) -> _SnapContex
     return _SnapContext(latest.emotion_data, count, latest.generated_at, latest.personality_type)
 
 
+def card_payload(user: User) -> dict | None:
+    """The one shape every public surface renders.
+
+    Reads the cache only — a public path must never recompute, and must never see a
+    different engine than the owner's own DNA tab. Returns None when there is no
+    card to show, which the caller renders as "not ready yet" rather than filling
+    in with a second opinion from somewhere else.
+    """
+    v2 = user.cached_dna_v2
+    if not v2 or not v2.get("enough") or not v2.get("archetype"):
+        return None
+    return {
+        "archetype": v2["archetype"],
+        "archetype_scores": v2["archetype_scores"],
+        "margin": v2.get("margin"),
+        "basis": v2.get("basis"),
+        "book_count": v2["book_count"],
+        # Books only, deliberately: `profiles.current` spans the journal, and a
+        # stranger must not be able to read emotion frequencies out of someone's
+        # private life even in aggregate. A cache written before `current_books`
+        # existed simply carries no emotions rather than falling back to the
+        # journal-spanning vector.
+        "top_emotions": [
+            {"emotion_id": s, "weight": round(w, 4)}
+            for s, w in sorted(
+                v2["profiles"].get("current_books", {}).items(), key=lambda kv: -kv[1]
+            )[:5]
+            if w > 0
+        ],
+    }
+
+
 async def compute_and_cache(db: AsyncSession, user: User) -> dict:
     """Recompute both payloads and store them on the user row. Returns the private
     Phase-7 payload (what the owner's mirror renders). No snapshot side effects."""
@@ -107,10 +139,47 @@ async def compute_and_cache(db: AsyncSession, user: User) -> dict:
     user.cached_dna_profile = legacy
     # The headline archetype now comes from the recency-weighted profile so it can
     # change (B7.5); None until there's enough data.
-    user.personality_type = v2["archetype"]["name"] if v2.get("enough") else None
+    user.personality_type = v2["archetype"]["name"] if v2.get("archetype") else None
     user.dna_dirty = False
     await db.flush()
     return v2
+
+
+async def manual_snapshot(db: AsyncSession, user: User, v2: dict) -> DNASnapshot:
+    """Capture a snapshot the reader asked for (POST /dna/generate), from the same
+    payload their DNA tab renders.
+
+    The caller must have checked that ``v2`` has an archetype — a snapshot is a
+    permanent record of what the reader was told, so it must never contain a label
+    the mirror declined to show them. Writes the same ``emotion_data`` shape as
+    ``maybe_snapshot_and_notify`` so the evolution timeline is homogeneous
+    regardless of which path created a point on it.
+    """
+    ctx = await _snapshot_context(db, user.id)
+    archetype = v2["archetype"]
+    current = v2["profiles"]["current"]
+    prev_current = (ctx.prev_emotion_data or {}).get("current_vector")
+    now = datetime.now(timezone.utc)
+
+    snapshot = DNASnapshot(
+        user_id=user.id,
+        personality_type=archetype["name"],
+        dna_type_slug=dna_type_slug_for(archetype["id"]),
+        emotion_data={
+            "enduring_vector": v2["profiles"]["enduring"],
+            "current_vector": current,
+            "archetype_id": archetype["id"],
+            "archetype_scores": v2["archetype_scores"],
+            "margin": v2.get("margin"),
+            "drift": sig.drift(prev_current, current) if prev_current else None,
+        },
+        book_count=v2["book_count"],
+        year=now.year,
+        trigger="manual",
+    )
+    db.add(snapshot)
+    await db.flush()
+    return snapshot
 
 
 async def maybe_snapshot_and_notify(db: AsyncSession, user: User) -> DNASnapshot | None:
@@ -131,7 +200,11 @@ async def maybe_snapshot_and_notify(db: AsyncSession, user: User) -> DNASnapshot
     vector_sigs = sigs + await _load_journal_sigs(db, user.id)
     current = sig.frequency_vector(vector_sigs, weighted=True)
     enduring = sig.frequency_vector(vector_sigs, weighted=False)
-    archetype_id, _ = sig.score_archetype(current)
+    archetype_id, _, _ = sig.score_archetype(current)
+    if archetype_id is None:
+        # Nothing to name, so nothing has shifted. A snapshot here would record an
+        # archetype the engine declined to give.
+        return None
     archetype_name = sig.archetype_dict(archetype_id)["name"]
 
     now = datetime.now(timezone.utc)

@@ -7,20 +7,23 @@ share-token DNA card as JSON: a revocable, opt-in capability link the user creat
 for themselves (visibility spine, B2.1). Echo is the one real public surface.
 """
 
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
 
 from app.database import get_db
 from app.middleware.rate_limit import RateLimiter
-from app.models.book_entry import BookEntry
-from app.services.dna_engine import calculate_personality
+from app.services.dna_service import card_payload
 from app.services.visibility import resolve_share_token
+
+logger = logging.getLogger("bibliome.public")
 
 router = APIRouter(prefix="/public", tags=["public"])
 
-# Unauthenticated + heavy (DNA compute) → rate-limited (audit P1-6).
+# Unauthenticated → rate-limited (audit P1-6). No longer heavy: the card is a
+# cached-column read now, which is also why the Redis layer that used to sit in
+# front of the live DNA compute is gone.
 public_limiter = RateLimiter(max_requests=30, window_seconds=60, prefix="public")
 
 
@@ -28,35 +31,20 @@ public_limiter = RateLimiter(max_requests=30, window_seconds=60, prefix="public"
 async def get_shared_card(token: str, request: Request, db: AsyncSession = Depends(get_db)):
     """DNA profile via a revocable share token — the one way to share a profile."""
     await public_limiter.check(request)
+    # Token validity is always resolved live (two indexed lookups) so revocation
+    # and expiry are immediate.
     user = await resolve_share_token(db, token)
     if not user:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Link invalid or expired")
 
-    result = await db.execute(
-        select(BookEntry)
-        .options(selectinload(BookEntry.emotions))
-        .where(BookEntry.user_id == user.id)
-        .order_by(BookEntry.created_at.asc())
-    )
-    entries = result.scalars().all()
+    # Cache read only, and the same cache the owner's own DNA tab renders. This
+    # endpoint used to recompute a *second*, older engine live, which meant a
+    # reader's share link could name a different archetype than the app showed
+    # them — and could name one at all for a 3-book reader the app told to keep
+    # reading. One engine, every surface.
+    card = card_payload(user)
+    if card is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                            detail="This reader's DNA isn't ready yet")
 
-    entry_dicts = [
-        {
-            "id": str(e.id),
-            "title": e.title,
-            "author": e.author,
-            "intensity": e.intensity,
-            "emotions": [em.emotion_id for em in e.emotions],
-            "created_at": e.created_at,
-        }
-        for e in entries
-    ]
-
-    dna = calculate_personality(entry_dicts)
-    return {
-        "handle": user.handle,
-        "personality": dna.get("personality"),
-        "stats": dna.get("stats", {}),
-        "top_emotions": dna.get("top_emotions", []),
-        "share_token": token,
-    }
+    return {"handle": user.handle, "share_token": token, **card}

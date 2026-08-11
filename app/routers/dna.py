@@ -26,13 +26,11 @@ from app.schemas.dna import (
     StatsResponse,
 )
 from app.services.blind_spots_service import get_blind_spots
-from app.services.dna_service import compute_and_cache
+from app.services.dna_service import compute_and_cache, manual_snapshot
 from app.services.profile_service import archetype_share
 from app.services.calendar_service import get_emotional_calendar
 from app.services.dna_engine import (
     build_heatmap_data,
-    calculate_personality,
-    dna_type_slug_for,
     generate_recap,
     generate_stats,
 )
@@ -104,50 +102,35 @@ async def generate_dna(
 ):
     """
     Calculate DNA and save a snapshot.
-    Minimum 3 books required.
+
+    Same engine, same gate, same answer as the DNA tab. This used to run the legacy
+    engine at a 3-book gate, which meant a reader could be told "not enough yet" on
+    /dna/profile and still persist a confident archetype into their own timeline —
+    a permanent record of a label the mirror never showed them.
     """
     await generate_limiter.check(request)
-    entries = await _get_user_entries(db, current_user.id)
 
-    if len(entries) < 3:
+    # Recompute first: the snapshot is written FROM the cached payload, so the two
+    # cannot drift apart.
+    v2 = await compute_and_cache(db, current_user)
+
+    if not v2.get("enough"):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Need at least 3 books to generate DNA. You have {len(entries)}.",
+            detail=(f"Need at least {v2['needed']} books with a feeling logged to "
+                    f"generate DNA. You have {v2['tagged_count']}."),
         )
-
-    result = calculate_personality(entries)
-
-    if not result["personality"]:
+    if not v2.get("archetype"):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Could not determine personality. Add more emotion tags to your entries.",
         )
 
-    personality = result["personality"]
-    now = datetime.now(timezone.utc)
-
-    # Save snapshot
-    snapshot = DNASnapshot(
-        user_id=current_user.id,
-        personality_type=personality["name"],
-        dna_type_slug=dna_type_slug_for(personality["id"]),
-        emotion_data={
-            "frequency": result["emotion_frequency"],
-            "intensity": result["emotion_intensity"],
-            "top_emotions": result["top_emotions"],
-            "avoided": result["avoided_emotions"],
-            "co_occurrence": result["co_occurrence"],
-            "scores": result["scores"],
-        },
-        book_count=len(entries),
-        year=now.year,
-    )
-    db.add(snapshot)
-
-    # Refresh both caches (public signature + private Phase-7 payload) consistently.
-    await db.flush()
+    snapshot = await manual_snapshot(db, current_user, v2)
+    # The cached payload was built before this snapshot existed, and it carries
+    # snapshot_count / has_two_snapshots. Refresh so the DNA tab sees the snapshot
+    # the reader just took rather than a count one behind.
     await compute_and_cache(db, current_user)
-
     await invalidate_dna(current_user.id)
 
     return DNAGenerateResponse(
@@ -157,9 +140,9 @@ async def generate_dna(
             emotion_data=snapshot.emotion_data,
             book_count=snapshot.book_count,
             year=snapshot.year,
-            generated_at=snapshot.generated_at or now,
+            generated_at=snapshot.generated_at or datetime.now(timezone.utc),
         ),
-        personality=PersonalityInfo(**personality),
+        personality=PersonalityInfo(**v2["archetype"]),
     )
 
 

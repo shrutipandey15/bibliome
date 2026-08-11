@@ -27,6 +27,9 @@ HALF_LIFE_DAYS = 120          # a book's emotional weight halves every ~4 months
 DRIFT_SNAPSHOT_THRESHOLD = 0.15
 MONTHLY_CADENCE_DAYS = 30
 MIN_BOOKS_FOR_DNA = 5
+# Below this many books carrying a tag, its average intensity is one reader's mood
+# on a Tuesday, not a preference — stated_vs_revealed refuses to compare on it.
+MIN_BOOKS_PER_CLAIM = 3
 
 _LN2 = math.log(2)
 _ALL_SLUGS = [e["slug"] for e in EMOTIONS]              # canonical declaration order
@@ -197,39 +200,62 @@ def co_occurrence(sigs: list[EntrySig]) -> Counter:
     return pairs
 
 
-def stated_vs_revealed(sigs: list[EntrySig], reads_for: list[str] | None) -> dict | None:
-    """The gold: gap between what they SAID and what their shelf shows (B7.1).
+def _stated_vs_revealed_one(sigs: list[EntrySig], stated: str) -> dict:
+    """The gap for a single stated emotion. See ``stated_vs_revealed``."""
 
-    Returns None when no stated preference exists (so the insight can't fire).
-    """
-    stated_slugs = _canon_list(reads_for)
-    if not stated_slugs:
-        return None
-    stated = stated_slugs[0]
+    def avg_intensity_disjoint(slug: str, against: str) -> float | None:
+        # Disjoint on purpose. Intensity is one slider per *book*, so a book tagged
+        # both comfort and devastation contributes the identical value to both
+        # averages — any gap measured across overlapping sets is manufactured by
+        # tagging habits, not felt by the reader. Compare only books carrying one
+        # tag and not the other, and require enough of them that a single outlier
+        # can't call someone's stated preference a lie.
+        xs = [s.intensity for s in sigs
+              if slug in s.emotions and against not in s.emotions]
+        return sum(xs) / len(xs) if len(xs) >= MIN_BOOKS_PER_CLAIM else None
 
-    def avg_intensity_for(slug: str) -> float | None:
-        xs = [s.intensity for s in sigs if slug in s.emotions]
-        return sum(xs) / len(xs) if xs else None
-
-    stated_avg = avg_intensity_for(stated)
     # Revealed top by frequency (what they actually reach for), excluding the stated.
     freq = frequency_vector(sigs, weighted=False)
     ranked = sorted(((s, f) for s, f in freq.items() if s != stated and f > 0),
                     key=lambda kv: kv[1], reverse=True)
     revealed_top = ranked[0][0] if ranked else None
 
-    # The intensity gap: the non-stated emotion they rate highest vs. the stated one.
-    revealed_hi, revealed_hi_avg = None, None
+    # The intensity gap: the non-stated emotion they rate highest vs. the stated
+    # one, each averaged over the books the other tag doesn't touch. Both sides are
+    # recomputed per candidate because which books are excluded depends on which
+    # pair is being compared.
+    revealed_hi, delta = None, None
     for slug, _ in ranked:
-        a = avg_intensity_for(slug)
-        if a is not None and (revealed_hi_avg is None or a > revealed_hi_avg):
-            revealed_hi, revealed_hi_avg = slug, a
-    delta = None
-    if stated_avg is not None and revealed_hi_avg is not None:
-        delta = round(revealed_hi_avg - stated_avg, 1)
+        theirs = avg_intensity_disjoint(slug, stated)
+        ours = avg_intensity_disjoint(stated, slug)
+        if theirs is None or ours is None:
+            continue
+        gap = round(theirs - ours, 1)
+        if delta is None or gap > delta:
+            revealed_hi, delta = slug, gap
 
     return {"stated": stated, "revealed_top": revealed_top,
-            "revealed_hi": revealed_hi, "delta": delta}
+            "revealed_hi": revealed_hi, "delta": delta, "disjoint": True,
+            "min_books": MIN_BOOKS_PER_CLAIM}
+
+
+def stated_vs_revealed(sigs: list[EntrySig], reads_for: list[str] | None) -> dict | None:
+    """The gold: gap between what they SAID and what their shelf shows (B7.1).
+
+    Returns None when no stated preference exists (so the insight can't fire).
+
+    ``reads_for`` allows two emotions and both are scored: the reader is told about
+    whichever claim their shelf contradicts more. Collecting a second answer and
+    then dropping it is exactly the kind of thing this project refuses to do.
+    """
+    stated_slugs = _canon_list(reads_for)
+    if not stated_slugs:
+        return None
+
+    results = [_stated_vs_revealed_one(sigs, s) for s in stated_slugs]
+    # Largest measured gap wins; a claim with no gap to measure never outranks one
+    # that has one, and ties fall back to the order the reader gave.
+    return max(results, key=lambda r: (r["delta"] is not None, r["delta"] or 0.0))
 
 
 def abandonment(sigs: list[EntrySig]) -> dict | None:
@@ -280,16 +306,29 @@ def seasonality(sigs: list[EntrySig]) -> dict | None:
 _TYPES_BY_ID = {t["id"]: t for t in PERSONALITY_TYPES}
 
 
-def score_archetype(current_freq: dict[str, float]) -> tuple[str, dict[str, float]]:
+def score_archetype(
+    current_freq: dict[str, float],
+) -> tuple[str | None, dict[str, float], float]:
     """Score the 8 archetypes against the CURRENT (recency-weighted) vector, so the
-    headline can actually change as the reader changes. Returns (best_id, scores)."""
+    headline can actually change as the reader changes.
+
+    Returns (best_id | None, scores, margin). best_id is None when the reader has
+    given us nothing to go on — an empty tally must not fall through to whichever
+    archetype happens to be first in the list. ``margin`` is how far the leader
+    clears the runner-up, as a fraction of the leader's own score: 0.0 means a tie,
+    and a small value means the label is a coin-flip the caller should hedge.
+    """
     scores: dict[str, float] = {}
     for t in PERSONALITY_TYPES:
         s = sum(current_freq.get(e, 0.0) for e in t["primary_emotions"])
         s -= 0.5 * sum(current_freq.get(e, 0.0) for e in t.get("anti_emotions", []))
         scores[t["id"]] = round(s, 4)
-    best = max(scores, key=scores.get)
-    return best, scores
+
+    ranked = sorted(scores.items(), key=lambda kv: -kv[1])
+    (best, top), (_, second) = ranked[0], ranked[1]
+    if top <= 0:
+        return None, scores, 0.0
+    return best, scores, round((top - second) / top, 4)
 
 
 def archetype_dict(type_id: str) -> dict:

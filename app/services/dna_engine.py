@@ -162,6 +162,11 @@ def calculate_personality(entries: list[dict]) -> dict:
     """
     Calculate a user's reading personality from their book entries.
 
+    INTERNAL ONLY. Not the archetype source. ``dna_signals.score_archetype`` is the
+    single headline authority; this exists for recap shift detection. Do not wire
+    this to any user-visible surface — it gates at 3 books where the real engine
+    gates at 5, and on simulated readers the two disagreed 42.7% of the time.
+
     Args:
         entries: List of dicts with keys:
             - emotions: list of emotion_id strings
@@ -224,25 +229,30 @@ def calculate_personality(entries: list[dict]) -> dict:
                 co_occurrence[(emos[i], emos[j])] += 1
 
     # === 5. Score each personality type ===
+    # None of these terms is bounded, and they do not sum to 100 — the comments
+    # here used to claim ranges like "0-40 points", which was never true. The
+    # frequency term alone passes 400 for a 50-book reader. Scores are comparable
+    # between types for one reader and meaningless between readers, which is
+    # another reason this is not the headline engine.
     scores = {}
     for ptype in PERSONALITY_TYPES:
         score = 0.0
 
-        # Frequency match (0-40 points)
+        # Frequency: 8 per tagged occurrence, unbounded, grows with library size.
         for emo in ptype["primary_emotions"]:
             freq = emotion_freq.get(emo, 0)
-            score += freq * 8  # Each occurrence = 8 points
+            score += freq * 8
 
-        # Intensity match (0-30 points)
+        # Intensity: 1.5 x the mean rating of each primary (so ≤15 per primary).
         for emo in ptype["primary_emotions"]:
             avg_int = avg_intensity.get(emo, 0)
             score += avg_int * 1.5  # High intensity = more points
 
-        # Recency bonus (0-15 points)
+        # Recency: 2 x the summed 0.5–1.0 position weights, unbounded.
         for emo in ptype["primary_emotions"]:
             score += recency_weights.get(emo, 0) * 2
 
-        # Co-occurrence bonus (0-10 points)
+        # Co-occurrence: 5 per book pairing two primaries, unbounded.
         primary = ptype["primary_emotions"]
         for i in range(len(primary)):
             for j in range(i + 1, len(primary)):
