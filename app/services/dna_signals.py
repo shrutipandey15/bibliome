@@ -200,8 +200,23 @@ def co_occurrence(sigs: list[EntrySig]) -> Counter:
     return pairs
 
 
-def _stated_vs_revealed_one(sigs: list[EntrySig], stated: str) -> dict:
-    """The gap for a single stated emotion. See ``stated_vs_revealed``."""
+def _stated_vs_revealed_one(
+    sigs: list[EntrySig], stated: str, also_stated: set[str] | None = None
+) -> dict:
+    """The verdict for a single stated emotion. See ``stated_vs_revealed``.
+
+    ``also_stated`` is the reader's OTHER stated emotions, which are excluded from
+    the comparison entirely. This is stated vs *revealed*: a reader who said
+    "comfort and tenderness" and rates comfort higher has not been caught out by
+    their shelf — both answers were theirs. Letting one stated emotion play
+    challenger to the other manufactures a contradiction out of the reader
+    agreeing with themselves.
+    """
+    also_stated = also_stated or set()
+
+    def books_disjoint(slug: str, against: str) -> list[int]:
+        return [s.intensity for s in sigs
+                if slug in s.emotions and against not in s.emotions]
 
     def avg_intensity_disjoint(slug: str, against: str) -> float | None:
         # Disjoint on purpose. Intensity is one slider per *book*, so a book tagged
@@ -214,48 +229,103 @@ def _stated_vs_revealed_one(sigs: list[EntrySig], stated: str) -> dict:
               if slug in s.emotions and against not in s.emotions]
         return sum(xs) / len(xs) if len(xs) >= MIN_BOOKS_PER_CLAIM else None
 
-    # Revealed top by frequency (what they actually reach for), excluding the stated.
+    # Revealed top by frequency (what they actually reach for), excluding
+    # everything the reader already told us about.
+    excluded = {stated} | also_stated
     freq = frequency_vector(sigs, weighted=False)
-    ranked = sorted(((s, f) for s, f in freq.items() if s != stated and f > 0),
+    ranked = sorted(((s, f) for s, f in freq.items() if s not in excluded and f > 0),
                     key=lambda kv: kv[1], reverse=True)
     revealed_top = ranked[0][0] if ranked else None
 
-    # The intensity gap: the non-stated emotion they rate highest vs. the stated
-    # one, each averaged over the books the other tag doesn't touch. Both sides are
-    # recomputed per candidate because which books are excluded depends on which
-    # pair is being compared.
-    revealed_hi, delta = None, None
+    # The intensity gap: the strongest challenger vs. the stated one, each averaged
+    # over the books the other tag doesn't touch. Both sides are recomputed per
+    # candidate because which books are excluded depends on which pair is being
+    # compared. A candidate that can't clear MIN_BOOKS_PER_CLAIM on BOTH sides is
+    # not comparable and is skipped — the same floor for every verdict.
+    revealed_hi, delta, evidence = None, None, None
     for slug, _ in ranked:
-        theirs = avg_intensity_disjoint(slug, stated)
-        ours = avg_intensity_disjoint(stated, slug)
-        if theirs is None or ours is None:
+        theirs = books_disjoint(slug, stated)
+        ours = books_disjoint(stated, slug)
+        if len(theirs) < MIN_BOOKS_PER_CLAIM or len(ours) < MIN_BOOKS_PER_CLAIM:
             continue
-        gap = round(theirs - ours, 1)
+        theirs_avg = sum(theirs) / len(theirs)
+        ours_avg = sum(ours) / len(ours)
+        gap = round(theirs_avg - ours_avg, 1)
+        # Keep the LARGEST gap: it is simultaneously the strongest case against the
+        # reader's claim and, when negative, the narrowest margin their claim
+        # survives by. One number answers both questions.
         if delta is None or gap > delta:
             revealed_hi, delta = slug, gap
+            evidence = {
+                "stated": {"emotion": stated, "books": len(ours),
+                           "avg": round(ours_avg, 1)},
+                "compared": {"emotion": slug, "books": len(theirs),
+                             "avg": round(theirs_avg, 1)},
+            }
+
+    # Three outcomes, one threshold, symmetric about zero. `confirmed` is not a
+    # compliment and carries no praise language: it is the same measurement as
+    # `contradicted` with the sign the other way, and it is reported because a
+    # signal that can only ever accuse is a search for gaps, not a measurement.
+    if delta is None:
+        verdict, reason = "inconclusive", "too_few_books"
+    elif delta > 0.5:
+        verdict, reason = "contradicted", None
+    elif delta < -0.5:
+        # The largest gap is still under -0.5, so EVERY comparable emotion is:
+        # the stated one out-rates all of them, not merely the closest.
+        verdict, reason = "confirmed", None
+    else:
+        verdict, reason = "inconclusive", "dead_heat"
+
+    # Raw book counts behind the frequency ranking. `revealed_top` is a RANK, and a
+    # rank ties silently: with 12 books each, "you reach for devastation more often"
+    # is simply false. Any copy making a frequency claim has to compare these.
+    def n_books(slug: str | None) -> int:
+        return sum(1 for s in sigs if slug and slug in s.emotions)
 
     return {"stated": stated, "revealed_top": revealed_top,
             "revealed_hi": revealed_hi, "delta": delta, "disjoint": True,
-            "min_books": MIN_BOOKS_PER_CLAIM}
+            "min_books": MIN_BOOKS_PER_CLAIM,
+            "verdict": verdict, "reason": reason, "evidence": evidence,
+            "stated_books": n_books(stated),
+            "revealed_top_books": n_books(revealed_top)}
 
 
 def stated_vs_revealed(sigs: list[EntrySig], reads_for: list[str] | None) -> dict | None:
-    """The gold: gap between what they SAID and what their shelf shows (B7.1).
+    """The gold: what they SAID measured against what their shelf shows (B7.1).
 
-    Returns None when no stated preference exists (so the insight can't fire).
+    Returns one of three verdicts, all carrying the same evidence:
+      - ``contradicted``  the top non-stated emotion out-rates the stated one by >0.5
+      - ``confirmed``     the stated emotion out-rates EVERY comparable one by >0.5
+      - ``inconclusive``  neither leads by >0.5, or nothing was comparable
 
-    ``reads_for`` allows two emotions and both are scored: the reader is told about
-    whichever claim their shelf contradicts more. Collecting a second answer and
-    then dropping it is exactly the kind of thing this project refuses to do.
+    ``None`` is returned only when the reader never told us what they read for.
+    ``inconclusive`` is a real result and must stay distinguishable from silence.
+
+    This used to return a gap only when one existed against the reader, which made
+    it a search for gaps rather than a measurement: it could accuse and it could
+    say nothing, and being right about yourself was indistinguishable from never
+    having been asked.
+
+    ``reads_for`` allows two emotions and both are scored. Collecting a second
+    answer and then dropping it is exactly the kind of thing this project refuses
+    to do.
     """
     stated_slugs = _canon_list(reads_for)
     if not stated_slugs:
         return None
 
-    results = [_stated_vs_revealed_one(sigs, s) for s in stated_slugs]
-    # Largest measured gap wins; a claim with no gap to measure never outranks one
-    # that has one, and ties fall back to the order the reader gave.
-    return max(results, key=lambda r: (r["delta"] is not None, r["delta"] or 0.0))
+    all_stated = set(stated_slugs)
+    results = [_stated_vs_revealed_one(sigs, s, all_stated - {s}) for s in stated_slugs]
+    # A decisive verdict outranks an inconclusive one; between two decisive ones,
+    # the larger gap wins IN EITHER DIRECTION. Ranking by the signed gap would mean
+    # a reader who was right about one claim and wrong about the other always heard
+    # the accusation — the same bias this function just removed, one layer up.
+    return max(
+        results,
+        key=lambda r: (r["verdict"] != "inconclusive", abs(r["delta"] or 0.0)),
+    )
 
 
 def abandonment(sigs: list[EntrySig]) -> dict | None:
@@ -329,6 +399,34 @@ def score_archetype(
     if top <= 0:
         return None, scores, 0.0
     return best, scores, round((top - second) / top, 4)
+
+
+def basis_for(archetype_id: str, sigs: list[EntrySig]) -> dict:
+    """The evidence line under the label. Counts only — no adjectives.
+
+    This is what turns the name from a bucket the reader was sorted into to a
+    headline for a number they can go and check against their own shelf. Every
+    figure here is countable by hand: "grief in 14 of your 31 books" is either
+    true or it isn't, and the reader is the one who can tell.
+
+    Books only — the caller passes book sigs, never journal days, because this
+    line is rendered on public surfaces and says the word "books".
+    """
+    t = _TYPES_BY_ID[archetype_id]
+    total = len(sigs)
+    rows = []
+    for slug in t["primary_emotions"]:
+        n = sum(1 for s in sigs if slug in s.emotions)
+        if n:
+            rows.append({"emotion": slug, "books": n, "of": total})
+    # What the reader reserves the top of their scale for. Three books is few
+    # enough to be a real claim about specific books they'll remember.
+    top_rated = sorted(sigs, key=lambda s: -s.intensity)[:3]
+    return {
+        "counts": sorted(rows, key=lambda r: -r["books"]),
+        "top_rated_emotions": sorted({e for s in top_rated for e in s.emotions}),
+        "top_rated_n": len(top_rated),
+    }
 
 
 def archetype_dict(type_id: str) -> dict:

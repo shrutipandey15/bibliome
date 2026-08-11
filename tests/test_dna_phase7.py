@@ -93,7 +93,13 @@ def test_every_applicable_template_renders_without_error():
         "rare": [("amusement", 0.03)],
         "top_pair": (("comfort", "dread"), 12),
         "stated": {"stated": "comfort", "revealed_top": "devastation",
-                   "revealed_hi": "devastation", "delta": 2.3},
+                   "revealed_hi": "devastation", "delta": 2.3,
+                   "verdict": "contradicted", "reason": None,
+                   # Frequency claims compare COUNTS, not the rank — a tie in
+                   # `revealed_top` is not "more often".
+                   "stated_books": 12, "revealed_top_books": 20,
+                   "evidence": {"stated": {"emotion": "comfort", "books": 12, "avg": 6.1},
+                                "compared": {"emotion": "devastation", "books": 9, "avg": 8.4}}},
         "abandonment": {"emotion": "amusement", "fraction": 0.8},
         "arc": {"start": "dread", "end": "catharsis", "fraction": 0.7, "n_arc": 20},
         "drift": 0.4, "has_two_snapshots": True,
@@ -104,9 +110,19 @@ def test_every_applicable_template_renders_without_error():
     ctx_careful = {**base, "intensity_signature": {"mean": 6.5, "variance": 1.0, "skew": 0.0,
                    "share_high": 0.1, "band_lo": 6, "band_hi": 7}}
 
+    # The stated-vs-revealed verdicts are mutually exclusive by construction, so
+    # the confirmation templates need their own contexts to be reachable at all.
+    confirmed = {**base["stated"], "verdict": "confirmed", "delta": -2.3,
+                 "revealed_hi": "devastation",
+                 "evidence": {"stated": {"emotion": "comfort", "books": 12, "avg": 8.4},
+                              "compared": {"emotion": "devastation", "books": 9, "avg": 6.1}}}
+    ctx_confirmed = {**ctx_intense, "stated": {**confirmed, "revealed_top": "comfort"}}
+    ctx_confirmed_elsewhere = {**ctx_intense, "stated": {**confirmed, "revealed_top": "devastation"}}
+
+    candidates = [ctx_intense, ctx_careful, ctx_confirmed, ctx_confirmed_elsewhere]
     for t in REGISTRY:
-        ctx = ctx_intense if t.applicable(ctx_intense) else ctx_careful
-        assert t.applicable(ctx), f"{t.category}/{t.variant} applicable to no crafted ctx"
+        ctx = next((c for c in candidates if t.applicable(c)), None)
+        assert ctx is not None, f"{t.category}/{t.variant} applicable to no crafted ctx"
         text = t.render(ctx)
         assert isinstance(text, str) and len(text) > 10
         assert "{" not in text and "}" not in text  # no unfilled slots

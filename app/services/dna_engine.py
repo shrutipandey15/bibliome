@@ -66,6 +66,12 @@ def dna_type_slug_for(engine_id: str | None) -> str | None:
 # they describe a book failing you, not a reading identity. Across the 8 types,
 # every experiential emotion is used as a primary at least once
 # (test_every_experiential_emotion_is_used_somewhere).
+#
+# Two further invariants, both added after simulation found them violated (P1-5):
+#   - No two types may share more than ONE primary. Sharing two makes a tie that
+#     list order silently resolves, which is not a decision anyone made.
+#   - Every type carries exactly TWO anti_emotions. A third is a permanent
+#     handicap that shows up as that type under-winning at population scale.
 PERSONALITY_TYPES = [
     {
         "id": "grief_romantic",
@@ -92,9 +98,14 @@ PERSONALITY_TYPES = [
     {
         "id": "soft_masochist",
         "name": "The Soft Masochist",
-        "description": "You choose pain on purpose because you trust books that hurt you more than ones that comfort you.",
-        "primary_emotions": ["rage", "grief", "devastation"],
-        "anti_emotions": ["comfort", "amusement"],
+        # Re-anchored (P1-5). This used to be grief + devastation, which is two of
+        # The Grief Romantic's three primaries — a reader tagging only those two
+        # scored an exact 1.0 tie between the pair, resolved by list order. The
+        # difference between them was never sorrow anyway: it's whether the book
+        # is doing the hurting on purpose. Anchored on rage and dread, it is.
+        "description": "You choose pain on purpose. Not sorrow — teeth. You trust the book that comes at you over the one that holds you.",
+        "primary_emotions": ["rage", "dread", "devastation"],
+        "anti_emotions": ["comfort", "joy"],
         "blind_spots": ["You equate suffering with authenticity", "You distrust books that feel too safe"],
         "comfort_tropes": ["Tragic love", "Moral ambiguity", "Devastating plot twists"],
         "color": "#6B3A5D",
@@ -105,7 +116,11 @@ PERSONALITY_TYPES = [
         "name": "The Comfort Architect",
         "description": "You build emotional safety through stories. Your bookshelf isn't a collection — it's a home you can always return to.",
         "primary_emotions": ["comfort", "longing", "tenderness"],
-        "anti_emotions": ["rage", "dread", "revulsion"],
+        # Two, not three (P1-5). Carrying a third penalty made this the only type
+        # paying an extra subtraction on every scoring pass: it won 5.4% of 5,000
+        # simulated readers against the ~12.5% an unbiased eight-way split gives.
+        # The handicap was in the data, not in the readers.
+        "anti_emotions": ["rage", "dread"],
         "blind_spots": ["You avoid books that might destabilize you", "You re-read instead of risking new things"],
         "comfort_tropes": ["Found family", "Slow-burn romance", "Cozy settings"],
         "color": "#7A8B6F",
