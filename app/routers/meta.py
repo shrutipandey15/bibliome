@@ -16,7 +16,7 @@ class EmotionVocabItem(BaseModel):
     slug: str
     family: str          # UI-only grouping ("It hurt", "It held me", …)
     name: str            # the plain word ("confusion")
-    phrase: str          # the first-person line the UI shows ("it confused me")
+    phrase: str          # the first-person line the UI shows ("I lost the plot")
     symbol: str
     color: str
     description: str
