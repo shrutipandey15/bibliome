@@ -171,3 +171,47 @@ def test_reason_variant_replaces_the_weaker_emotion_only_sentence():
     sigs += [_sig(["joy"], 30 + i, status="finished") for i in range(9)]
     variants = {i["variant"] for i in _dna(sigs)["insights"] if i["category"] == "abandonment"}
     assert variants == {"dnf_reason"}
+
+
+# ── Blind spots are ranked by surprise, not by declaration order ──
+
+def test_blind_spot_names_the_most_surprising_absence_not_the_first_slug():
+    """A reader missing devastation, nostalgia and awe should hear about awe.
+
+    Awe is the most commonly tagged emotion in BASELINE_VECTOR and nostalgia the
+    rarest, so awe's absence is the finding. Devastation merely happens to be
+    first in EMOTIONS, which is what the old implementation reported.
+    """
+    from app.services.dna_signals import BASELINE_VECTOR, blind_spots
+    present = [e["slug"] for e in EMOTIONS
+               if e["slug"] not in {"devastation", "nostalgia", "awe"}]
+    sigs = [_sig([slug], 10 + i) for i, slug in enumerate(present)]
+    ranked = blind_spots(sigs)
+
+    assert set(ranked) == {"devastation", "nostalgia", "awe"}
+    assert ranked[0] == "awe"
+    assert ranked[-1] == "nostalgia"
+    assert BASELINE_VECTOR["awe"] > BASELINE_VECTOR["devastation"] > BASELINE_VECTOR["nostalgia"]
+
+
+def test_blind_spot_order_survives_a_permutation_of_EMOTIONS(monkeypatch):
+    """The output must be decided by the baseline, not by list position.
+
+    This is the regression guard for the whole class of bug: if permuting the
+    declaration order changes what the reader is told, the ranking is fake.
+    """
+    import random
+    from app.services import dna_signals as S
+
+    present = [e["slug"] for e in EMOTIONS
+               if e["slug"] not in {"devastation", "nostalgia", "awe", "grief"}]
+    sigs = [_sig([slug], 10 + i) for i, slug in enumerate(present)]
+    baseline = S.blind_spots(sigs)
+
+    for seed in range(8):
+        shuffled = list(S._ALL_SLUGS)
+        random.Random(seed).shuffle(shuffled)
+        monkeypatch.setattr(S, "_ALL_SLUGS", shuffled)
+        assert S.blind_spots(sigs) == baseline, (
+            f"blind-spot order changed under EMOTIONS permutation seed={seed}"
+        )
