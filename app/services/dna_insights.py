@@ -142,7 +142,11 @@ BLIND_SPOT = [
     InsightTemplate(
         "blind_spot", "never", GATES["blind_spot"], True,
         lambda c: bool(c.get("blind_spots")),
-        lambda c: (f"You've logged {c['book_count']} books. "
+        # "tagged N books", not "logged N books": the claim is about books the
+        # reader put a feeling on, and an untagged import cannot evidence a
+        # never-reached-for emotion. Quoting the raw shelf here was the sentence
+        # that made a 5-book finding look like a 30-book one.
+        lambda c: (f"You've tagged {c['tagged_count']} books. "
                    f"You have never once reached for {_name(c['blind_spots'][0])}."),
         lambda c: 0.9,
     ),
@@ -268,29 +272,39 @@ CATEGORY_ORDER = [
 def generate_insights(ctx: dict, *, limit: int = 4) -> tuple[list[dict], list[dict]]:
     """From a computed signal context, return (unlocked_insights, locked).
 
-    - An insight is emitted only if book_count ≥ its gate AND its data is present.
-    - At most one variant per category (rotates by book_count so return visits vary).
+    - An insight is emitted only if tagged_count ≥ its gate AND its data is present.
+    - At most one variant per category (rotates by tagged_count so return visits vary).
     - Ranked by surprise; the strongest `limit` are returned — never a dump.
     - Locked: every category whose gate the reader hasn't reached, with an honest
       reason (B7.6). This is the curiosity gap, at zero integrity cost.
+
+    GATES COUNT BOOKS THAT CARRY A FEELING, not titles on the shelf. Every gate
+    here exists to keep a claim from being made on too little evidence, and an
+    untagged book is not evidence — it is a title we know nothing about. Gating on
+    the raw shelf let a 30-book import with 5 tagged books clear the 10-book
+    blind-spot gate and announce "You've logged 30 books. You have never once
+    reached for devastation", a sentence built on five books. ``book_count`` stays
+    in ``ctx`` for copy that is genuinely about the shelf; nothing gates on it.
     """
-    book_count = ctx["book_count"]
+    tagged_count = ctx["tagged_count"]
 
     # Group applicable, signed-off, gated candidates by category.
     by_cat: dict[str, list[InsightTemplate]] = {}
     for t in REGISTRY:
-        if not t.signed_off or book_count < t.min_n or not t.applicable(ctx):
+        if not t.signed_off or tagged_count < t.min_n or not t.applicable(ctx):
             continue
         by_cat.setdefault(t.category, []).append(t)
 
     chosen: list[dict] = []
     for cat, variants in by_cat.items():
-        t = variants[book_count % len(variants)]   # deterministic rotation
+        t = variants[tagged_count % len(variants)]   # deterministic rotation
         chosen.append({
             "category": cat,
             "variant": t.variant,
             "text": t.render(ctx),
-            "n": book_count,
+            # The population the claim actually covers — the client renders this
+            # as "based on N books", so it must not be the raw shelf size.
+            "n": tagged_count,
             "surprise": round(float(t.surprise(ctx)), 3),
         })
 
@@ -303,7 +317,7 @@ def generate_insights(ctx: dict, *, limit: int = 4) -> tuple[list[dict], list[di
         gate = GATES.get(cat)
         if gate is None:
             continue
-        if book_count < gate and cat not in shown:
+        if tagged_count < gate and cat not in shown:
             locked.append({
                 "category": cat,
                 "unlocks_at": f"{gate} books" if cat != "seasonality" else "25 books + 12 months",
@@ -373,11 +387,15 @@ def build_dna(
     current = sig.frequency_vector(vector_sigs, weighted=True)
     drift_val = sig.drift(enduring, current)
 
-    # Book-share (distinct books tagged / total) — for the "rare" blind-spot variant.
+    # Book-share for the "rare" blind-spot variant. The denominator is TAGGED books,
+    # not the shelf: only a tagged book could have carried the emotion, so dividing
+    # by titles that carry no feelings at all manufactures rarity out of untagged
+    # imports. One tagged book in 30 reads as 3% and trips the <5% rare band; the
+    # same book among 20 tagged is 5% and is not rare.
     book_share: dict[str, float] = {}
     for slug in sig._ALL_SLUGS:
-        n = sum(1 for s in sigs if slug in s.emotions)
-        book_share[slug] = n / book_count
+        n = sum(1 for s in tagged if slug in s.emotions)
+        book_share[slug] = n / len(tagged)
     rare = sorted(((s, v) for s, v in book_share.items() if 0 < v < 0.05), key=lambda kv: kv[1])
 
     pairs = sig.co_occurrence(sigs)
@@ -390,7 +408,11 @@ def build_dna(
     )
 
     ctx = {
+        # Both, and they mean different things. `tagged_count` is what every gate
+        # and every "based on N books" reads; `book_count` is only for copy that is
+        # genuinely about the size of the shelf.
         "book_count": book_count,
+        "tagged_count": len(tagged),
         "intensity_signature": sig.intensity_signature(sigs),
         "range": sig.range_entropy(sigs),
         "range_prev_distinct": range_prev_distinct,
