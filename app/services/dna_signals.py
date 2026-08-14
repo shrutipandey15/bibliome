@@ -219,11 +219,27 @@ def range_entropy(sigs: list[EntrySig]) -> dict:
 
 
 def blind_spots(sigs: list[EntrySig]) -> list[str]:
-    """Canonical emotions this reader has NEVER tagged, in declaration order."""
+    """Canonical emotions this reader has NEVER tagged, most surprising absence first.
+
+    Ranked by the emotion's rate in ``BASELINE_VECTOR`` — how often readers in
+    general reach for it — because that is what makes an absence a finding. Never
+    tagging Awe (the most common tag) says something about this reader; never
+    tagging Nostalgia (the rarest) says almost nothing, and saying it anyway is how
+    the mirror ends up sounding like a horoscope.
+
+    Previously this returned declaration order and the template took ``[0]``, so a
+    reader missing devastation, grief and joy was told "devastation" — always,
+    because devastation is first in ``EMOTIONS``. That is the archetype tie-break
+    bug one layer up: a real ranking question silently answered by list position.
+
+    Ties break on declaration order, via a stable sort, so the output is
+    deterministic without being decided by it.
+    """
     tagged: set[str] = set()
     for s in sigs:
         tagged.update(s.emotions)
-    return [slug for slug in _ALL_SLUGS if slug not in tagged]
+    never = [slug for slug in _ALL_SLUGS if slug not in tagged]
+    return sorted(never, key=lambda slug: -BASELINE_VECTOR.get(slug, 0.0))
 
 
 def co_occurrence(sigs: list[EntrySig]) -> Counter:
