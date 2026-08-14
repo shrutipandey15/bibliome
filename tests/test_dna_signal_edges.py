@@ -107,3 +107,67 @@ def test_rare_share_denominator_is_tagged_books():
     assert not rare_texts, (
         f"emotions at a 5% tagged-book share reported as rare: {rare_texts}"
     )
+
+
+# ── Abandonment reads the status column that migration 022 actually added ──
+
+def _ab(sigs):
+    from app.services.dna_signals import abandonment
+    return abandonment(sigs)
+
+
+def test_reread_is_not_an_abandonment():
+    """`reread` is a book finished TWICE. The old `status != 'finished'` proxy
+    counted it as a DNF, which is as wrong as this layer gets."""
+    sigs = [_sig(["joy"], 10 + i, status="reread") for i in range(6)]
+    sigs += [_sig(["joy"], 30 + i, status="finished") for i in range(6)]
+    assert _ab(sigs) is None
+
+
+def test_want_to_read_is_excluded_from_the_denominator():
+    """A book on the pile was never opened — it can be neither finished nor
+    abandoned, and counting it as 'not finished' inflates the rate."""
+    opened = [_sig(["dread"], 10 + i, status="abandoned") for i in range(3)]
+    opened += [_sig(["joy"], 20 + i, status="finished") for i in range(3)]
+    # dread is abandoned 3/3 against an overall 3/6 — the finding is "1.0", and it
+    # must not move when 20 unopened books are sitting on the pile.
+    without_pile = _ab(opened)
+    with_pile = _ab(opened + [_sig(["comfort"], 50 + i, status="want_to_read")
+                              for i in range(20)])
+    assert without_pile == with_pile
+    assert with_pile["emotion"] == "dread"
+    assert with_pile["fraction"] == 1.0
+
+
+def test_paused_counts_as_abandoned():
+    """Documented decision, asserted so it cannot drift silently."""
+    sigs = [_sig(["dread"], 10 + i, status="paused") for i in range(3)]
+    sigs += [_sig(["joy"], 20 + i, status="finished") for i in range(9)]
+    res = _ab(sigs)
+    assert res is not None and res["emotion"] == "dread"
+
+
+def test_reading_counts_in_the_denominator_but_is_not_a_dnf():
+    """A book in progress has not been put down."""
+    sigs = [_sig(["dread"], 10 + i, status="reading") for i in range(6)]
+    sigs += [_sig(["joy"], 20 + i, status="finished") for i in range(6)]
+    assert _ab(sigs) is None
+
+
+def test_abandonment_reports_the_reason_the_reader_gave():
+    sigs = [EntrySig(emotions=["dread"], intensity=7, ts=NOW - timedelta(days=10 + i),
+                     status="abandoned", dnf_reason="lost_me") for i in range(3)]
+    sigs += [_sig(["joy"], 30 + i, status="finished") for i in range(9)]
+    res = _ab(sigs)
+    assert res["emotion"] == "dread"
+    assert res["dnf_reason"] == "lost_me"
+    assert res["dnf_reason_books"] == 3
+
+
+def test_reason_variant_replaces_the_weaker_emotion_only_sentence():
+    """When the reader said why, that sentence must not be rotated away."""
+    sigs = [EntrySig(emotions=["dread"], intensity=7, ts=NOW - timedelta(days=10 + i),
+                     status="abandoned", dnf_reason="lost_me") for i in range(3)]
+    sigs += [_sig(["joy"], 30 + i, status="finished") for i in range(9)]
+    variants = {i["variant"] for i in _dna(sigs)["insights"] if i["category"] == "abandonment"}
+    assert variants == {"dnf_reason"}

@@ -48,7 +48,9 @@ def _range(n):        return [sig(["comfort"]) for _ in range(n)]
 def _pairing(n):      return [sig(["comfort", "dread"]) for _ in range(n)]              # co-occur
 def _contra(n):       return [sig(["devastation"], intensity=9) for _ in range(n)]      # vs stated comfort
 def _abandon(n):      return ([sig(["comfort"]) for _ in range(n - 3)]
-                              + [sig(["dread"], status="reading") for _ in range(3)])   # 3 unfinished dread
+                              # `abandoned`, not `reading`: a book in progress has not
+                              # been put down. Migration 022 added the explicit status.
+                              + [sig(["dread"], status="abandoned") for _ in range(3)])  # 3 abandoned dread
 def _arc(n):          return [sig(["grief"], arc_start="dread", arc_end="catharsis") for _ in range(n)]
 
 CASES = [
@@ -103,7 +105,8 @@ def test_every_applicable_template_renders_without_error():
                    "stated_books": 12, "revealed_top_books": 20,
                    "evidence": {"stated": {"emotion": "comfort", "books": 12, "avg": 6.1},
                                 "compared": {"emotion": "devastation", "books": 9, "avg": 8.4}}},
-        "abandonment": {"emotion": "amusement", "fraction": 0.8},
+        "abandonment": {"emotion": "amusement", "fraction": 0.8,
+                        "dnf_reason": "lost_me", "dnf_reason_books": 4},
         "arc": {"start": "dread", "end": "catharsis", "fraction": 0.7, "n_arc": 20},
         "drift": 0.4, "has_two_snapshots": True,
         "old_top": "comfort", "new_top": "grief",
@@ -122,7 +125,15 @@ def test_every_applicable_template_renders_without_error():
     ctx_confirmed = {**ctx_intense, "stated": {**confirmed, "revealed_top": "comfort"}}
     ctx_confirmed_elsewhere = {**ctx_intense, "stated": {**confirmed, "revealed_top": "devastation"}}
 
-    candidates = [ctx_intense, ctx_careful, ctx_confirmed, ctx_confirmed_elsewhere]
+    # The two abandonment variants are mutually exclusive by construction: the
+    # emotion-only sentence is suppressed whenever the reader told us why, so it
+    # needs a context where they didn't.
+    ctx_no_dnf_reason = {**ctx_intense,
+                         "abandonment": {"emotion": "amusement", "fraction": 0.8,
+                                         "dnf_reason": None, "dnf_reason_books": 0}}
+
+    candidates = [ctx_intense, ctx_careful, ctx_confirmed, ctx_confirmed_elsewhere,
+                  ctx_no_dnf_reason]
     for t in REGISTRY:
         ctx = next((c for c in candidates if t.applicable(c)), None)
         assert ctx is not None, f"{t.category}/{t.variant} applicable to no crafted ctx"

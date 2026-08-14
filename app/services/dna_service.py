@@ -47,6 +47,7 @@ async def _load_raw(db: AsyncSession, user_id: uuid.UUID) -> list[dict]:
             "status": e.status,
             "arc_start": e.arc_start_emotion_id,
             "arc_end": e.arc_end_emotion_id,
+            "dnf_reason": e.dnf_reason,
         }
         for e in rows
     ]
