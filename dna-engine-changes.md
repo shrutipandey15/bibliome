@@ -470,3 +470,122 @@ snapshot. The two have different distributions and calibrate to different number
 (0.175–0.185 vs 0.160–0.170). The threshold is set from the expression that
 actually decides whether anyone gets notified; the probe reports both so the
 difference stays visible.
+
+---
+
+# Open questions — need a decision, not code
+
+Three items were deliberately left undecided this session. Each has numbers.
+
+## 1. Empty receipt on a public card
+
+**Reproduced.** 8 cozy books (comfort/tenderness/joy) + 40 journal days tagged
+recognition/awe/dread:
+
+```
+archetype:            control_intellectual   (gap 0.4401 — decisive, not a tie)
+basis.counts:         []
+books-only archetype: comfort_architect
+```
+
+The archetype scores over books + journal (`current`); `basis_for` reads books
+only, deliberately, because the receipt is rendered on public surfaces and says
+the word "books". When the journal dominates the vector, the label comes from
+emotions that appear in zero books and the receipt under it is empty. The reader
+is handed a noun with nothing to check it against — the exact failure the receipt
+was added to prevent.
+
+Options, none of them free:
+
+1. **Card returns None on an empty basis.** Honest, self-consistent, and costs
+   this reader a card entirely. No P0-1 conflict.
+2. **Public archetype scores from `current_books` only.** The card gets a real
+   receipt — but note the numbers above: books-only says `comfort_architect` while
+   the owner's mirror says `control_intellectual`. **This means the mirror and the
+   share card would name different archetypes, which P0-1 forbids.** Taking this
+   option means amending P0-1, not working around it.
+3. **Card discloses the journal share.** Keeps one engine and one label, but puts
+   a number about the reader's private journal onto a public surface. The size of
+   the disclosure is the whole question — "40 of your 48 sources are journal days"
+   is a lot to say about someone's private life on a public card.
+
+Not picked. Option 2 is the one that looks most attractive and is the one that
+breaks an existing invariant.
+
+## 2. `quiet_witness` at 5.1%
+
+Not a scoring artifact. `tenderness + awe + nostalgia` spans three UI families and
+nostalgia is the rarest tag (baseline 0.024), so it needs three uncorrelated things
+at once. Re-anchoring means editing `PERSONALITY_TYPES`, which this session was
+told not to touch — so these were measured in memory and reverted, never committed.
+
+Correlated model, 6000-8000 readers, four seeds. Accepted band 6%–20%, fair share
+12.5%:
+
+| option | primaries | families | quiet_witness | anything out of band |
+|---|---|---|---|---|
+| A. unchanged | tenderness+awe+nostalgia | 3 | 5.0–5.7% | **quiet_witness** |
+| B. nostalgia→recognition | tenderness+awe+recognition | 2 | 9.2–10.0% | none |
+| C. nostalgia→longing | tenderness+awe+longing | 3 | 8.3–8.7% | none |
+| D. nostalgia→comfort | tenderness+awe+comfort | 2 | 8.1–8.6% | none |
+| E. nostalgia→grief | tenderness+awe+grief | 3 | 4.6% | **quiet_witness** |
+| F. awe→recognition | tenderness+recognition+nostalgia | 3 | 12.8–14.0% | emotional_archaeologist at 6% |
+
+**One finding worth flagging: the diagnosis in the brief may be wrong.** The
+problem is not primarily that nostalgia is rare. Option F *keeps* nostalgia, drops
+**awe**, and lands quiet_witness on its fair share — the best result of any option
+tried. Awe is the most common tag in the population (0.126) and is also a primary
+for `control_intellectual` and `midnight_arsonist`, so quiet_witness never wins the
+readers who tag it. A shared common primary costs more than a private rare one.
+
+B, C and D all clear the band and are the conservative choices. F is the only one
+that reaches fair share, at the cost of pushing `emotional_archaeologist` to the
+6% edge. This is an editorial question about what "The Quiet Witness" is supposed
+to mean as much as a numerical one, which is why it is not being decided here.
+
+## 3. `intensity=0` silently becomes 5
+
+`entry_sig` does `int(raw.get("intensity", 5) or 5)`, so a 0 becomes a 5.
+
+**Checked the constraints: 0 is not valid.** Both sources are constrained at both
+layers:
+
+- `book_entries.intensity` — `CHECK (intensity >= 1 AND intensity <= 10)`
+  (`check_intensity_range`, present since the initial migration), and
+  `Field(ge=1, le=10)` in `app/schemas/entry.py`.
+- `journal_emotions.strength` — `CHECK (strength >= 1 AND strength <= 10)`
+  (`check_journal_strength_range`). Journal intensity is
+  `round(mean(strengths))`, which cannot be 0 given strengths ≥ 1.
+
+Real data agrees: 0 rows with NULL or 0 intensity in `book_entries`, 0 in
+`journal_emotions`.
+
+So this is **not** data corruption; it is dead defensive code that would mask a
+constraint violation if one ever occurred. The `or` also swallows `None`, which
+is the case actually worth thinking about. The decision is which of:
+
+1. Leave it. Costs nothing, hides nothing that currently exists.
+2. Drop the `or 5` and let a 0 or None raise, so a broken write is loud.
+3. Keep a default for None only (`raw.get("intensity") or 5` → explicit None
+   check), and let 0 raise.
+
+Not picked. Worth noting the coercion is the same shape of bug as the two fixed
+this session — a silent default standing in for a real answer — but here the
+silence is currently covering nothing.
+
+## Also flagged, not actioned
+
+- **`book_entries.verdict` is collected and never reaches DNA.** The column exists
+  (`yes` / `no` / `not_sure`, `check_entry_verdict`) and is written by the entry
+  surface, but `_load_raw` does not select it and no signal reads it. Deliberately
+  not wired up this session. Note the name collision: `verdict` in `dna_signals`
+  is the unrelated stated-vs-revealed verdict.
+- **Stale docstring in `score_archetype`** (`dna_signals.py:534`): it says
+  `best_id` is None when the leader fails to clear the runner-up by
+  `MIN_ARCHETYPE_GAP`. There is no such constant and no such abstention — the only
+  abstention is the anchor-slug check. Left verbatim so the calibration commit
+  matches the supplied patch exactly; it is a one-line doc fix.
+- **Abandonment and arc now gate on tagged count.** Correct for abandonment, which
+  names an emotion. `arc_shape` reads only the arc columns and does not need
+  emotions, so gating it on tagged books is stricter than necessary — conservative,
+  but arguably the wrong denominator for that one insight.
