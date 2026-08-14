@@ -410,7 +410,7 @@ def build_dna(
     }
 
     unlocked, locked = generate_insights(ctx, limit=insight_limit)
-    archetype_id, scores, margin = sig.score_archetype(current)
+    archetype_id, scores, gap = sig.score_archetype(current)
 
     return {
         "enough": True,
@@ -422,12 +422,16 @@ def build_dna(
         # still have a tally that names nobody. The client must handle it.
         "archetype": sig.archetype_dict(archetype_id) if archetype_id else None,
         "archetype_scores": scores,
-        "margin": margin,
+        # Renamed from the old `margin`: scores are now centered on the population
+        # baseline and signed, so a *fraction of the leader's score* is meaningless
+        # (the leader's score can be negative). This is the absolute lead over
+        # second place, in frequency-vector units, comparable between readers.
+        "margin": gap,
         # When the leader barely clears the field, say so rather than pretending
         # the label was decisive.
         "runner_up": (
             sig.archetype_dict(sorted(scores, key=scores.get, reverse=True)[1])["name"]
-            if archetype_id and margin < 0.10 else None
+            if archetype_id and gap < sig.HEDGE_ARCHETYPE_GAP else None
         ),
         # The receipt. Books only — `sigs`, not `vector_sigs` — because this line
         # is rendered on public surfaces and counts things it calls "your books".
