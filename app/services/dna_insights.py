@@ -24,7 +24,7 @@ UNLOCK_REASONS: dict[str, str] = {
     "range": "needs 8 books to measure how wide you reach",
     "blind_spot": "needs 10 books before a gap means anything",
     "contradiction": "needs 10 books — and telling me what you read for",
-    "abandonment": "needs 10 books, a few of them unfinished",
+    "abandonment": "needs 10 books, a few of them put down unfinished",
     "pairing": "needs 15 books to see which feelings travel together",
     "drift": "needs 15 books and two snapshots to see movement",
     "seasonality": "needs 25 books across a full year",
@@ -207,11 +207,48 @@ PAIRING = [
     ),
 ]
 
-# ── 6. Abandonment (gate 10, ≥3 unfinished) ──
+# ── 6. Abandonment (gate 10, ≥3 abandoned) ──
+#
+# Reasons the reader gave for putting a book down, in their own vocabulary
+# (migration 022's dnf_reason constraint). Rendered as a clause, so the sentence
+# reads as one thought rather than a label bolted on.
+DNF_REASON_CLAUSE: dict[str, str] = {
+    "bored": "you were bored",
+    "too_much": "it was too much",
+    "badly_written": "it was badly written",
+    "wrong_time": "it was the wrong time",
+    "lost_me": "it lost you",
+    "drifted": "you drifted away",
+}
+
+
+def _dnf_reason_clause(c) -> str | None:
+    a = c.get("abandonment") or {}
+    return DNF_REASON_CLAUSE.get(a.get("dnf_reason"))
+
+
 ABANDONMENT = [
     InsightTemplate(
+        # Preferred whenever the reader told us why. "You said it lost you" is a
+        # far stronger sentence than naming a correlated emotion, because it is
+        # the reader's own stated reason rather than our inference from one.
+        "abandonment", "dnf_reason", GATES["abandonment"], True,
+        lambda c: bool(c.get("abandonment") and _dnf_reason_clause(c)
+                       and c["abandonment"].get("dnf_reason_books", 0) >= 2),
+        lambda c: (f"The books you put down are the ones you tag "
+                   f"{_name(c['abandonment']['emotion'])} — and on "
+                   f"{c['abandonment']['dnf_reason_books']} of them you said "
+                   f"{_dnf_reason_clause(c)}."),
+        lambda c: min(1.0, c["abandonment"]["fraction"] + 0.1),
+    ),
+    InsightTemplate(
+        # Suppressed when the reason variant applies, rather than left to the
+        # deterministic rotation — otherwise the weaker sentence would replace the
+        # stronger one on half of visits. Same idiom as center_of_gravity above.
         "abandonment", "dnf_emotion", GATES["abandonment"], True,
-        lambda c: bool(c.get("abandonment")),
+        lambda c: bool(c.get("abandonment")) and not (
+            _dnf_reason_clause(c) and c["abandonment"].get("dnf_reason_books", 0) >= 2
+        ),
         lambda c: (f"The books you don't finish are the ones you tag "
                    f"{_name(c['abandonment']['emotion'])}."),
         lambda c: c["abandonment"]["fraction"],

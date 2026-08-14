@@ -83,10 +83,17 @@ class EntrySig:
     emotions: list[str]          # canonical, deduped
     intensity: int
     ts: datetime                 # finished_at (fallback created_at), tz-aware
-    status: str                  # finished | reading | want_to_read
+    # want_to_read | reading | finished | abandoned | paused | reread
+    # (migration 022 widened the check constraint to these six)
+    status: str
     arc_start: str | None = None
     arc_end: str | None = None
     source: str = "book"         # book | journal
+    # bored | too_much | badly_written | wrong_time | lost_me | drifted, or None.
+    # Only meaningful when status == "abandoned". Lets the abandonment insight say
+    # WHY a book was put down, which is a far stronger sentence than naming the
+    # emotion that correlates with stopping.
+    dnf_reason: str | None = None
 
 
 def _canon_list(raw) -> list[str]:
@@ -121,6 +128,7 @@ def entry_sig(raw: dict) -> EntrySig:
         arc_start=canonicalize(raw["arc_start"]) if raw.get("arc_start") else None,
         arc_end=canonicalize(raw["arc_end"]) if raw.get("arc_end") else None,
         source=raw.get("source") or "book",
+        dnf_reason=raw.get("dnf_reason"),
     )
 
 
@@ -357,27 +365,65 @@ def stated_vs_revealed(sigs: list[EntrySig], reads_for: list[str] | None) -> dic
     )
 
 
+# Books that were opened. `want_to_read` is excluded from the abandonment
+# denominator entirely: a book on the pile was never started, so it can neither
+# be abandoned nor finished, and counting it as "not finished" inflated the
+# denominator with books the reader never opened.
+#
+# `paused` COUNTS AS ABANDONED here. A paused book is one the reader stopped
+# reading; the distinction between "paused" and "abandoned" is largely how
+# generous the reader feels about their own intentions at the moment they tap it,
+# and treating it as a finish would make the rate an undercount. `reading` also
+# counts in the denominator but not as abandoned — it is genuinely in progress.
+_OPENED_STATUSES = frozenset({"reading", "finished", "abandoned", "paused", "reread"})
+_DNF_STATUSES = frozenset({"abandoned", "paused"})
+
+
 def abandonment(sigs: list[EntrySig]) -> dict | None:
     """Which emotion correlates with NOT finishing (B7.2).
 
-    DNF is proxied by status != 'finished' — there is no explicit DNF flag yet;
-    a real "why did you stop?" capture is a future input-surface win (Part 1).
+    Matches on the explicit status. Migration 022 widened the status constraint to
+    include 'abandoned' and 'paused' and added a `dnf_reason` column, so the old
+    "there is no explicit DNF flag yet" proxy of `status != 'finished'` is simply
+    stale — it counted `reread` (a book finished twice!) and `want_to_read` (never
+    opened) as abandonments.
+
+    Returns the emotion whose DNF rate most exceeds the reader's overall rate, plus
+    the most common stated reason among those books when there is one.
     """
-    unfinished = [s for s in sigs if s.status != "finished"]
-    if len(unfinished) < 3:
+    opened = [s for s in sigs if s.status in _OPENED_STATUSES]
+    if not opened:
         return None
-    overall_rate = len(unfinished) / len(sigs)
+    dnf = [s for s in opened if s.status in _DNF_STATUSES]
+    if len(dnf) < 3:
+        return None
+
+    overall_rate = len(dnf) / len(opened)
     best_slug, best_rate = None, overall_rate
     for slug in _ALL_SLUGS:
-        tagged = [s for s in sigs if slug in s.emotions]
+        tagged = [s for s in opened if slug in s.emotions]
         if len(tagged) < 3:
             continue
-        rate = sum(1 for s in tagged if s.status != "finished") / len(tagged)
+        rate = sum(1 for s in tagged if s.status in _DNF_STATUSES) / len(tagged)
         if rate > best_rate:
             best_slug, best_rate = slug, rate
     if best_slug is None:
         return None
-    return {"emotion": best_slug, "fraction": round(best_rate, 2)}
+
+    # The reader's own words for why, when they gave them. Only counted on the
+    # abandoned books carrying this emotion — that is what the sentence is about.
+    reasons = Counter(
+        s.dnf_reason for s in dnf
+        if best_slug in s.emotions and s.dnf_reason
+    )
+    top_reason, reason_books = (reasons.most_common(1)[0] if reasons else (None, 0))
+
+    return {
+        "emotion": best_slug,
+        "fraction": round(best_rate, 2),
+        "dnf_reason": top_reason,
+        "dnf_reason_books": reason_books,
+    }
 
 
 def arc_shape(sigs: list[EntrySig]) -> dict | None:
