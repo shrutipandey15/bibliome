@@ -394,3 +394,79 @@ test_every_experiential_emotion_is_used_somewhere  # existing — confirm still 
 
 The rule you already wrote in your own readme, applied to the one place it wasn't:
 _could this sentence be true of a different reader?_
+
+---
+
+# Calibration session (2026-08-14)
+
+## The archetype scorer was measuring the wrong thing
+
+`score_archetype` summed raw emotion frequencies against eight hand-authored
+archetypes. That sum is not comparable between archetypes: they hold emotions with
+very different base rates, and several hold an anti-emotion from the "It lost me"
+family that nobody ever tags, so their penalty term was free. The leader was not
+the archetype that fit the reader — it was the one holding the most commonly
+tagged emotions.
+
+Under correlated tagging (a book makes you feel several things at once):
+
+| | before | after |
+|---|---|---|
+| `control_intellectual` win share | 43.4% | 12.5% |
+| `midnight_arsonist` win share | 1.6% | 11.1% |
+| win-share spread | 27x | 3.7x |
+| exact-tie rate | 5.7% | ~0.1% |
+
+Fair share is 12.5%. Two changes, shipped together in `dcf04e9`: one entry one
+vote (an entry's weight split across its tags rather than repeated per tag), and
+every archetype's score centered on `BASELINE_VECTOR`, its expected value on the
+average reader.
+
+The earlier audit of this scorer validated against *independently sampled*
+readers — a model under which it looks fair. That is why it was missed. Any future
+change to `PERSONALITY_TYPES` or `BASELINE_VECTOR` must be checked with
+`scripts/dna_bias_probe.py`, which uses correlated readers.
+
+## How wrong the old scorer was, measured on real data
+
+`scripts/backfill_dna_cache.py` recomputed every cached payload:
+
+- **9 users** carried a cached DNA payload.
+- **4 of 9 (44.4%)** changed archetype from the arithmetic fix alone.
+- 0 newly abstaining, 0 newly labelled — every change was one noun to another.
+- **All four moved off `The Control-Seeking Intellectual`** (three to The Midnight
+  Arsonist, one to The Quiet Witness), which is the fingerprint of exactly the bias
+  the centering removes.
+
+No `dna_shifted` notification was sent and no snapshot was written: notification
+count held at 5 and snapshot count at 17 across the run. `compute_and_cache`
+recomputes without snapshot side effects, and the backfill never calls
+`maybe_snapshot_and_notify`. Telling four of nine readers their identity shifted
+because we fixed our own arithmetic would have been a lie.
+
+Caveat on the 44.4%: this is a 9-user development database, not production. Treat
+it as confirmation of the direction and of the `control_intellectual` bias, not as
+a precise population estimate. The simulated figure was 34.5%.
+
+## Drift threshold 0.15 -> 0.18
+
+One entry one vote moves the frequency vectors further apart — the recency decay
+and the tag-count divisor compound instead of cancelling — so `drift` rises
+population-wide. Left at 0.15 the calibration patch would have roughly doubled
+snapshot writes and `dna_shifted` notifications, trading an archetype bug for a
+notification-spam bug. That is why both changes are in one commit.
+
+Measured with the drift probe in `scripts/dna_bias_probe.py`. The absolute
+crossing rate is very sensitive to the shelf model (2%–12% depending on assumed
+tag-count spread), but the threshold that restores the pre-patch rate is stable at
+**0.175–0.185** across every spread and seed tried.
+
+One correction to the brief: it specified measuring
+`drift(frequency_vector(weighted=False), frequency_vector(weighted=True))`, the
+enduring-vs-current gap. `DRIFT_SNAPSHOT_THRESHOLD` never gates that expression.
+Its only two uses (`dna_service.py:218`, `:224`) compare
+`drift(prev_snapshot["current_vector"], current)` — change since the last
+snapshot. The two have different distributions and calibrate to different numbers
+(0.175–0.185 vs 0.160–0.170). The threshold is set from the expression that
+actually decides whether anyone gets notified; the probe reports both so the
+difference stays visible.
