@@ -280,9 +280,12 @@ ARC = [
     InsightTemplate(
         "arc", "start_to_end", GATES["arc"], True,
         lambda c: bool(c.get("arc")),
+        # "of the books you logged an arc for", not "of the books you finish":
+        # arc_shape's fraction is over books carrying arc_start/arc_end, which is
+        # the same scope bug one level down from the gate.
         lambda c: (f"You start in {_name(c['arc']['start'])} and end in "
                    f"{_name(c['arc']['end'])} — {round(c['arc']['fraction'] * 100)}% "
-                   f"of the books you finish."),
+                   f"of the {c['arc']['n_arc']} books you logged an arc for."),
         lambda c: c["arc"]["fraction"],
     ),
 ]
@@ -306,11 +309,30 @@ CATEGORY_ORDER = [
 ]
 
 
+# Which ctx count each category's gate and `n` read.
+#
+# A gate exists to stop a claim being made on too little evidence, so it has to
+# count the books that could have supplied THAT claim's evidence. Nearly every
+# insight here is a claim about tagged emotions, so tagged_count is the default —
+# but `arc` reads the Finish-Flow arc columns and never looks at emotions at all.
+# A reader who logs arcs on books they never tagged has genuinely earned an arc
+# finding, and reporting it as "based on 5 books" when it rests on 20 understates
+# their own evidence back at them.
+#
+# The rule this encodes: a claim carries its own scope. Adding an insight that
+# reads some other column means adding its denominator here too.
+GATE_POPULATION: dict[str, str] = {"arc": "arc_count"}
+
+
+def _population(ctx: dict, category: str) -> int:
+    return ctx[GATE_POPULATION.get(category, "tagged_count")]
+
+
 def generate_insights(ctx: dict, *, limit: int = 4) -> tuple[list[dict], list[dict]]:
     """From a computed signal context, return (unlocked_insights, locked).
 
-    - An insight is emitted only if tagged_count ≥ its gate AND its data is present.
-    - At most one variant per category (rotates by tagged_count so return visits vary).
+    - An insight is emitted only if its population ≥ its gate AND its data is present.
+    - At most one variant per category (rotates by that population so visits vary).
     - Ranked by surprise; the strongest `limit` are returned — never a dump.
     - Locked: every category whose gate the reader hasn't reached, with an honest
       reason (B7.6). This is the curiosity gap, at zero integrity cost.
@@ -322,26 +344,31 @@ def generate_insights(ctx: dict, *, limit: int = 4) -> tuple[list[dict], list[di
     blind-spot gate and announce "You've logged 30 books. You have never once
     reached for devastation", a sentence built on five books. ``book_count`` stays
     in ``ctx`` for copy that is genuinely about the shelf; nothing gates on it.
-    """
-    tagged_count = ctx["tagged_count"]
 
+    Which count is "the books that carry a feeling" is per-category, though — see
+    ``GATE_POPULATION``. Gating everything on tagged_count was itself an
+    over-correction for the one insight that never reads emotions.
+    """
     # Group applicable, signed-off, gated candidates by category.
     by_cat: dict[str, list[InsightTemplate]] = {}
     for t in REGISTRY:
-        if not t.signed_off or tagged_count < t.min_n or not t.applicable(ctx):
+        if not t.signed_off or _population(ctx, t.category) < t.min_n \
+                or not t.applicable(ctx):
             continue
         by_cat.setdefault(t.category, []).append(t)
 
     chosen: list[dict] = []
     for cat, variants in by_cat.items():
-        t = variants[tagged_count % len(variants)]   # deterministic rotation
+        n = _population(ctx, cat)
+        t = variants[n % len(variants)]   # deterministic rotation
         chosen.append({
             "category": cat,
             "variant": t.variant,
             "text": t.render(ctx),
             # The population the claim actually covers — the client renders this
-            # as "based on N books", so it must not be the raw shelf size.
-            "n": tagged_count,
+            # as "based on N books", so it must not be the raw shelf size and must
+            # not be the tagged count for a claim that did not read emotions.
+            "n": n,
             "surprise": round(float(t.surprise(ctx)), 3),
         })
 
@@ -354,7 +381,7 @@ def generate_insights(ctx: dict, *, limit: int = 4) -> tuple[list[dict], list[di
         gate = GATES.get(cat)
         if gate is None:
             continue
-        if tagged_count < gate and cat not in shown:
+        if _population(ctx, cat) < gate and cat not in shown:
             locked.append({
                 "category": cat,
                 "unlocks_at": f"{gate} books" if cat != "seasonality" else "25 books + 12 months",
@@ -450,6 +477,10 @@ def build_dna(
         # genuinely about the size of the shelf.
         "book_count": book_count,
         "tagged_count": len(tagged),
+        # arc reads the Finish-Flow columns, not emotions, so it carries its own
+        # denominator (see GATE_POPULATION). Books tagged with a feeling and books
+        # logged with an arc are different populations that happen to overlap.
+        "arc_count": sum(1 for s in sigs if s.arc_start and s.arc_end),
         "intensity_signature": sig.intensity_signature(sigs),
         "range": sig.range_entropy(sigs),
         "range_prev_distinct": range_prev_distinct,

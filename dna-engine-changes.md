@@ -509,39 +509,63 @@ Options, none of them free:
    the disclosure is the whole question — "40 of your 48 sources are journal days"
    is a lot to say about someone's private life on a public card.
 
-Not picked. Option 2 is the one that looks most attractive and is the one that
-breaks an existing invariant.
+**Option 2 is eliminated**, not merely risky: the numbers above show it produces
+`comfort_architect` publicly against `control_intellectual` privately on the same
+reader. That is P0-1 violated, not worked around. Taking it would require amending
+P0-1 first, as a separate decision.
+
+So the live choice is between option 1 (card returns None on an empty basis) and
+option 3 (card discloses the journal share). Not picked.
 
 ## 2. `quiet_witness` at 5.1%
 
-Not a scoring artifact. `tenderness + awe + nostalgia` spans three UI families and
-nostalgia is the rarest tag (baseline 0.024), so it needs three uncorrelated things
-at once. Re-anchoring means editing `PERSONALITY_TYPES`, which this session was
-told not to touch — so these were measured in memory and reverted, never committed.
+Re-anchoring means editing `PERSONALITY_TYPES`. Every variant below was measured
+in memory and reverted; the table is unchanged in the code.
 
-Correlated model, 6000-8000 readers, four seeds. Accepted band 6%–20%, fair share
-12.5%:
+**The mechanism is exclusivity, not family spread.** My first pass claimed the
+problem was that quiet_witness spans three UI families. That was confounded:
+removing awe drops family spread from 3 to 2 *and* removes its most-shared
+primary at the same time, so both stories predicted the result. Holding one fixed
+while varying the other separates them:
 
-| option | primaries | families | quiet_witness | anything out of band |
+| variant | family spread | exclusivity | quiet_witness |
+|---|---|---|---|
+| current (tenderness+awe+nostalgia) | 3 | 1.83 | 5.1% |
+| A. awe→recognition | **3 (held)** | 2.00 | 12.7% |
+| B. awe→joy | 2 | 2.00 | 13.2% |
+| C. drop nostalgia | 2 | 1.17 | 6.0% |
+
+A fixes it with family spread unchanged; C fixes the spread and barely moves.
+Exclusivity is the driver. Concentration is a real but separate lever — variant D
+(tenderness+comfort+joy, all one family) reaches 18.2% on low exclusivity — it
+just is not the one binding here.
+
+**Every fix is a transfer, and the table cannot balance.** Exactly six emotions
+are claimed by a single archetype — grief, joy, amusement, desire, nostalgia,
+recognition — for eight archetypes. Exclusivity is zero-sum and the vocabulary is
+two short. So raising quiet_witness necessarily lowers someone else:
+
+| variant | quiet_witness | emotional_archaeologist | spread | out of band |
 |---|---|---|---|---|
-| A. unchanged | tenderness+awe+nostalgia | 3 | 5.0–5.7% | **quiet_witness** |
-| B. nostalgia→recognition | tenderness+awe+recognition | 2 | 9.2–10.0% | none |
-| C. nostalgia→longing | tenderness+awe+longing | 3 | 8.3–8.7% | none |
-| D. nostalgia→comfort | tenderness+awe+comfort | 2 | 8.1–8.6% | none |
-| E. nostalgia→grief | tenderness+awe+grief | 3 | 4.6% | **quiet_witness** |
-| F. awe→recognition | tenderness+recognition+nostalgia | 3 | 12.8–14.0% | emotional_archaeologist at 6% |
+| current | 5.1% | 7.1% | 3.7x | 1 |
+| A. awe→recognition | 12.7% | 6.0% | 2.9x | 1 |
+| B. awe→joy | 13.2% | 4.2% | 4.3x | 1 |
+| E. awe→amusement | 9.5% | 6.4% | 2.8x | **0** |
 
-**One finding worth flagging: the diagnosis in the brief may be wrong.** The
-problem is not primarily that nostalgia is rare. Option F *keeps* nostalgia, drops
-**awe**, and lands quiet_witness on its fair share — the best result of any option
-tried. Awe is the most common tag in the population (0.126) and is also a primary
-for `control_intellectual` and `midnight_arsonist`, so quiet_witness never wins the
-readers who tag it. A shared common primary costs more than a private rare one.
+B takes joy, `emotional_archaeologist`'s only exclusive primary, and drops it to
+4.2%. A takes recognition from `control_intellectual` and knocks
+`emotional_archaeologist` out anyway. **E is the only variant where all eight sit
+in band.**
 
-B, C and D all clear the band and are the conservative choices. F is the only one
-that reaches fair share, at the cost of pushing `emotional_archaeologist` to the
-6% edge. This is an editorial question about what "The Quiet Witness" is supposed
-to mean as much as a numerical one, which is why it is not being decided here.
+So there is no clean answer inside `PERSONALITY_TYPES`; the choice is which
+archetype absorbs the cost. E is the cheapest transfer numerically, but
+"tenderness + amusement + nostalgia" may be the wrong Quiet Witness semantically,
+and that is an editorial call the probe cannot make.
+
+This is also the strongest argument yet for **regions in a space rather than
+buckets**: a region does not need a private emotion, so the zero-sum constraint
+that makes this undecidable simply does not arise. Out of scope here, but the
+constraint is structural, not a tuning problem.
 
 ## 3. `intensity=0` silently becomes 5
 
@@ -585,7 +609,22 @@ silence is currently covering nothing.
   `MIN_ARCHETYPE_GAP`. There is no such constant and no such abstention — the only
   abstention is the anchor-slug check. Left verbatim so the calibration commit
   matches the supplied patch exactly; it is a one-line doc fix.
-- **Abandonment and arc now gate on tagged count.** Correct for abandonment, which
-  names an emotion. `arc_shape` reads only the arc columns and does not need
-  emotions, so gating it on tagged books is stricter than necessary — conservative,
-  but arguably the wrong denominator for that one insight.
+- **A claim carries its own scope — Phase 3 over-corrected, now fixed.** Phase 3
+  moved every gate and every `n` onto `tagged_count`. That is right for claims
+  about emotions and wrong for `arc`, which reads `arc_start`/`arc_end` and never
+  looks at emotions.
+
+  Worth recording precisely, because the obvious diagnosis was wrong. The *gate*
+  never suppressed anything: `GATES["arc"]` is 5 and `MIN_BOOKS_FOR_DNA` is 5, so
+  `tagged_count < 5` cannot happen while `enough` is True, and no reader ever lost
+  an arc insight. The observable defect was **scope**, one level down — a reader
+  with 5 tagged books and 20 arc-logged books got an arc finding computed over 20
+  books reporting `n=5`, under copy reading "100% of the books you finish" when
+  the denominator was books carrying an arc.
+
+  Fixed with a per-category denominator (`GATE_POPULATION` in `dna_insights.py`)
+  rather than by special-casing arc: adding an insight that reads some other
+  column now means declaring its population too. The same defect appeared three
+  times this session — the blind-spot gate, `book_share`'s denominator, and this —
+  which is the argument for making scope a property of the claim rather than a
+  convention each template is trusted to follow.

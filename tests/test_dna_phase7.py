@@ -92,6 +92,7 @@ def test_every_applicable_template_renders_without_error():
         # copy about the shelf itself. Every book in this fixture carries a tag.
         "book_count": 40,
         "tagged_count": 40,
+        "arc_count": 20,          # arc carries its own denominator
         "range": {"entropy": 0.4, "distinct": 4},
         "range_prev_distinct": 9,
         "blind_spots": ["tenderness"],
@@ -176,7 +177,7 @@ def test_contradiction_requires_reads_for():
 # ── Locked list is honest and always includes seasonality ──
 
 def test_locked_list_names_what_unlocks_and_includes_seasonality():
-    _, locked = generate_insights({"book_count": 6, "tagged_count": 6, "blind_spots": [], "range": {"distinct": 3, "entropy": 0.3},
+    _, locked = generate_insights({"book_count": 6, "tagged_count": 6, "arc_count": 0, "blind_spots": [], "range": {"distinct": 3, "entropy": 0.3},
                                    "intensity_signature": {"share_high": 0.1, "variance": 3.0},
                                    "stated": None, "abandonment": None, "arc": None, "top_pair": None,
                                    "rare": [], "drift": 0.0, "has_two_snapshots": False,
