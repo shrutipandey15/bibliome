@@ -394,3 +394,237 @@ test_every_experiential_emotion_is_used_somewhere  # existing — confirm still 
 
 The rule you already wrote in your own readme, applied to the one place it wasn't:
 _could this sentence be true of a different reader?_
+
+---
+
+# Calibration session (2026-08-14)
+
+## The archetype scorer was measuring the wrong thing
+
+`score_archetype` summed raw emotion frequencies against eight hand-authored
+archetypes. That sum is not comparable between archetypes: they hold emotions with
+very different base rates, and several hold an anti-emotion from the "It lost me"
+family that nobody ever tags, so their penalty term was free. The leader was not
+the archetype that fit the reader — it was the one holding the most commonly
+tagged emotions.
+
+Under correlated tagging (a book makes you feel several things at once):
+
+| | before | after |
+|---|---|---|
+| `control_intellectual` win share | 43.4% | 12.5% |
+| `midnight_arsonist` win share | 1.6% | 11.1% |
+| win-share spread | 27x | 3.7x |
+| exact-tie rate | 5.7% | ~0.1% |
+
+Fair share is 12.5%. Two changes, shipped together in `dcf04e9`: one entry one
+vote (an entry's weight split across its tags rather than repeated per tag), and
+every archetype's score centered on `BASELINE_VECTOR`, its expected value on the
+average reader.
+
+The earlier audit of this scorer validated against *independently sampled*
+readers — a model under which it looks fair. That is why it was missed. Any future
+change to `PERSONALITY_TYPES` or `BASELINE_VECTOR` must be checked with
+`scripts/dna_bias_probe.py`, which uses correlated readers.
+
+## How wrong the old scorer was, measured on real data
+
+`scripts/backfill_dna_cache.py` recomputed every cached payload:
+
+- **9 users** carried a cached DNA payload.
+- **4 of 9 (44.4%)** changed archetype from the arithmetic fix alone.
+- 0 newly abstaining, 0 newly labelled — every change was one noun to another.
+- **All four moved off `The Control-Seeking Intellectual`** (three to The Midnight
+  Arsonist, one to The Quiet Witness), which is the fingerprint of exactly the bias
+  the centering removes.
+
+No `dna_shifted` notification was sent and no snapshot was written: notification
+count held at 5 and snapshot count at 17 across the run. `compute_and_cache`
+recomputes without snapshot side effects, and the backfill never calls
+`maybe_snapshot_and_notify`. Telling four of nine readers their identity shifted
+because we fixed our own arithmetic would have been a lie.
+
+Caveat on the 44.4%: this is a 9-user development database, not production. Treat
+it as confirmation of the direction and of the `control_intellectual` bias, not as
+a precise population estimate. The simulated figure was 34.5%.
+
+## Drift threshold 0.15 -> 0.18
+
+One entry one vote moves the frequency vectors further apart — the recency decay
+and the tag-count divisor compound instead of cancelling — so `drift` rises
+population-wide. Left at 0.15 the calibration patch would have roughly doubled
+snapshot writes and `dna_shifted` notifications, trading an archetype bug for a
+notification-spam bug. That is why both changes are in one commit.
+
+Measured with the drift probe in `scripts/dna_bias_probe.py`. The absolute
+crossing rate is very sensitive to the shelf model (2%–12% depending on assumed
+tag-count spread), but the threshold that restores the pre-patch rate is stable at
+**0.175–0.185** across every spread and seed tried.
+
+One correction to the brief: it specified measuring
+`drift(frequency_vector(weighted=False), frequency_vector(weighted=True))`, the
+enduring-vs-current gap. `DRIFT_SNAPSHOT_THRESHOLD` never gates that expression.
+Its only two uses (`dna_service.py:218`, `:224`) compare
+`drift(prev_snapshot["current_vector"], current)` — change since the last
+snapshot. The two have different distributions and calibrate to different numbers
+(0.175–0.185 vs 0.160–0.170). The threshold is set from the expression that
+actually decides whether anyone gets notified; the probe reports both so the
+difference stays visible.
+
+---
+
+# Open questions — need a decision, not code
+
+Three items were deliberately left undecided this session. Each has numbers.
+
+## 1. Empty receipt on a public card
+
+**Reproduced.** 8 cozy books (comfort/tenderness/joy) + 40 journal days tagged
+recognition/awe/dread:
+
+```
+archetype:            control_intellectual   (gap 0.4401 — decisive, not a tie)
+basis.counts:         []
+books-only archetype: comfort_architect
+```
+
+The archetype scores over books + journal (`current`); `basis_for` reads books
+only, deliberately, because the receipt is rendered on public surfaces and says
+the word "books". When the journal dominates the vector, the label comes from
+emotions that appear in zero books and the receipt under it is empty. The reader
+is handed a noun with nothing to check it against — the exact failure the receipt
+was added to prevent.
+
+Options, none of them free:
+
+1. **Card returns None on an empty basis.** Honest, self-consistent, and costs
+   this reader a card entirely. No P0-1 conflict.
+2. **Public archetype scores from `current_books` only.** The card gets a real
+   receipt — but note the numbers above: books-only says `comfort_architect` while
+   the owner's mirror says `control_intellectual`. **This means the mirror and the
+   share card would name different archetypes, which P0-1 forbids.** Taking this
+   option means amending P0-1, not working around it.
+3. **Card discloses the journal share.** Keeps one engine and one label, but puts
+   a number about the reader's private journal onto a public surface. The size of
+   the disclosure is the whole question — "40 of your 48 sources are journal days"
+   is a lot to say about someone's private life on a public card.
+
+**Option 2 is eliminated**, not merely risky: the numbers above show it produces
+`comfort_architect` publicly against `control_intellectual` privately on the same
+reader. That is P0-1 violated, not worked around. Taking it would require amending
+P0-1 first, as a separate decision.
+
+So the live choice is between option 1 (card returns None on an empty basis) and
+option 3 (card discloses the journal share). Not picked.
+
+## 2. `quiet_witness` at 5.1%
+
+Re-anchoring means editing `PERSONALITY_TYPES`. Every variant below was measured
+in memory and reverted; the table is unchanged in the code.
+
+**The mechanism is exclusivity, not family spread.** My first pass claimed the
+problem was that quiet_witness spans three UI families. That was confounded:
+removing awe drops family spread from 3 to 2 *and* removes its most-shared
+primary at the same time, so both stories predicted the result. Holding one fixed
+while varying the other separates them:
+
+| variant | family spread | exclusivity | quiet_witness |
+|---|---|---|---|
+| current (tenderness+awe+nostalgia) | 3 | 1.83 | 5.1% |
+| A. awe→recognition | **3 (held)** | 2.00 | 12.7% |
+| B. awe→joy | 2 | 2.00 | 13.2% |
+| C. drop nostalgia | 2 | 1.17 | 6.0% |
+
+A fixes it with family spread unchanged; C fixes the spread and barely moves.
+Exclusivity is the driver. Concentration is a real but separate lever — variant D
+(tenderness+comfort+joy, all one family) reaches 18.2% on low exclusivity — it
+just is not the one binding here.
+
+**Every fix is a transfer, and the table cannot balance.** Exactly six emotions
+are claimed by a single archetype — grief, joy, amusement, desire, nostalgia,
+recognition — for eight archetypes. Exclusivity is zero-sum and the vocabulary is
+two short. So raising quiet_witness necessarily lowers someone else:
+
+| variant | quiet_witness | emotional_archaeologist | spread | out of band |
+|---|---|---|---|---|
+| current | 5.1% | 7.1% | 3.7x | 1 |
+| A. awe→recognition | 12.7% | 6.0% | 2.9x | 1 |
+| B. awe→joy | 13.2% | 4.2% | 4.3x | 1 |
+| E. awe→amusement | 9.5% | 6.4% | 2.8x | **0** |
+
+B takes joy, `emotional_archaeologist`'s only exclusive primary, and drops it to
+4.2%. A takes recognition from `control_intellectual` and knocks
+`emotional_archaeologist` out anyway. **E is the only variant where all eight sit
+in band.**
+
+So there is no clean answer inside `PERSONALITY_TYPES`; the choice is which
+archetype absorbs the cost. E is the cheapest transfer numerically, but
+"tenderness + amusement + nostalgia" may be the wrong Quiet Witness semantically,
+and that is an editorial call the probe cannot make.
+
+This is also the strongest argument yet for **regions in a space rather than
+buckets**: a region does not need a private emotion, so the zero-sum constraint
+that makes this undecidable simply does not arise. Out of scope here, but the
+constraint is structural, not a tuning problem.
+
+## 3. `intensity=0` silently becomes 5
+
+`entry_sig` does `int(raw.get("intensity", 5) or 5)`, so a 0 becomes a 5.
+
+**Checked the constraints: 0 is not valid.** Both sources are constrained at both
+layers:
+
+- `book_entries.intensity` — `CHECK (intensity >= 1 AND intensity <= 10)`
+  (`check_intensity_range`, present since the initial migration), and
+  `Field(ge=1, le=10)` in `app/schemas/entry.py`.
+- `journal_emotions.strength` — `CHECK (strength >= 1 AND strength <= 10)`
+  (`check_journal_strength_range`). Journal intensity is
+  `round(mean(strengths))`, which cannot be 0 given strengths ≥ 1.
+
+Real data agrees: 0 rows with NULL or 0 intensity in `book_entries`, 0 in
+`journal_emotions`.
+
+So this is **not** data corruption; it is dead defensive code that would mask a
+constraint violation if one ever occurred. The `or` also swallows `None`, which
+is the case actually worth thinking about. The decision is which of:
+
+1. Leave it. Costs nothing, hides nothing that currently exists.
+2. Drop the `or 5` and let a 0 or None raise, so a broken write is loud.
+3. Keep a default for None only (`raw.get("intensity") or 5` → explicit None
+   check), and let 0 raise.
+
+Not picked. Worth noting the coercion is the same shape of bug as the two fixed
+this session — a silent default standing in for a real answer — but here the
+silence is currently covering nothing.
+
+## Also flagged, not actioned
+
+- **`book_entries.verdict` is collected and never reaches DNA.** The column exists
+  (`yes` / `no` / `not_sure`, `check_entry_verdict`) and is written by the entry
+  surface, but `_load_raw` does not select it and no signal reads it. Deliberately
+  not wired up this session. Note the name collision: `verdict` in `dna_signals`
+  is the unrelated stated-vs-revealed verdict.
+- **Stale docstring in `score_archetype`** (`dna_signals.py:534`): it says
+  `best_id` is None when the leader fails to clear the runner-up by
+  `MIN_ARCHETYPE_GAP`. There is no such constant and no such abstention — the only
+  abstention is the anchor-slug check. Left verbatim so the calibration commit
+  matches the supplied patch exactly; it is a one-line doc fix.
+- **A claim carries its own scope — Phase 3 over-corrected, now fixed.** Phase 3
+  moved every gate and every `n` onto `tagged_count`. That is right for claims
+  about emotions and wrong for `arc`, which reads `arc_start`/`arc_end` and never
+  looks at emotions.
+
+  Worth recording precisely, because the obvious diagnosis was wrong. The *gate*
+  never suppressed anything: `GATES["arc"]` is 5 and `MIN_BOOKS_FOR_DNA` is 5, so
+  `tagged_count < 5` cannot happen while `enough` is True, and no reader ever lost
+  an arc insight. The observable defect was **scope**, one level down — a reader
+  with 5 tagged books and 20 arc-logged books got an arc finding computed over 20
+  books reporting `n=5`, under copy reading "100% of the books you finish" when
+  the denominator was books carrying an arc.
+
+  Fixed with a per-category denominator (`GATE_POPULATION` in `dna_insights.py`)
+  rather than by special-casing arc: adding an insight that reads some other
+  column now means declaring its population too. The same defect appeared three
+  times this session — the blind-spot gate, `book_share`'s denominator, and this —
+  which is the argument for making scope a property of the claim rather than a
+  convention each template is trusted to follow.

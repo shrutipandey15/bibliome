@@ -24,7 +24,7 @@ UNLOCK_REASONS: dict[str, str] = {
     "range": "needs 8 books to measure how wide you reach",
     "blind_spot": "needs 10 books before a gap means anything",
     "contradiction": "needs 10 books — and telling me what you read for",
-    "abandonment": "needs 10 books, a few of them unfinished",
+    "abandonment": "needs 10 books, a few of them put down unfinished",
     "pairing": "needs 15 books to see which feelings travel together",
     "drift": "needs 15 books and two snapshots to see movement",
     "seasonality": "needs 25 books across a full year",
@@ -142,7 +142,11 @@ BLIND_SPOT = [
     InsightTemplate(
         "blind_spot", "never", GATES["blind_spot"], True,
         lambda c: bool(c.get("blind_spots")),
-        lambda c: (f"You've logged {c['book_count']} books. "
+        # "tagged N books", not "logged N books": the claim is about books the
+        # reader put a feeling on, and an untagged import cannot evidence a
+        # never-reached-for emotion. Quoting the raw shelf here was the sentence
+        # that made a 5-book finding look like a 30-book one.
+        lambda c: (f"You've tagged {c['tagged_count']} books. "
                    f"You have never once reached for {_name(c['blind_spots'][0])}."),
         lambda c: 0.9,
     ),
@@ -203,11 +207,48 @@ PAIRING = [
     ),
 ]
 
-# ── 6. Abandonment (gate 10, ≥3 unfinished) ──
+# ── 6. Abandonment (gate 10, ≥3 abandoned) ──
+#
+# Reasons the reader gave for putting a book down, in their own vocabulary
+# (migration 022's dnf_reason constraint). Rendered as a clause, so the sentence
+# reads as one thought rather than a label bolted on.
+DNF_REASON_CLAUSE: dict[str, str] = {
+    "bored": "you were bored",
+    "too_much": "it was too much",
+    "badly_written": "it was badly written",
+    "wrong_time": "it was the wrong time",
+    "lost_me": "it lost you",
+    "drifted": "you drifted away",
+}
+
+
+def _dnf_reason_clause(c) -> str | None:
+    a = c.get("abandonment") or {}
+    return DNF_REASON_CLAUSE.get(a.get("dnf_reason"))
+
+
 ABANDONMENT = [
     InsightTemplate(
+        # Preferred whenever the reader told us why. "You said it lost you" is a
+        # far stronger sentence than naming a correlated emotion, because it is
+        # the reader's own stated reason rather than our inference from one.
+        "abandonment", "dnf_reason", GATES["abandonment"], True,
+        lambda c: bool(c.get("abandonment") and _dnf_reason_clause(c)
+                       and c["abandonment"].get("dnf_reason_books", 0) >= 2),
+        lambda c: (f"The books you put down are the ones you tag "
+                   f"{_name(c['abandonment']['emotion'])} — and on "
+                   f"{c['abandonment']['dnf_reason_books']} of them you said "
+                   f"{_dnf_reason_clause(c)}."),
+        lambda c: min(1.0, c["abandonment"]["fraction"] + 0.1),
+    ),
+    InsightTemplate(
+        # Suppressed when the reason variant applies, rather than left to the
+        # deterministic rotation — otherwise the weaker sentence would replace the
+        # stronger one on half of visits. Same idiom as center_of_gravity above.
         "abandonment", "dnf_emotion", GATES["abandonment"], True,
-        lambda c: bool(c.get("abandonment")),
+        lambda c: bool(c.get("abandonment")) and not (
+            _dnf_reason_clause(c) and c["abandonment"].get("dnf_reason_books", 0) >= 2
+        ),
         lambda c: (f"The books you don't finish are the ones you tag "
                    f"{_name(c['abandonment']['emotion'])}."),
         lambda c: c["abandonment"]["fraction"],
@@ -239,9 +280,12 @@ ARC = [
     InsightTemplate(
         "arc", "start_to_end", GATES["arc"], True,
         lambda c: bool(c.get("arc")),
+        # "of the books you logged an arc for", not "of the books you finish":
+        # arc_shape's fraction is over books carrying arc_start/arc_end, which is
+        # the same scope bug one level down from the gate.
         lambda c: (f"You start in {_name(c['arc']['start'])} and end in "
                    f"{_name(c['arc']['end'])} — {round(c['arc']['fraction'] * 100)}% "
-                   f"of the books you finish."),
+                   f"of the {c['arc']['n_arc']} books you logged an arc for."),
         lambda c: c["arc"]["fraction"],
     ),
 ]
@@ -265,32 +309,66 @@ CATEGORY_ORDER = [
 ]
 
 
+# Which ctx count each category's gate and `n` read.
+#
+# A gate exists to stop a claim being made on too little evidence, so it has to
+# count the books that could have supplied THAT claim's evidence. Nearly every
+# insight here is a claim about tagged emotions, so tagged_count is the default —
+# but `arc` reads the Finish-Flow arc columns and never looks at emotions at all.
+# A reader who logs arcs on books they never tagged has genuinely earned an arc
+# finding, and reporting it as "based on 5 books" when it rests on 20 understates
+# their own evidence back at them.
+#
+# The rule this encodes: a claim carries its own scope. Adding an insight that
+# reads some other column means adding its denominator here too.
+GATE_POPULATION: dict[str, str] = {"arc": "arc_count"}
+
+
+def _population(ctx: dict, category: str) -> int:
+    return ctx[GATE_POPULATION.get(category, "tagged_count")]
+
+
 def generate_insights(ctx: dict, *, limit: int = 4) -> tuple[list[dict], list[dict]]:
     """From a computed signal context, return (unlocked_insights, locked).
 
-    - An insight is emitted only if book_count ≥ its gate AND its data is present.
-    - At most one variant per category (rotates by book_count so return visits vary).
+    - An insight is emitted only if its population ≥ its gate AND its data is present.
+    - At most one variant per category (rotates by that population so visits vary).
     - Ranked by surprise; the strongest `limit` are returned — never a dump.
     - Locked: every category whose gate the reader hasn't reached, with an honest
       reason (B7.6). This is the curiosity gap, at zero integrity cost.
-    """
-    book_count = ctx["book_count"]
 
+    GATES COUNT BOOKS THAT CARRY A FEELING, not titles on the shelf. Every gate
+    here exists to keep a claim from being made on too little evidence, and an
+    untagged book is not evidence — it is a title we know nothing about. Gating on
+    the raw shelf let a 30-book import with 5 tagged books clear the 10-book
+    blind-spot gate and announce "You've logged 30 books. You have never once
+    reached for devastation", a sentence built on five books. ``book_count`` stays
+    in ``ctx`` for copy that is genuinely about the shelf; nothing gates on it.
+
+    Which count is "the books that carry a feeling" is per-category, though — see
+    ``GATE_POPULATION``. Gating everything on tagged_count was itself an
+    over-correction for the one insight that never reads emotions.
+    """
     # Group applicable, signed-off, gated candidates by category.
     by_cat: dict[str, list[InsightTemplate]] = {}
     for t in REGISTRY:
-        if not t.signed_off or book_count < t.min_n or not t.applicable(ctx):
+        if not t.signed_off or _population(ctx, t.category) < t.min_n \
+                or not t.applicable(ctx):
             continue
         by_cat.setdefault(t.category, []).append(t)
 
     chosen: list[dict] = []
     for cat, variants in by_cat.items():
-        t = variants[book_count % len(variants)]   # deterministic rotation
+        n = _population(ctx, cat)
+        t = variants[n % len(variants)]   # deterministic rotation
         chosen.append({
             "category": cat,
             "variant": t.variant,
             "text": t.render(ctx),
-            "n": book_count,
+            # The population the claim actually covers — the client renders this
+            # as "based on N books", so it must not be the raw shelf size and must
+            # not be the tagged count for a claim that did not read emotions.
+            "n": n,
             "surprise": round(float(t.surprise(ctx)), 3),
         })
 
@@ -303,7 +381,7 @@ def generate_insights(ctx: dict, *, limit: int = 4) -> tuple[list[dict], list[di
         gate = GATES.get(cat)
         if gate is None:
             continue
-        if book_count < gate and cat not in shown:
+        if _population(ctx, cat) < gate and cat not in shown:
             locked.append({
                 "category": cat,
                 "unlocks_at": f"{gate} books" if cat != "seasonality" else "25 books + 12 months",
@@ -373,11 +451,15 @@ def build_dna(
     current = sig.frequency_vector(vector_sigs, weighted=True)
     drift_val = sig.drift(enduring, current)
 
-    # Book-share (distinct books tagged / total) — for the "rare" blind-spot variant.
+    # Book-share for the "rare" blind-spot variant. The denominator is TAGGED books,
+    # not the shelf: only a tagged book could have carried the emotion, so dividing
+    # by titles that carry no feelings at all manufactures rarity out of untagged
+    # imports. One tagged book in 30 reads as 3% and trips the <5% rare band; the
+    # same book among 20 tagged is 5% and is not rare.
     book_share: dict[str, float] = {}
     for slug in sig._ALL_SLUGS:
-        n = sum(1 for s in sigs if slug in s.emotions)
-        book_share[slug] = n / book_count
+        n = sum(1 for s in tagged if slug in s.emotions)
+        book_share[slug] = n / len(tagged)
     rare = sorted(((s, v) for s, v in book_share.items() if 0 < v < 0.05), key=lambda kv: kv[1])
 
     pairs = sig.co_occurrence(sigs)
@@ -390,7 +472,15 @@ def build_dna(
     )
 
     ctx = {
+        # Both, and they mean different things. `tagged_count` is what every gate
+        # and every "based on N books" reads; `book_count` is only for copy that is
+        # genuinely about the size of the shelf.
         "book_count": book_count,
+        "tagged_count": len(tagged),
+        # arc reads the Finish-Flow columns, not emotions, so it carries its own
+        # denominator (see GATE_POPULATION). Books tagged with a feeling and books
+        # logged with an arc are different populations that happen to overlap.
+        "arc_count": sum(1 for s in sigs if s.arc_start and s.arc_end),
         "intensity_signature": sig.intensity_signature(sigs),
         "range": sig.range_entropy(sigs),
         "range_prev_distinct": range_prev_distinct,
@@ -410,7 +500,7 @@ def build_dna(
     }
 
     unlocked, locked = generate_insights(ctx, limit=insight_limit)
-    archetype_id, scores, margin = sig.score_archetype(current)
+    archetype_id, scores, gap = sig.score_archetype(current)
 
     return {
         "enough": True,
@@ -422,12 +512,16 @@ def build_dna(
         # still have a tally that names nobody. The client must handle it.
         "archetype": sig.archetype_dict(archetype_id) if archetype_id else None,
         "archetype_scores": scores,
-        "margin": margin,
+        # Renamed from the old `margin`: scores are now centered on the population
+        # baseline and signed, so a *fraction of the leader's score* is meaningless
+        # (the leader's score can be negative). This is the absolute lead over
+        # second place, in frequency-vector units, comparable between readers.
+        "margin": gap,
         # When the leader barely clears the field, say so rather than pretending
         # the label was decisive.
         "runner_up": (
             sig.archetype_dict(sorted(scores, key=scores.get, reverse=True)[1])["name"]
-            if archetype_id and margin < 0.10 else None
+            if archetype_id and gap < sig.HEDGE_ARCHETYPE_GAP else None
         ),
         # The receipt. Books only — `sigs`, not `vector_sigs` — because this line
         # is rendered on public surfaces and counts things it calls "your books".

@@ -24,7 +24,25 @@ from app.utils.emotions import EMOTIONS, VALID_SLUGS, canonicalize
 
 # ── Tunable constants (Part 4 / §11) ──
 HALF_LIFE_DAYS = 120          # a book's emotional weight halves every ~4 months
-DRIFT_SNAPSHOT_THRESHOLD = 0.15
+# Raised from 0.15 alongside one-entry-one-vote, in the same commit and for the
+# same reason. Splitting an entry's weight across its tags moves the frequency
+# vectors further apart — the recency decay and the tag-count divisor compound
+# instead of cancelling — so `drift` rises across the whole population. Left at
+# 0.15 the patch would have roughly doubled how often we snapshot and how often
+# we send `dna_shifted`: a notification-spam regression bought with an archetype
+# fix. That is why the two changes ship in one commit.
+#
+# Calibrated against the expression this constant actually gates —
+# `drift(prev_snapshot["current_vector"], current)` in dna_service, NOT the
+# enduring-vs-current gap. Those two have different distributions and calibrate
+# to different numbers; only the former decides whether anyone gets notified.
+#
+# Measured, not guessed: `python -m scripts.dna_bias_probe`. The absolute crossing
+# rate is highly sensitive to the shelf model (2%-12% depending on assumed
+# tag-count spread), but the pick that restores the pre-patch rate sits at
+# 0.175-0.185 across every spread and seed tried. Re-run that probe before
+# changing this.
+DRIFT_SNAPSHOT_THRESHOLD = 0.18
 MONTHLY_CADENCE_DAYS = 30
 MIN_BOOKS_FOR_DNA = 5
 # Below this many books carrying a tag, its average intensity is one reader's mood
@@ -65,10 +83,17 @@ class EntrySig:
     emotions: list[str]          # canonical, deduped
     intensity: int
     ts: datetime                 # finished_at (fallback created_at), tz-aware
-    status: str                  # finished | reading | want_to_read
+    # want_to_read | reading | finished | abandoned | paused | reread
+    # (migration 022 widened the check constraint to these six)
+    status: str
     arc_start: str | None = None
     arc_end: str | None = None
     source: str = "book"         # book | journal
+    # bored | too_much | badly_written | wrong_time | lost_me | drifted, or None.
+    # Only meaningful when status == "abandoned". Lets the abandonment insight say
+    # WHY a book was put down, which is a far stronger sentence than naming the
+    # emotion that correlates with stopping.
+    dnf_reason: str | None = None
 
 
 def _canon_list(raw) -> list[str]:
@@ -103,6 +128,7 @@ def entry_sig(raw: dict) -> EntrySig:
         arc_start=canonicalize(raw["arc_start"]) if raw.get("arc_start") else None,
         arc_end=canonicalize(raw["arc_end"]) if raw.get("arc_end") else None,
         source=raw.get("source") or "book",
+        dnf_reason=raw.get("dnf_reason"),
     )
 
 
@@ -115,13 +141,24 @@ def recency_weight(age_days: float) -> float:
 def frequency_vector(sigs: list[EntrySig], *, weighted: bool, now: datetime | None = None) -> dict[str, float]:
     """An emotion vector over the full canonical vocabulary, normalized to sum 1.0 (all-zero if no tags).
 
-    weighted=False → enduring (each tagged book contributes 1 per distinct emotion).
-    weighted=True  → current (contribution scaled by exp-decay on the book's age).
+    weighted=False → enduring (each tagged entry contributes 1, split across its tags).
+    weighted=True  → current (that contribution scaled by exp-decay on the entry's age).
+
+    ONE ENTRY, ONE VOTE. Each entry's weight is divided by the number of tags it
+    carries rather than repeated per tag. Without this a book tagged five emotions
+    outvotes five books tagged one, and the books people multi-tag are the ones
+    that hit hardest — so the vector drifted toward whatever the reader felt most
+    intensely rather than what they read most. On simulated shelves this alone cut
+    the archetype win-share spread from 27x to 11x and the exact-tie rate from 5.7%
+    to 0.9%.
     """
     now = now or datetime.now(timezone.utc)
     vec = {s: 0.0 for s in _ALL_SLUGS}
     for sig in sigs:
+        if not sig.emotions:
+            continue
         w = recency_weight((now - sig.ts).days) if weighted else 1.0
+        w /= len(sig.emotions)
         for e in sig.emotions:
             vec[e] += w
     total = sum(vec.values())
@@ -182,11 +219,27 @@ def range_entropy(sigs: list[EntrySig]) -> dict:
 
 
 def blind_spots(sigs: list[EntrySig]) -> list[str]:
-    """Canonical emotions this reader has NEVER tagged, in declaration order."""
+    """Canonical emotions this reader has NEVER tagged, most surprising absence first.
+
+    Ranked by the emotion's rate in ``BASELINE_VECTOR`` — how often readers in
+    general reach for it — because that is what makes an absence a finding. Never
+    tagging Awe (the most common tag) says something about this reader; never
+    tagging Nostalgia (the rarest) says almost nothing, and saying it anyway is how
+    the mirror ends up sounding like a horoscope.
+
+    Previously this returned declaration order and the template took ``[0]``, so a
+    reader missing devastation, grief and joy was told "devastation" — always,
+    because devastation is first in ``EMOTIONS``. That is the archetype tie-break
+    bug one layer up: a real ranking question silently answered by list position.
+
+    Ties break on declaration order, via a stable sort, so the output is
+    deterministic without being decided by it.
+    """
     tagged: set[str] = set()
     for s in sigs:
         tagged.update(s.emotions)
-    return [slug for slug in _ALL_SLUGS if slug not in tagged]
+    never = [slug for slug in _ALL_SLUGS if slug not in tagged]
+    return sorted(never, key=lambda slug: -BASELINE_VECTOR.get(slug, 0.0))
 
 
 def co_occurrence(sigs: list[EntrySig]) -> Counter:
@@ -328,27 +381,65 @@ def stated_vs_revealed(sigs: list[EntrySig], reads_for: list[str] | None) -> dic
     )
 
 
+# Books that were opened. `want_to_read` is excluded from the abandonment
+# denominator entirely: a book on the pile was never started, so it can neither
+# be abandoned nor finished, and counting it as "not finished" inflated the
+# denominator with books the reader never opened.
+#
+# `paused` COUNTS AS ABANDONED here. A paused book is one the reader stopped
+# reading; the distinction between "paused" and "abandoned" is largely how
+# generous the reader feels about their own intentions at the moment they tap it,
+# and treating it as a finish would make the rate an undercount. `reading` also
+# counts in the denominator but not as abandoned — it is genuinely in progress.
+_OPENED_STATUSES = frozenset({"reading", "finished", "abandoned", "paused", "reread"})
+_DNF_STATUSES = frozenset({"abandoned", "paused"})
+
+
 def abandonment(sigs: list[EntrySig]) -> dict | None:
     """Which emotion correlates with NOT finishing (B7.2).
 
-    DNF is proxied by status != 'finished' — there is no explicit DNF flag yet;
-    a real "why did you stop?" capture is a future input-surface win (Part 1).
+    Matches on the explicit status. Migration 022 widened the status constraint to
+    include 'abandoned' and 'paused' and added a `dnf_reason` column, so the old
+    "there is no explicit DNF flag yet" proxy of `status != 'finished'` is simply
+    stale — it counted `reread` (a book finished twice!) and `want_to_read` (never
+    opened) as abandonments.
+
+    Returns the emotion whose DNF rate most exceeds the reader's overall rate, plus
+    the most common stated reason among those books when there is one.
     """
-    unfinished = [s for s in sigs if s.status != "finished"]
-    if len(unfinished) < 3:
+    opened = [s for s in sigs if s.status in _OPENED_STATUSES]
+    if not opened:
         return None
-    overall_rate = len(unfinished) / len(sigs)
+    dnf = [s for s in opened if s.status in _DNF_STATUSES]
+    if len(dnf) < 3:
+        return None
+
+    overall_rate = len(dnf) / len(opened)
     best_slug, best_rate = None, overall_rate
     for slug in _ALL_SLUGS:
-        tagged = [s for s in sigs if slug in s.emotions]
+        tagged = [s for s in opened if slug in s.emotions]
         if len(tagged) < 3:
             continue
-        rate = sum(1 for s in tagged if s.status != "finished") / len(tagged)
+        rate = sum(1 for s in tagged if s.status in _DNF_STATUSES) / len(tagged)
         if rate > best_rate:
             best_slug, best_rate = slug, rate
     if best_slug is None:
         return None
-    return {"emotion": best_slug, "fraction": round(best_rate, 2)}
+
+    # The reader's own words for why, when they gave them. Only counted on the
+    # abandoned books carrying this emotion — that is what the sentence is about.
+    reasons = Counter(
+        s.dnf_reason for s in dnf
+        if best_slug in s.emotions and s.dnf_reason
+    )
+    top_reason, reason_books = (reasons.most_common(1)[0] if reasons else (None, 0))
+
+    return {
+        "emotion": best_slug,
+        "fraction": round(best_rate, 2),
+        "dnf_reason": top_reason,
+        "dnf_reason_books": reason_books,
+    }
 
 
 def arc_shape(sigs: list[EntrySig]) -> dict | None:
@@ -375,6 +466,56 @@ def seasonality(sigs: list[EntrySig]) -> dict | None:
 
 _TYPES_BY_ID = {t["id"]: t for t in PERSONALITY_TYPES}
 
+# The population's mean emotion vector. Every archetype's score is measured as
+# DEVIATION from what this baseline would already give it, because the raw sum is
+# not comparable between archetypes: they hold emotions with wildly different base
+# rates, and two of them hold an anti-emotion from the "It lost me" family that
+# nobody ever tags, so their penalty term is free.
+#
+# Uncentered, the leader was not the archetype that fit the reader — it was the
+# one holding the most commonly-tagged emotions. `control_intellectual`
+# (recognition + dread + awe, and its only live anti is catharsis) took 43% of
+# simulated readers against a 12.5% fair share, and a reader with an exactly even
+# spread across all 14 experiential tags produced a FIVE-WAY tie that
+# `PERSONALITY_TYPES` list order silently resolved in its favour.
+#
+# Recompute from real users once there are enough of them (see
+# scripts/refresh_archetype_baseline.py). Until then this prior is a stand-in, and
+# a wrong baseline is still strictly better than none: centering on the wrong
+# numbers costs a few points of fairness, centering on nothing costs 10x.
+BASELINE_VECTOR: dict[str, float] = {
+    "awe": 0.126, "longing": 0.099, "devastation": 0.094, "joy": 0.089,
+    "recognition": 0.081, "tenderness": 0.081, "dread": 0.077, "grief": 0.074,
+    "desire": 0.069, "rage": 0.052, "catharsis": 0.049, "amusement": 0.032,
+    "comfort": 0.032, "nostalgia": 0.024, "boredom": 0.005, "revulsion": 0.005,
+    "confusion": 0.005, "indifference": 0.005,
+}
+
+# Below this gap the leader has not earned the noun outright, and the caller shows
+# the runner-up alongside it. This is a HEDGE, not an abstention: a reader who is
+# genuinely between two archetypes should be told which two, not handed a blank.
+# Abstention is reserved for having no signal at all.
+HEDGE_ARCHETYPE_GAP = 0.05
+
+# Emotions that anchor at least one archetype. A reader whose entire vector sits
+# outside this set (only "It lost me" tags) has told us what bored them and nothing
+# about who they are — that is an abstention, not a score of zero.
+_ANCHOR_SLUGS = frozenset(
+    e for t in PERSONALITY_TYPES for e in t["primary_emotions"]
+)
+
+
+def _raw_archetype_score(freq: dict[str, float], t: dict) -> float:
+    s = sum(freq.get(e, 0.0) for e in t["primary_emotions"])
+    s -= 0.5 * sum(freq.get(e, 0.0) for e in t.get("anti_emotions", []))
+    return s
+
+
+# What each archetype scores on the average reader — the constant we subtract.
+_BASELINE_OFFSET: dict[str, float] = {
+    t["id"]: _raw_archetype_score(BASELINE_VECTOR, t) for t in PERSONALITY_TYPES
+}
+
 
 def score_archetype(
     current_freq: dict[str, float],
@@ -382,23 +523,34 @@ def score_archetype(
     """Score the 8 archetypes against the CURRENT (recency-weighted) vector, so the
     headline can actually change as the reader changes.
 
-    Returns (best_id | None, scores, margin). best_id is None when the reader has
-    given us nothing to go on — an empty tally must not fall through to whichever
-    archetype happens to be first in the list. ``margin`` is how far the leader
-    clears the runner-up, as a fraction of the leader's own score: 0.0 means a tie,
-    and a small value means the label is a coin-flip the caller should hedge.
+    Scores are centered on ``BASELINE_VECTOR``: a score of 0.0 means "exactly what
+    the average reader would score here", positive means this reader leans that way
+    more than most, negative less. They are therefore signed, and the old
+    ``top <= 0`` abstention rule would have thrown away every reader who is simply
+    less extreme than average.
+
+    Returns (best_id | None, scores, gap). ``best_id`` is None in exactly one case:
+    the reader's vector carries no anchor slug at all, meaning they have told us
+    only what bored them. There is NO gap-based abstention — a close race still
+    names a leader.
+
+    ``gap`` is the absolute lead over second place, in the same units as the
+    frequency vector, so it is comparable between readers. When it falls below
+    ``HEDGE_ARCHETYPE_GAP`` the label still stands but the caller shows the
+    runner-up next to it. That is a hedge, not an abstention: a reader genuinely
+    between two archetypes should be told which two, not handed a blank.
     """
-    scores: dict[str, float] = {}
-    for t in PERSONALITY_TYPES:
-        s = sum(current_freq.get(e, 0.0) for e in t["primary_emotions"])
-        s -= 0.5 * sum(current_freq.get(e, 0.0) for e in t.get("anti_emotions", []))
-        scores[t["id"]] = round(s, 4)
+    scores: dict[str, float] = {
+        t["id"]: round(_raw_archetype_score(current_freq, t) - _BASELINE_OFFSET[t["id"]], 4)
+        for t in PERSONALITY_TYPES
+    }
+
+    if sum(current_freq.get(s, 0.0) for s in _ANCHOR_SLUGS) <= 0:
+        return None, scores, 0.0
 
     ranked = sorted(scores.items(), key=lambda kv: -kv[1])
     (best, top), (_, second) = ranked[0], ranked[1]
-    if top <= 0:
-        return None, scores, 0.0
-    return best, scores, round((top - second) / top, 4)
+    return best, scores, round(top - second, 4)
 
 
 def basis_for(archetype_id: str, sigs: list[EntrySig]) -> dict:
