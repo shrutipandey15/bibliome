@@ -529,13 +529,16 @@ def score_archetype(
     ``top <= 0`` abstention rule would have thrown away every reader who is simply
     less extreme than average.
 
-    Returns (best_id | None, scores, gap). ``best_id`` is None when the reader has
-    tagged nothing at all, or when the leader fails to clear the runner-up by
-    ``MIN_ARCHETYPE_GAP`` — an unearned label is worse than an honest blank.
+    Returns (best_id | None, scores, gap). ``best_id`` is None in exactly one case:
+    the reader's vector carries no anchor slug at all, meaning they have told us
+    only what bored them. There is NO gap-based abstention — a close race still
+    names a leader.
+
     ``gap`` is the absolute lead over second place, in the same units as the
     frequency vector, so it is comparable between readers. When it falls below
     ``HEDGE_ARCHETYPE_GAP`` the label still stands but the caller shows the
-    runner-up next to it.
+    runner-up next to it. That is a hedge, not an abstention: a reader genuinely
+    between two archetypes should be told which two, not handed a blank.
     """
     scores: dict[str, float] = {
         t["id"]: round(_raw_archetype_score(current_freq, t) - _BASELINE_OFFSET[t["id"]], 4)
