@@ -8,6 +8,8 @@ in-app while their share link confidently labelled them. These are the guards.
 
 import pytest
 
+from app.services.dna_signals import HEDGE_ARCHETYPE_GAP
+
 pytestmark = pytest.mark.asyncio
 
 
@@ -52,10 +54,41 @@ async def test_public_card_matches_in_app_archetype(client):
     assert card["archetype_scores"] == in_app["archetype_scores"]
     assert card["margin"] == in_app["margin"]
     assert card["book_count"] == in_app["book_count"]
+    # Same reader, same confidence. Dropping runner_up from the card let a public
+    # surface assert the noun flatly for a reader the engine chose to hedge.
+    assert card["runner_up"] == in_app["runner_up"]
     assert card["handle"] and card["share_token"] == token
     # The legacy shape is gone: `stats` was always {} because the old engine had
     # no such key, and `personality` is now `archetype`.
     assert "stats" not in card and "personality" not in card
+
+
+async def test_public_card_hedges_when_the_in_app_mirror_hedges(client):
+    """A hedged reader must be hedged on every surface that names them.
+
+    The engine decides a close call is too close to assert; the card is a render
+    of that decision, not a second opinion with more confidence than the first.
+    """
+    h = await _user(client, "hedged")
+    # grief_romantic and control_intellectual held to a gap of ~0.0006, well inside
+    # HEDGE_ARCHETYPE_GAP, so build_dna fills in a runner-up. Asserted rather than
+    # skipped-if-absent: a guard that quietly opts out when its own fixture drifts
+    # is not a guard.
+    for i in range(6):
+        await _add_book(client, h, f"Grief {i}", ["grief", "catharsis", "devastation"])
+    for i in range(8):
+        await _add_book(client, h, f"Control {i}", ["recognition", "dread", "awe"])
+
+    in_app = (await client.get("/api/dna/profile", headers=h)).json()
+    assert in_app["runner_up"], (
+        f"fixture no longer lands in the hedge band (margin {in_app['margin']}, "
+        f"threshold {HEDGE_ARCHETYPE_GAP}) — re-pick the shelf, don't drop the test"
+    )
+
+    token = await _share_token(client, h)
+    card = (await client.get(f"/api/public/shared/{token}")).json()
+    assert card["runner_up"] == in_app["runner_up"]
+    assert card["archetype"]["id"] == in_app["archetype"]["id"]
 
 
 async def test_card_and_profile_signature_agree(client):

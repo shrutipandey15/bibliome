@@ -101,6 +101,13 @@ def card_payload(user: User) -> dict | None:
         "archetype": v2["archetype"],
         "archetype_scores": v2["archetype_scores"],
         "margin": v2.get("margin"),
+        # The hedge has to travel with the label. build_dna decides a close call is
+        # too close to assert outright and names the runner-up; a card that drops
+        # it asserts the noun flatly for exactly the readers the engine was least
+        # sure about. Same reader, two surfaces, different confidence is the same
+        # class of bug as P0-1 — the numbers agreeing is not enough if the hedging
+        # doesn't.
+        "runner_up": v2.get("runner_up"),
         "basis": v2.get("basis"),
         "book_count": v2["book_count"],
         # Books only, deliberately: `profiles.current` spans the journal, and a
