@@ -215,3 +215,53 @@ def test_blind_spot_order_survives_a_permutation_of_EMOTIONS(monkeypatch):
         assert S.blind_spots(sigs) == baseline, (
             f"blind-spot order changed under EMOTIONS permutation seed={seed}"
         )
+
+
+# ── A gate counts the books that could have evidenced THAT claim ──
+
+def _arc(em, days_ago, start=None, end=None):
+    return EntrySig(emotions=list(em), intensity=7, ts=NOW - timedelta(days=days_ago),
+                    status="finished", arc_start=start, arc_end=end)
+
+
+def _arc_shelf():
+    """5 tagged books carrying no arc, 20 untagged books carrying one.
+
+    arc_shape reads arc_start/arc_end and never looks at emotions, so this
+    reader's arc finding rests on 20 books — but every other insight here rests
+    on 5.
+    """
+    sigs = [_arc(["joy"], 10 + i) for i in range(5)]
+    sigs += [_arc([], 50 + i, "dread", "catharsis") for i in range(20)]
+    return sigs
+
+
+def test_arc_insight_reports_its_own_denominator_not_the_tagged_count():
+    """`n` is the population the claim covers, and for arc that is arc books.
+
+    Phase 3 moved every gate and every `n` onto tagged_count, which is right for
+    claims about emotions and wrong for this one. Reporting n=5 under a finding
+    computed from 20 books understates the reader's own evidence.
+    """
+    dna = _dna(_arc_shelf())
+    arc = next(i for i in dna["insights"] if i["category"] == "arc")
+    assert arc["n"] == 20, f"arc claim covers 20 books but reports n={arc['n']}"
+
+
+def test_arc_copy_names_the_population_it_measured():
+    """fraction is over books with arc data, not over books finished."""
+    dna = _dna(_arc_shelf())
+    arc = next(i for i in dna["insights"] if i["category"] == "arc")
+    assert "books you finish" not in arc["text"], (
+        f"arc copy claims a denominator it did not measure: {arc['text']!r}"
+    )
+
+
+def test_emotion_claims_still_report_the_tagged_count():
+    """The per-category denominator must not leak into the emotion insights."""
+    dna = _dna(_arc_shelf())
+    for insight in dna["insights"]:
+        if insight["category"] != "arc":
+            assert insight["n"] == 5, (
+                f"{insight['category']} reports n={insight['n']}, not the 5 tagged books"
+            )
