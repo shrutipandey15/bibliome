@@ -72,16 +72,62 @@ def test_no_archetype_dominates_a_correlated_population():
     )
 
 
-def test_balanced_reader_is_not_handed_a_label_by_list_order():
-    """A reader with an even spread across every experiential tag has no archetype.
+def test_balanced_reader_is_not_handed_a_label_by_list_order(monkeypatch):
+    """A reader with an even spread across every experiential tag must not be
+    labelled by position in PERSONALITY_TYPES.
 
-    Uncentered this produced a five-way tie at 0.1786 that PERSONALITY_TYPES order
-    silently resolved into control_intellectual.
+    Uncentered this produced a five-way tie at 0.1786 that list order silently
+    resolved into control_intellectual.
+
+    This asserts the absence of a TIE, not a small gap. The original version of
+    this test required the gap to fall under HEDGE_ARCHETYPE_GAP, on the reasoning
+    that this is "the most average reader possible" — but that stopped being true
+    the moment scores were centered. Average now means BASELINE_VECTOR, which is
+    nowhere near flat (awe 0.126 against nostalgia 0.024), so a reader who tags all
+    14 experiential emotions equally is genuinely unusual and genuinely leans
+    somewhere. Their lead of ~0.024 sits above the 40th percentile of the gap
+    distribution. Demanding it be hedged would mean setting the hedge threshold
+    above the median, which is what made the hedge meaningless in the first place.
     """
-    best, scores, gap = score_archetype(_norm(Counter(dict.fromkeys(EXPERIENTIAL, 1))))
-    assert gap < S.HEDGE_ARCHETYPE_GAP, (
-        f"the most average reader possible leads by {gap}, which would be "
-        "presented as a decided label"
+    vec = _norm(Counter(dict.fromkeys(EXPERIENTIAL, 1)))
+    best, scores, gap = score_archetype(vec)
+    ranked = sorted(scores.values(), reverse=True)
+    assert ranked[0] != ranked[1], (
+        "the balanced reader is an exact tie, so the winner is decided by "
+        "PERSONALITY_TYPES order rather than by the reader"
+    )
+
+    # The strong form: permuting the table must not change who wins. Ties break on
+    # insertion order, so if any part of this result rests on list position, a
+    # shuffle will expose it.
+    shuffled = list(PERSONALITY_TYPES)
+    for seed in range(8):
+        random.Random(seed).shuffle(shuffled)
+        monkeypatch.setattr(S, "PERSONALITY_TYPES", shuffled)
+        assert score_archetype(vec)[0] == best, (
+            f"winner changed under a PERSONALITY_TYPES permutation (seed={seed})"
+        )
+
+
+def test_hedge_fires_on_a_minority_of_readers():
+    """The hedge must stay an exception, or it stops carrying information.
+
+    HEDGE_ARCHETYPE_GAP is an absolute cut on a quantity whose scale depends on
+    BASELINE_VECTOR and on PERSONALITY_TYPES, so it does not survive changes to
+    either on its own. At 0.05 — carried over by eye from the pre-centering scale,
+    where gaps were fractions of the leader's score — it hedged 69% of readers:
+    every second card said "or maybe this other one", which is not a hedge but a
+    shrug.
+    """
+    readers = list(_correlated_readers(n=3000, seed=5))
+    labelled = [g for g in (score_archetype(v) for v in readers) if g[0] is not None]
+    hedged = sum(1 for _, _, gap in labelled if gap < S.HEDGE_ARCHETYPE_GAP)
+    rate = hedged / len(labelled)
+    assert 0.10 <= rate <= 0.35, (
+        f"hedging {rate:.1%} of labelled readers. Below ~10% the hedge never fires "
+        "and close calls are asserted flatly; above ~35% it is the default state. "
+        "Re-measure with `python -m scripts.dna_bias_probe` and set the threshold "
+        "at a percentile of the gap distribution."
     )
 
 

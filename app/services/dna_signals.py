@@ -495,7 +495,20 @@ BASELINE_VECTOR: dict[str, float] = {
 # the runner-up alongside it. This is a HEDGE, not an abstention: a reader who is
 # genuinely between two archetypes should be told which two, not handed a blank.
 # Abstention is reserved for having no signal at all.
-HEDGE_ARCHETYPE_GAP = 0.05
+#
+# SET AT A PERCENTILE, NOT A ROUND NUMBER. This is an absolute cut on `gap`, and
+# centering moved `gap` onto a far smaller scale than the old fraction-of-leader
+# margin lived on. The first value here (0.05) was carried over by eye from the old
+# scale, where it sat above the median gap of 0.031 — so it hedged 69% of labelled
+# readers. A hedge that fires on two readers in three is not a hedge; it is the
+# default state, and it stops carrying information precisely when it matters.
+#
+# 0.012 is the ~22nd percentile of the gap distribution on correlated readers
+# (p20 = 0.0105, p25 = 0.0133), measured with `python -m scripts.dna_bias_probe`.
+# Stable at 20-25% across seeds and tag-count spread. Re-run that probe before
+# changing this, and re-run it after ANY change to PERSONALITY_TYPES or
+# BASELINE_VECTOR — both move the gap distribution underneath this number.
+HEDGE_ARCHETYPE_GAP = 0.012
 
 # Emotions that anchor at least one archetype. A reader whose entire vector sits
 # outside this set (only "It lost me" tags) has told us what bored them and nothing
@@ -535,10 +548,16 @@ def score_archetype(
     names a leader.
 
     ``gap`` is the absolute lead over second place, in the same units as the
-    frequency vector, so it is comparable between readers. When it falls below
-    ``HEDGE_ARCHETYPE_GAP`` the label still stands but the caller shows the
-    runner-up next to it. That is a hedge, not an abstention: a reader genuinely
-    between two archetypes should be told which two, not handed a blank.
+    frequency vector, so it is comparable between readers. It is NOT a fraction of
+    the leader's score — that quantity is meaningless once scores are centered and
+    the leader can be negative — so it lives on the scale of the frequency vector
+    itself, where a typical lead is ~0.03 rather than ~0.3.
+
+    When ``gap`` falls below ``HEDGE_ARCHETYPE_GAP`` the label still stands but the
+    caller shows the runner-up next to it. That is a hedge, not an abstention: a
+    reader genuinely between two archetypes should be told which two, not handed a
+    blank. The threshold is a percentile of the measured gap distribution, so it
+    hedges roughly the closest fifth of readers rather than a majority of them.
     """
     scores: dict[str, float] = {
         t["id"]: round(_raw_archetype_score(current_freq, t) - _BASELINE_OFFSET[t["id"]], 4)

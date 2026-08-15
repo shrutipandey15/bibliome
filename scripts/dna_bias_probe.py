@@ -21,6 +21,7 @@ from datetime import datetime, timedelta, timezone
 from app.services.dna_engine import PERSONALITY_TYPES
 from app.services.dna_signals import (
     DRIFT_SNAPSHOT_THRESHOLD,
+    HEDGE_ARCHETYPE_GAP,
     GATES,
     EntrySig,
     _ALL_SLUGS,
@@ -392,6 +393,82 @@ def drift_threshold(n_readers: int = 20_000, seed: int = 13) -> float:
     return best
 
 
+# ── Hedge rate ──
+#
+# HEDGE_ARCHETYPE_GAP is an absolute cut on `gap`, and centering moved `gap` onto a
+# much smaller scale than the old fraction-of-leader margin lived on. A constant
+# picked by eye on the old scale is meaningless on the new one: 0.05 sat above the
+# median (0.031), so it hedged 69% of readers and the hedge became the default
+# state rather than an exception. A hedge that fires on most readers tells nobody
+# anything.
+#
+# Set this at a PERCENTILE of the gap distribution, not at a round number.
+
+HEDGE_CANDIDATES = [0.008, 0.010, 0.011, 0.012, 0.013, 0.015, 0.020, 0.025, 0.031, 0.05]
+
+
+def _labelled_gaps(n_readers: int, seed: int, keep: float) -> list[float]:
+    """Sorted `gap` for every reader the scorer actually names.
+
+    Abstentions are excluded: they are handed a blank, not a hedge, so including
+    them would understate the rate among readers who see a label at all.
+    """
+    random.seed(seed)
+    keys = list(BOOK_BUNDLES)
+    out: list[float] = []
+    for _ in range(n_readers):
+        taste = [random.gammavariate(2, 1) for _ in keys]
+        counts: Counter = Counter()
+        for _book in range(random.randint(10, 50)):
+            tags = [s for s in BOOK_BUNDLES[random.choices(keys, weights=taste)[0]]
+                    if random.random() < keep]
+            if random.random() < 0.07:
+                tags.append(random.choice(LOST_ME))
+            if not tags:
+                continue
+            for slug in tags:
+                counts[slug] += 1.0 / len(tags)
+        best, _, gap = score_archetype(_norm(counts))
+        if best is not None:
+            out.append(gap)
+    return sorted(out)
+
+
+def _pctile(xs: list[float], p: float) -> float:
+    return xs[min(len(xs) - 1, int(p / 100.0 * len(xs)))]
+
+
+def _hedge_rate(xs: list[float], t: float) -> float:
+    return sum(1 for g in xs if g < t) / len(xs)
+
+
+def hedge_rate(n_readers: int = 20_000, seed: int = 5) -> None:
+    xs = _labelled_gaps(n_readers, seed, keep=0.75)
+    print("\nHEDGE RATE (how often the card shows a runner-up)")
+    print("-" * 62)
+    print(f"  labelled readers: {len(xs)}   median gap {_pctile(xs, 50):.4f}")
+    print(f"  current HEDGE_ARCHETYPE_GAP = {HEDGE_ARCHETYPE_GAP} -> hedges "
+          f"{_hedge_rate(xs, HEDGE_ARCHETYPE_GAP):.1%}")
+    print(f"\n  {'percentile':>10}  {'gap':>8}")
+    for p in (5, 10, 15, 20, 25, 30, 40, 50, 75, 90):
+        print(f"  {'p' + str(p):>10}  {_pctile(xs, p):>8.4f}")
+    print(f"\n  {'candidate':>10}  {'hedge rate':>11}")
+    for t in HEDGE_CANDIDATES:
+        mark = "  <-- current" if t == HEDGE_ARCHETYPE_GAP else ""
+        print(f"  {t:>10.3f}  {_hedge_rate(xs, t):>10.1%}{mark}")
+
+    print("\n  stability of the current value across seeds and tag-count spread")
+    print(f"  {'variant':<20} {'median':>8} {'p20':>8} {'p25':>8} {'rate':>8}")
+    for label, seed_, keep in (("seed=5  keep=0.75", 5, 0.75),
+                               ("seed=11 keep=0.75", 11, 0.75),
+                               ("seed=77 keep=0.75", 77, 0.75),
+                               ("seed=5  keep=0.50", 5, 0.50),
+                               ("seed=5  keep=0.90", 5, 0.90)):
+        ys = _labelled_gaps(8000, seed_, keep)
+        print(f"  {label:<20} {_pctile(ys,50):>8.4f} {_pctile(ys,20):>8.4f} "
+              f"{_pctile(ys,25):>8.4f} {_hedge_rate(ys, HEDGE_ARCHETYPE_GAP):>7.1%}")
+
+
 def main() -> int:
     uniform_reader()
     tie_rate()
@@ -399,6 +476,7 @@ def main() -> int:
     family_ownership()
     independent_population()
     shares = correlated_population()
+    hedge_rate()
     drift_threshold()
 
     worst = sorted(shares.items(), key=lambda kv: -abs(kv[1] - FAIR))
