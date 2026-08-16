@@ -10,7 +10,9 @@ from app.models.entry_checkin import EntryCheckin
 from app.models.echo import Echo, EchoReply, EchoReaction
 from app.models.social import Block, Mute, Report, HandleHistory
 from app.models.notification import Notification, NotificationPrefs, NotificationDigest
-from app.models.collection import Collection, CollectionItem
+from app.models.collection import (
+    Collection, CollectionInvite, CollectionItem, CollectionMember,
+)
 from app.models.prompt import Prompt
 from app.models.journal import JournalEntry, JournalEmotion, JournalKeyBundle
 from app.models.resonance import ResonanceMatch, ResonanceMessage, ResonanceThread
@@ -38,6 +40,8 @@ __all__ = [
     "NotificationDigest",
     "Collection",
     "CollectionItem",
+    "CollectionMember",
+    "CollectionInvite",
     "Prompt",
     "JournalEntry",
     "JournalEmotion",

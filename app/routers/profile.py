@@ -8,8 +8,14 @@ from app.database import get_db
 from app.middleware.auth import get_current_user
 from app.models.user import User
 from app.schemas.profile import (
+    CollectionBookAdd,
     CollectionCreate,
+    CollectionInviteCreate,
+    CollectionInvitePeek,
+    CollectionInviteResponse,
     CollectionItemAdd,
+    CollectionJoinResponse,
+    CollectionMemberResponse,
     CollectionReorder,
     CollectionResponse,
     CollectionUpdate,
@@ -17,12 +23,23 @@ from app.schemas.profile import (
 )
 from app.services.collection_service import (
     CollectionError,
+    CollectionForbidden,
+    add_book,
     add_item,
     create_collection,
+    create_invite,
     delete_collection,
+    ensure_owner_membership,
     get_owned_collection,
+    get_visible_collection,
+    list_members,
+    peek_invite,
+    redeem_invite,
+    remove_book,
     remove_item,
+    remove_member,
     reorder_items,
+    revoke_invite,
     update_collection,
 )
 from app.services.handle_service import resolve_handle
@@ -164,3 +181,187 @@ async def reorder_collection(
 ):
     c = await _owned_or_404(db, collection_id, current_user.id)
     await reorder_items(db, c, data.entry_ids)
+
+
+# ── Shared collections (#5) ──
+#
+# Owner-only routes keep using `_owned_or_404`. Anything a member can reach goes
+# through `_visible_or_404`, so membership is the single gate.
+
+async def _visible_or_404(db: AsyncSession, collection_id: uuid.UUID, user_id: uuid.UUID):
+    c, member = await get_visible_collection(db, collection_id, user_id)
+    if c is None:
+        # 404, not 403: a non-member must not be able to probe which collection
+        # ids exist.
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Collection not found")
+    return c, member
+
+
+@router.post(
+    "/collections/{collection_id}/invites",
+    response_model=CollectionInviteResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_collection_invite(
+    collection_id: uuid.UUID,
+    data: CollectionInviteCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Mint an invite link. Owner only.
+
+    The raw token is in this response and nowhere else — only its hash is stored,
+    so it can never be read back. Losing it means minting another.
+    """
+    c = await _owned_or_404(db, collection_id, current_user.id)
+    await ensure_owner_membership(db, c)
+    try:
+        invite, raw = await create_invite(
+            db, c, current_user.id,
+            expires_at=data.expires_at, max_uses=data.max_uses,
+        )
+    except CollectionError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    return CollectionInviteResponse(
+        id=invite.id,
+        token=raw,
+        expires_at=invite.expires_at,
+        max_uses=invite.max_uses,
+    )
+
+
+@router.delete(
+    "/collections/{collection_id}/invites/{invite_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def revoke_collection_invite(
+    collection_id: uuid.UUID,
+    invite_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Kill a link. Already-joined members stay — revoking is about the door, not
+    the people who came through it."""
+    c = await _owned_or_404(db, collection_id, current_user.id)
+    await revoke_invite(db, c, invite_id)
+
+
+@router.get("/collections/invites/{token}", response_model=CollectionInvitePeek)
+async def peek_collection_invite(
+    token: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """What this link points at, without joining — so the join screen can name
+    the collection instead of asking someone to accept a blind invitation."""
+    c = await peek_invite(db, token)
+    if c is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="This invite has expired or been revoked",
+        )
+    members = await list_members(db, c.id)
+    return CollectionInvitePeek(
+        collection_id=c.id,
+        title=c.title,
+        description=c.description,
+        member_count=len(members),
+        book_count=len(c.items),
+        already_member=any(m.user_id == current_user.id for m in members),
+    )
+
+
+@router.post("/collections/invites/{token}/join", response_model=CollectionJoinResponse)
+async def join_collection(
+    token: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Join by link. Clicking twice is not an error — it reports joined:false."""
+    c, joined = await redeem_invite(db, token, current_user.id)
+    if c is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="This invite has expired or been revoked",
+        )
+    return CollectionJoinResponse(collection_id=c.id, title=c.title, joined=joined)
+
+
+@router.get(
+    "/collections/{collection_id}/members",
+    response_model=list[CollectionMemberResponse],
+)
+async def get_collection_members(
+    collection_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Who is in here. Members only — the list is not public."""
+    await _visible_or_404(db, collection_id, current_user.id)
+    return [
+        CollectionMemberResponse(
+            user_id=m.user_id,
+            handle=getattr(m.user, "handle", None),
+            role=m.role,
+            joined_at=m.joined_at,
+        )
+        for m in await list_members(db, collection_id)
+    ]
+
+
+@router.delete(
+    "/collections/{collection_id}/members/{user_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def remove_collection_member(
+    collection_id: uuid.UUID,
+    user_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Remove a member, or leave yourself. The owner can do the former; anyone
+    can do the latter to themselves. The owner cannot leave their own collection.
+    """
+    c, _ = await _visible_or_404(db, collection_id, current_user.id)
+    if user_id != current_user.id and current_user.id != c.user_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only the owner can remove other members",
+        )
+    try:
+        await remove_member(db, c, user_id)
+    except CollectionForbidden as e:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e))
+
+
+@router.post("/collections/{collection_id}/books", status_code=status.HTTP_204_NO_CONTENT)
+async def add_collection_book(
+    collection_id: uuid.UUID,
+    data: CollectionBookAdd,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Add a book by canonical id. Any member may add."""
+    c, _ = await _visible_or_404(db, collection_id, current_user.id)
+    try:
+        await add_book(db, c, data.book_id, current_user.id)
+    except CollectionError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+
+@router.delete(
+    "/collections/{collection_id}/books/{book_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def delete_collection_book(
+    collection_id: uuid.UUID,
+    book_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Remove a book. Members may remove only what they added; the owner, any."""
+    c, _ = await _visible_or_404(db, collection_id, current_user.id)
+    try:
+        await remove_book(db, c, book_id, current_user.id)
+    except CollectionForbidden as e:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e))
