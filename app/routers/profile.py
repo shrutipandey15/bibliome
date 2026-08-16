@@ -1,14 +1,33 @@
 import re
 import uuid
+from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.middleware.auth import get_current_user
+from app.middleware.rate_limit import RateLimiter
+from app.models.notification import TIER_DIRECT
 from app.models.user import User
+from app.services.collection_chat_service import (
+    MESSAGE_PAGE_DEFAULT,
+    MESSAGE_PAGE_MAX,
+    ChatError,
+    ChatRefused,
+    book_is_in_collection,
+    list_conversations,
+    list_messages,
+)
+from app.services.collection_chat_service import delete_message as delete_chat_message
+from app.services.collection_chat_service import notify_targets as chat_notify_targets
+from app.services.collection_chat_service import post_message as post_chat_message
+from app.services.moderation import CRISIS_RESOURCES, VERDICT_CRISIS, submit_report
+from app.services.notification_service import notify
 from app.schemas.profile import (
     CollectionBookAdd,
+    CollectionConversation,
     CollectionCreate,
     CollectionInviteCreate,
     CollectionInvitePeek,
@@ -16,6 +35,9 @@ from app.schemas.profile import (
     CollectionItemAdd,
     CollectionJoinResponse,
     CollectionMemberResponse,
+    CollectionMessageCreate,
+    CollectionMessageList,
+    CollectionMessageResponse,
     CollectionReorder,
     CollectionResponse,
     CollectionUpdate,
@@ -365,3 +387,179 @@ async def delete_collection_book(
         await remove_book(db, c, book_id, current_user.id)
     except CollectionForbidden as e:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e))
+
+
+# ── Collection chat (#6) ──
+#
+# Routed under the collection and anchored to a book. There is deliberately no
+# "general" room: a collection is a set of books, and a general channel would
+# turn it into a group chat that happens to have books in it.
+
+chat_limiter = RateLimiter(max_requests=120, window_seconds=3600, prefix="collection_msg")
+
+
+@router.get(
+    "/collections/{collection_id}/conversations",
+    response_model=list[CollectionConversation],
+)
+async def get_collection_conversations(
+    collection_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Every book in the collection, with when it was last spoken about.
+
+    Books with nothing said yet are included — this shows where a conversation
+    *could* start, not only where one already has.
+    """
+    c, _ = await _visible_or_404(db, collection_id, current_user.id)
+    return [CollectionConversation(**row) for row in await list_conversations(db, c, current_user.id)]
+
+
+@router.get(
+    "/collections/{collection_id}/books/{book_id}/messages",
+    response_model=CollectionMessageList,
+)
+async def get_collection_messages(
+    collection_id: uuid.UUID,
+    book_id: uuid.UUID,
+    before: datetime | None = Query(default=None, description="Page backward from this timestamp"),
+    before_id: uuid.UUID | None = Query(default=None, description="Tie-breaker for `before`"),
+    limit: int = Query(default=MESSAGE_PAGE_DEFAULT, ge=1, le=MESSAGE_PAGE_MAX),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """One book's conversation, oldest-first. Page backward with `before` +
+    `before_id`.
+
+    History survives the book leaving the collection, but is only *reachable*
+    while it is in — so this 404s for a book the collection no longer holds,
+    rather than serving a room nobody can post to.
+    """
+    c, _ = await _visible_or_404(db, collection_id, current_user.id)
+    if not await book_is_in_collection(db, c.id, book_id):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="That book isn't in this collection",
+        )
+
+    messages = await list_messages(
+        db, c.id, book_id, current_user.id, limit=limit, before=before, before_id=before_id,
+    )
+
+    # One lookup for every handle on the page, rather than per message.
+    sender_ids = {m.sender_id for m in messages}
+    handles = dict((await db.execute(
+        select(User.id, User.handle).where(User.id.in_(sender_ids))
+    )).all()) if sender_ids else {}
+
+    return CollectionMessageList(
+        messages=[
+            CollectionMessageResponse(
+                id=m.id,
+                book_id=m.book_id,
+                handle=handles.get(m.sender_id),
+                is_mine=m.sender_id == current_user.id,
+                body=m.body,
+                created_at=m.created_at,
+            )
+            for m in messages
+        ],
+        # Only offered on a full page — a short page is the start of the
+        # conversation, and there is nothing further back to ask for.
+        next_before=messages[0].created_at if len(messages) == limit else None,
+        next_before_id=messages[0].id if len(messages) == limit else None,
+    )
+
+
+@router.post(
+    "/collections/{collection_id}/books/{book_id}/messages",
+    response_model=CollectionMessageResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def post_collection_message(
+    collection_id: uuid.UUID,
+    book_id: uuid.UUID,
+    data: CollectionMessageCreate,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Say something about a book in this collection. Any member may."""
+    c, _ = await _visible_or_404(db, collection_id, current_user.id)
+    await chat_limiter.check_key(str(current_user.id))
+
+    try:
+        message, verdict = await post_chat_message(db, c, book_id, current_user.id, data.body)
+    except ChatRefused as e:
+        # 422, not 400: the request was well-formed, the content is what was
+        # refused. The sender is told plainly rather than left to wonder whether
+        # it sent.
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e))
+    except ChatError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+    # Membership is read live, so someone who left stops being notified about a
+    # room they can no longer open. `notify` drops self- and blocked-pairs too.
+    for uid in await chat_notify_targets(db, c.id, current_user.id):
+        await notify(
+            db, uid, TIER_DIRECT, "collection_message",
+            {"collection_id": str(c.id), "book_id": str(book_id)},
+            # Coalesce a burst into one nudge per book — the conversation is the
+            # place to read them, not the notification list.
+            batch_key=f"collection_message:{c.id}:{book_id}",
+            actor_id=current_user.id,
+        )
+
+    return CollectionMessageResponse(
+        id=message.id,
+        book_id=message.book_id,
+        handle=current_user.handle,
+        is_mine=True,
+        body=message.body,
+        created_at=message.created_at,
+        crisis=dict(CRISIS_RESOURCES) if verdict == VERDICT_CRISIS else None,
+    )
+
+
+@router.delete(
+    "/collections/{collection_id}/messages/{message_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def delete_collection_message(
+    collection_id: uuid.UUID,
+    message_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Delete a message. Authors may delete their own; the owner, any."""
+    c, _ = await _visible_or_404(db, collection_id, current_user.id)
+    try:
+        await delete_chat_message(db, c, message_id, current_user.id)
+    except PermissionError as e:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e))
+
+
+@router.post(
+    "/collections/{collection_id}/books/{book_id}/report",
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def report_collection_conversation(
+    collection_id: uuid.UUID,
+    book_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Report a conversation to moderation.
+
+    The whole conversation is the target, not a single message — the same call
+    thread reporting makes, and for the same reason: what is wrong is usually a
+    pattern rather than one line. Reporting does NOT auto-hide the room: a
+    private group must not be silenceable on one member's say-so. Blocking is the
+    remedy the reporter holds themselves.
+    """
+    c, _ = await _visible_or_404(db, collection_id, current_user.id)
+    if not await book_is_in_collection(db, c.id, book_id):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+    await submit_report(db, current_user.id, "collection_conversation", book_id, "conversation")
+    return {"status": "received"}

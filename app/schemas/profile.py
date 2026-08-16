@@ -90,3 +90,40 @@ class CollectionJoinResponse(BaseModel):
     # False when the caller was already a member — clicking a link twice is not
     # an error, and the UI should say "you're already in" rather than "joined".
     joined: bool
+
+
+# ── Collection chat (#6) ──
+
+class CollectionMessageCreate(BaseModel):
+    body: str = Field(min_length=1, max_length=2000)
+
+
+class CollectionMessageResponse(BaseModel):
+    id: uuid.UUID
+    book_id: uuid.UUID
+    handle: str | None
+    is_mine: bool
+    body: str
+    created_at: datetime
+    # Present only when the sender's own words tripped the self-harm classifier.
+    # Returned TO THE SENDER with the message, never to the room.
+    crisis: dict | None = None
+
+
+class CollectionMessageList(BaseModel):
+    messages: list[CollectionMessageResponse]
+    # Cursor for the previous page. Carries BOTH halves of the sort key, because
+    # two messages can share a timestamp and a timestamp-only cursor would skip
+    # or repeat them at the boundary.
+    next_before: datetime | None = None
+    next_before_id: uuid.UUID | None = None
+
+
+class CollectionConversation(BaseModel):
+    """One book in the collection, and whether anyone has spoken about it."""
+    book_id: uuid.UUID
+    title: str
+    author: str | None
+    cover_url: str | None
+    last_message_at: datetime | None
+    message_count: int

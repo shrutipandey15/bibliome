@@ -11,7 +11,7 @@ from app.models.echo import Echo, EchoReply, EchoReaction
 from app.models.social import Block, Mute, Report, HandleHistory
 from app.models.notification import Notification, NotificationPrefs, NotificationDigest
 from app.models.collection import (
-    Collection, CollectionInvite, CollectionItem, CollectionMember,
+    Collection, CollectionInvite, CollectionItem, CollectionMember, CollectionMessage,
 )
 from app.models.prompt import Prompt
 from app.models.journal import JournalEntry, JournalEmotion, JournalKeyBundle
@@ -42,6 +42,7 @@ __all__ = [
     "CollectionItem",
     "CollectionMember",
     "CollectionInvite",
+    "CollectionMessage",
     "Prompt",
     "JournalEntry",
     "JournalEmotion",

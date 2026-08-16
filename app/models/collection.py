@@ -16,7 +16,7 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import (
-    Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, func,
+    Boolean, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint, func,
 )
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -155,3 +155,55 @@ class CollectionInvite(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     collection: Mapped["Collection"] = relationship("Collection", back_populates="invites")
+
+
+class CollectionMessage(Base):
+    """Talk about ONE BOOK inside one collection (#6).
+
+    There is no thread row and no channel. A conversation is identified by the
+    pair ``(collection_id, book_id)`` and comes into existence the moment someone
+    says something. That is the whole design:
+
+    - **No lifecycle to get wrong.** A thread table would have to be created
+      lazily, raced on first message, and reconciled every time a book joins or
+      leaves the collection. The pair cannot drift out of sync with itself.
+    - **Attached to books, not a channel.** A collection is a set of books; the
+      talk hangs off each one. There is deliberately no "general" room — a
+      collection chat with a general channel becomes a group chat that happens to
+      have books in it, which is a different product.
+
+    **Removing the book does not delete the conversation.** ``book_id`` points at
+    the catalog, not at ``collection_items``, so pulling a book out of the
+    collection leaves the words alone — one member must not be able to delete
+    everyone else's writing with a tap meant to tidy a shelf. The conversation
+    becomes unreachable while the book is out, and returns intact if it is added
+    back.
+
+    ``sender_id`` cascades on user delete: authored text goes when the account
+    does. That differs on purpose from ``CollectionItem.added_by`` (SET NULL) —
+    a departing member's *books* are the collection's, their *words* are theirs.
+    """
+
+    __tablename__ = "collection_messages"
+    __table_args__ = (
+        # The read path is always "this book, in this collection, newest first".
+        # created_at + id so keyset paging has a total order and cannot skip or
+        # repeat a message when two land in the same millisecond.
+        Index(
+            "ix_collection_messages_convo",
+            "collection_id", "book_id", "created_at", "id",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    collection_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("collections.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    book_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("books.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    sender_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
