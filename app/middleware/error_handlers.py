@@ -101,9 +101,29 @@ def register_error_handlers(app: FastAPI) -> None:
 
     @app.exception_handler(IntegrityError)
     async def integrity_error_handler(request: Request, exc: IntegrityError):
-        """DB constraint violations → 409 with helpful message."""
-        detail = "A record with this data already exists"
+        """DB constraint violations → 409 with helpful message.
+
+        NOT every IntegrityError is a duplicate. A NOT NULL or foreign-key
+        violation is also one, and reporting those as "already exists" sends
+        whoever is debugging in exactly the wrong direction — it did, once, for a
+        column a pending migration was supposed to have made nullable. Those get
+        a 500, because they mean the server is wrong, not the request.
+        """
         err_str = str(exc.orig) if exc.orig else str(exc)
+
+        if "NotNullViolation" in err_str or "null value in column" in err_str:
+            logger.error(
+                "NOT NULL violation on %s %s — schema likely behind the code; "
+                "check `alembic upgrade head`: %s",
+                request.method, request.url.path, redact_sql_parameters(err_str),
+            )
+            return error_response(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                error="server_error",
+                detail="The server couldn't save that. This has been logged.",
+            )
+
+        detail = "A record with this data already exists"
 
         if "uq_entry_emotion" in err_str:
             detail = "Duplicate emotion on this entry"

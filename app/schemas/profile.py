@@ -92,15 +92,32 @@ class CollectionJoinResponse(BaseModel):
     joined: bool
 
 
+class JoinedCollection(BaseModel):
+    """A collection someone else owns and this reader has joined."""
+    id: uuid.UUID
+    title: str
+    description: str | None
+    owner_handle: str | None
+    joined_at: datetime
+    book_count: int
+    member_count: int
+
+
 # ── Collection chat (#6) ──
 
 class CollectionMessageCreate(BaseModel):
     body: str = Field(min_length=1, max_length=2000)
+    # Optional: a message may point at one of the collection's books. A label on
+    # a message in the one room — never a separate room.
+    book_id: uuid.UUID | None = None
 
 
 class CollectionMessageResponse(BaseModel):
     id: uuid.UUID
-    book_id: uuid.UUID
+    book_id: uuid.UUID | None = None
+    # Denormalised so a message can render its label without the client holding
+    # the whole shelf.
+    book_title: str | None = None
     handle: str | None
     is_mine: bool
     body: str

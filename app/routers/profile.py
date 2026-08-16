@@ -10,6 +10,7 @@ from app.database import get_db
 from app.middleware.auth import get_current_user
 from app.middleware.rate_limit import RateLimiter
 from app.models.notification import TIER_DIRECT
+from app.models.book import Book
 from app.models.user import User
 from app.services.collection_chat_service import (
     MESSAGE_PAGE_DEFAULT,
@@ -17,6 +18,7 @@ from app.services.collection_chat_service import (
     ChatError,
     ChatRefused,
     book_is_in_collection,
+    conversation_sparks,
     list_conversations,
     list_messages,
 )
@@ -41,6 +43,7 @@ from app.schemas.profile import (
     CollectionReorder,
     CollectionResponse,
     CollectionUpdate,
+    JoinedCollection,
     ProfileUpdate,
 )
 from app.services.collection_service import (
@@ -54,6 +57,7 @@ from app.services.collection_service import (
     ensure_owner_membership,
     get_owned_collection,
     get_visible_collection,
+    list_joined_collections,
     list_members,
     peek_invite,
     redeem_invite,
@@ -217,6 +221,19 @@ async def _visible_or_404(db: AsyncSession, collection_id: uuid.UUID, user_id: u
         # ids exist.
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Collection not found")
     return c, member
+
+
+@router.get("/collections/joined", response_model=list[JoinedCollection])
+async def get_joined_collections(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Collections this reader joined but does not own.
+
+    Declared BEFORE `/collections/{collection_id}` routes so "joined" is not
+    swallowed as a collection id.
+    """
+    return [JoinedCollection(**row) for row in await list_joined_collections(db, current_user.id)]
 
 
 @router.post(
@@ -417,47 +434,50 @@ async def get_collection_conversations(
 
 
 @router.get(
-    "/collections/{collection_id}/books/{book_id}/messages",
+    "/collections/{collection_id}/messages",
     response_model=CollectionMessageList,
 )
 async def get_collection_messages(
     collection_id: uuid.UUID,
-    book_id: uuid.UUID,
+    book_id: uuid.UUID | None = Query(default=None, description="Only messages attached to this book"),
     before: datetime | None = Query(default=None, description="Page backward from this timestamp"),
     before_id: uuid.UUID | None = Query(default=None, description="Tie-breaker for `before`"),
+    after: datetime | None = Query(default=None, description="Only what arrived after this — the live poll"),
     limit: int = Query(default=MESSAGE_PAGE_DEFAULT, ge=1, le=MESSAGE_PAGE_MAX),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """One book's conversation, oldest-first. Page backward with `before` +
-    `before_id`.
+    """The collection's room, oldest-first.
 
-    History survives the book leaving the collection, but is only *reachable*
-    while it is in — so this 404s for a book the collection no longer holds,
-    rather than serving a room nobody can post to.
+    One room, not one per book: `book_id` narrows the same room rather than
+    opening a different one. `after` is the live poll — it returns only what has
+    arrived since, so a quiet room is nearly free to watch.
     """
     c, _ = await _visible_or_404(db, collection_id, current_user.id)
-    if not await book_is_in_collection(db, c.id, book_id):
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="That book isn't in this collection",
-        )
 
     messages = await list_messages(
-        db, c.id, book_id, current_user.id, limit=limit, before=before, before_id=before_id,
+        db, c.id, current_user.id, book_id=book_id,
+        limit=limit, before=before, before_id=before_id, after=after,
     )
 
-    # One lookup for every handle on the page, rather than per message.
     sender_ids = {m.sender_id for m in messages}
     handles = dict((await db.execute(
         select(User.id, User.handle).where(User.id.in_(sender_ids))
     )).all()) if sender_ids else {}
+
+    # Titles for attached books, so a message can render its label without the
+    # client holding the whole shelf.
+    book_ids = {m.book_id for m in messages if m.book_id}
+    titles = dict((await db.execute(
+        select(Book.id, Book.title).where(Book.id.in_(book_ids))
+    )).all()) if book_ids else {}
 
     return CollectionMessageList(
         messages=[
             CollectionMessageResponse(
                 id=m.id,
                 book_id=m.book_id,
+                book_title=titles.get(m.book_id),
                 handle=handles.get(m.sender_id),
                 is_mine=m.sender_id == current_user.id,
                 body=m.body,
@@ -465,61 +485,80 @@ async def get_collection_messages(
             )
             for m in messages
         ],
-        # Only offered on a full page — a short page is the start of the
-        # conversation, and there is nothing further back to ask for.
-        next_before=messages[0].created_at if len(messages) == limit else None,
-        next_before_id=messages[0].id if len(messages) == limit else None,
+        # A backward page is only offered when it came back full; a poll never
+        # offers one, because it is reading the newest end.
+        next_before=messages[0].created_at if (after is None and len(messages) == limit) else None,
+        next_before_id=messages[0].id if (after is None and len(messages) == limit) else None,
     )
 
 
 @router.post(
-    "/collections/{collection_id}/books/{book_id}/messages",
+    "/collections/{collection_id}/messages",
     response_model=CollectionMessageResponse,
     status_code=status.HTTP_201_CREATED,
 )
 async def post_collection_message(
     collection_id: uuid.UUID,
-    book_id: uuid.UUID,
     data: CollectionMessageCreate,
     request: Request,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Say something about a book in this collection. Any member may."""
+    """Say something in the collection. Any member may. A book may be attached."""
     c, _ = await _visible_or_404(db, collection_id, current_user.id)
     await chat_limiter.check_key(str(current_user.id))
 
     try:
-        message, verdict = await post_chat_message(db, c, book_id, current_user.id, data.body)
+        message, verdict = await post_chat_message(
+            db, c, current_user.id, data.body, book_id=data.book_id,
+        )
     except ChatRefused as e:
         # 422, not 400: the request was well-formed, the content is what was
-        # refused. The sender is told plainly rather than left to wonder whether
-        # it sent.
+        # refused. The sender is told plainly rather than left to wonder.
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e))
     except ChatError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
 
-    # Membership is read live, so someone who left stops being notified about a
-    # room they can no longer open. `notify` drops self- and blocked-pairs too.
+    title = None
+    if message.book_id:
+        title = (await db.execute(
+            select(Book.title).where(Book.id == message.book_id)
+        )).scalar_one_or_none()
+
     for uid in await chat_notify_targets(db, c.id, current_user.id):
         await notify(
             db, uid, TIER_DIRECT, "collection_message",
-            {"collection_id": str(c.id), "book_id": str(book_id)},
-            # Coalesce a burst into one nudge per book — the conversation is the
-            # place to read them, not the notification list.
-            batch_key=f"collection_message:{c.id}:{book_id}",
+            {"collection_id": str(c.id), "book_id": str(book_id) if (book_id := message.book_id) else None},
+            batch_key=f"collection_message:{c.id}",
             actor_id=current_user.id,
         )
 
     return CollectionMessageResponse(
         id=message.id,
         book_id=message.book_id,
+        book_title=title,
         handle=current_user.handle,
         is_mine=True,
         body=message.body,
         created_at=message.created_at,
         crisis=dict(CRISIS_RESOURCES) if verdict == VERDICT_CRISIS else None,
     )
+
+
+@router.get("/collections/{collection_id}/sparks")
+async def get_collection_sparks(
+    collection_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Something to say when nobody knows how to start.
+
+    Facts are counted from this collection and checkable by anyone in it;
+    questions are plainly questions. Nothing invented — the rest of the product
+    refuses to fabricate claims about books and this is not the exception.
+    """
+    c, _ = await _visible_or_404(db, collection_id, current_user.id)
+    return {"sparks": await conversation_sparks(db, c, current_user.id)}
 
 
 @router.delete(
@@ -541,12 +580,11 @@ async def delete_collection_message(
 
 
 @router.post(
-    "/collections/{collection_id}/books/{book_id}/report",
+    "/collections/{collection_id}/report",
     status_code=status.HTTP_202_ACCEPTED,
 )
 async def report_collection_conversation(
     collection_id: uuid.UUID,
-    book_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -559,7 +597,5 @@ async def report_collection_conversation(
     remedy the reporter holds themselves.
     """
     c, _ = await _visible_or_404(db, collection_id, current_user.id)
-    if not await book_is_in_collection(db, c.id, book_id):
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
-    await submit_report(db, current_user.id, "collection_conversation", book_id, "conversation")
+    await submit_report(db, current_user.id, "collection_conversation", c.id, "conversation")
     return {"status": "received"}

@@ -15,6 +15,7 @@ from sqlalchemy.orm import selectinload
 
 from app.models.book import Book
 from app.models.book_entry import BookEntry
+from app.models.user import User
 from app.models.collection import (
     Collection, CollectionInvite, CollectionItem, CollectionMember,
 )
@@ -353,3 +354,52 @@ async def remove_book(
         raise CollectionForbidden("You can only remove books you added")
     await db.delete(item)
     await db.flush()
+
+
+async def list_joined_collections(db: AsyncSession, user_id: uuid.UUID) -> list[dict]:
+    """Collections this reader is a MEMBER of but does not own.
+
+    Without this a member has no surface at all: the profile lists collections
+    where `collections.user_id` is you, so someone who accepted an invite landed
+    back on their own study and saw nothing. They had joined a room with no door.
+
+    Owned collections are excluded on purpose — those already have a home on the
+    profile, and listing them twice would read as two different things.
+    """
+    rows = (await db.execute(
+        select(Collection, CollectionMember.joined_at, User.handle)
+        .join(CollectionMember, CollectionMember.collection_id == Collection.id)
+        .join(User, User.id == Collection.user_id)
+        .where(
+            CollectionMember.user_id == user_id,
+            Collection.user_id != user_id,
+        )
+        .order_by(CollectionMember.joined_at.desc())
+    )).all()
+    if not rows:
+        return []
+
+    ids = [c.id for c, _, _ in rows]
+    counts = dict((await db.execute(
+        select(CollectionItem.collection_id, func.count(CollectionItem.id))
+        .where(CollectionItem.collection_id.in_(ids))
+        .group_by(CollectionItem.collection_id)
+    )).all())
+    members = dict((await db.execute(
+        select(CollectionMember.collection_id, func.count(CollectionMember.id))
+        .where(CollectionMember.collection_id.in_(ids))
+        .group_by(CollectionMember.collection_id)
+    )).all())
+
+    return [
+        {
+            "id": c.id,
+            "title": c.title,
+            "description": c.description,
+            "owner_handle": handle,
+            "joined_at": joined_at,
+            "book_count": counts.get(c.id, 0),
+            "member_count": members.get(c.id, 0),
+        }
+        for c, joined_at, handle in rows
+    ]

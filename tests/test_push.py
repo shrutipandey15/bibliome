@@ -36,8 +36,18 @@ def _enable(monkeypatch):
 
 # ── The subscription itself ──
 
-async def test_key_endpoint_says_disabled_rather_than_erroring(client):
-    """The client hides the toggle instead of showing one that 500s."""
+async def test_key_endpoint_says_disabled_rather_than_erroring(client, monkeypatch):
+    """The client hides the toggle instead of showing one that 500s.
+
+    The keys are cleared explicitly rather than assumed absent: `.env` is real on
+    a developer machine, and this once failed for the sole reason that the person
+    running it had configured push.
+    """
+    from app.config import get_settings
+    s = get_settings()
+    monkeypatch.setattr(s, "VAPID_PUBLIC_KEY", None, raising=False)
+    monkeypatch.setattr(s, "VAPID_PRIVATE_KEY", None, raising=False)
+
     headers = await _auth(client)
     r = await client.get("/api/push/key", headers=headers)
     assert r.status_code == 200
@@ -166,15 +176,20 @@ async def test_a_failing_push_does_not_fail_the_action_that_caused_it(client, mo
                                headers=owner)).json()["token"]
     await client.post(f"/api/collections/invites/{token}/join", headers=friend)
 
-    r = await client.post(f"/api/collections/{cid}/books/{book}/messages",
+    r = await client.post(f"/api/collections/{cid}/messages",
                           json={"body": "still works"}, headers=owner)
     assert r.status_code == 201, r.text
 
 
-async def test_push_is_skipped_when_not_configured(client, db):
+async def test_push_is_skipped_when_not_configured(client, db, monkeypatch):
     """No keys, no attempt — and no error either."""
+    from app.config import get_settings
     from app.services.push_service import push_to_user
     from app.database import async_session
+
+    cfg = get_settings()
+    monkeypatch.setattr(cfg, "VAPID_PUBLIC_KEY", None, raising=False)
+    monkeypatch.setattr(cfg, "VAPID_PRIVATE_KEY", None, raising=False)
 
     async with async_session() as s:
         assert await push_to_user(s, uuid.uuid4(), "collection_message", {}) == 0
@@ -207,7 +222,7 @@ async def test_a_batched_message_does_not_push_again(client, monkeypatch):
     await client.post(f"/api/collections/invites/{token}/join", headers=friend)
 
     for i in range(4):
-        await client.post(f"/api/collections/{cid}/books/{book}/messages",
+        await client.post(f"/api/collections/{cid}/messages",
                           json={"body": f"message {i}"}, headers=owner)
 
     assert calls.count("collection_message") == 1

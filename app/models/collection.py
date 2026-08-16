@@ -158,30 +158,26 @@ class CollectionInvite(Base):
 
 
 class CollectionMessage(Base):
-    """Talk about ONE BOOK inside one collection (#6).
+    """One room per COLLECTION. A message may attach a book.
 
-    There is no thread row and no channel. A conversation is identified by the
-    pair ``(collection_id, book_id)`` and comes into existence the moment someone
-    says something. That is the whole design:
+    The first version gave every book its own room, on the reasoning that a
+    collection is a set of books and the talk should hang off each one. In
+    practice that fragments a small group: four people and ten books meant ten
+    places to look, nine of them empty, and conversation went to none of them.
+    Talk needs one place to happen.
 
-    - **No lifecycle to get wrong.** A thread table would have to be created
-      lazily, raced on first message, and reconciled every time a book joins or
-      leaves the collection. The pair cannot drift out of sync with itself.
-    - **Attached to books, not a channel.** A collection is a set of books; the
-      talk hangs off each one. There is deliberately no "general" room — a
-      collection chat with a general channel becomes a group chat that happens to
-      have books in it, which is a different product.
+    So ``book_id`` is **nullable** and is an *attachment*, not an identity — a
+    message belongs to the collection and may point at one of its books ("about
+    Beach Read"). The book is a filter over one room, never a room of its own.
 
-    **Removing the book does not delete the conversation.** ``book_id`` points at
-    the catalog, not at ``collection_items``, so pulling a book out of the
-    collection leaves the words alone — one member must not be able to delete
-    everyone else's writing with a tap meant to tidy a shelf. The conversation
-    becomes unreachable while the book is out, and returns intact if it is added
-    back.
+    Still true from the first version, and still load-bearing:
 
-    ``sender_id`` cascades on user delete: authored text goes when the account
-    does. That differs on purpose from ``CollectionItem.added_by`` (SET NULL) —
-    a departing member's *books* are the collection's, their *words* are theirs.
+    - ``book_id`` references ``books``, NOT ``collection_items``. Removing a book
+      from the collection must not delete everyone else's writing; the message
+      keeps its attachment and stays in the room.
+    - ``sender_id`` cascades on user delete: authored text goes when the account
+      does. That differs on purpose from ``CollectionItem.added_by`` (SET NULL) —
+      a departing member's *books* are the collection's, their *words* are theirs.
     """
 
     __tablename__ = "collection_messages"
@@ -189,6 +185,11 @@ class CollectionMessage(Base):
         # The read path is always "this book, in this collection, newest first".
         # created_at + id so keyset paging has a total order and cannot skip or
         # repeat a message when two land in the same millisecond.
+        # The room read path: one collection, newest first. created_at + id so
+        # keyset paging has a total order and cannot skip or repeat a message
+        # when two land in the same millisecond.
+        Index("ix_collection_messages_room", "collection_id", "created_at", "id"),
+        # Kept for the "only messages about this book" filter.
         Index(
             "ix_collection_messages_convo",
             "collection_id", "book_id", "created_at", "id",
@@ -199,8 +200,9 @@ class CollectionMessage(Base):
     collection_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("collections.id", ondelete="CASCADE"), nullable=False, index=True
     )
-    book_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("books.id", ondelete="CASCADE"), nullable=False, index=True
+    # Optional attachment, not identity — see the class docstring.
+    book_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("books.id", ondelete="CASCADE"), nullable=True, index=True
     )
     sender_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True

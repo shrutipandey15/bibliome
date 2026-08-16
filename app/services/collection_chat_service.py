@@ -1,7 +1,9 @@
-"""Collection chat (#6) — talk about one book, inside one collection.
+"""Collection chat (#6) — ONE room per collection.
 
-Not a channel. A conversation is the pair ``(collection_id, book_id)``; see
-``CollectionMessage`` for why there is no thread row.
+The first version gave every book its own room. That fragmented a small group
+across a dozen mostly-empty rooms, so conversation happened in none of them. A
+collection now has one room, and a message may *attach* a book — the book is a
+label and a filter, never a separate place.
 
 **Where this differs from resonance threads, and why.** A resonance thread is two
 people who both said yes. A collection conversation is a small group who joined a
@@ -18,9 +20,9 @@ shelf. That changes four things, and each is handled explicitly below:
    thread.
 3. **Leaving is not deleting.** A member who leaves keeps their words in the
    room, exactly as the books they added stay on the shelf.
-4. **The book, not the room, is the anchor.** You cannot talk about a book that
-   nobody has added — that would let a member start conversations the collection
-   has no record of.
+4. **An attached book must be one the collection holds.** Not a gate on talking
+   — anyone can say anything in the room — but an attachment pointing at a book
+   the collection does not have would render as a label nobody can follow.
 """
 
 import uuid
@@ -81,14 +83,19 @@ def _visible(stmt: Select, hidden: set[uuid.UUID]) -> Select:
 async def list_messages(
     db: AsyncSession,
     collection_id: uuid.UUID,
-    book_id: uuid.UUID,
     viewer_id: uuid.UUID,
     *,
+    book_id: uuid.UUID | None = None,
     limit: int = MESSAGE_PAGE_DEFAULT,
     before: datetime | None = None,
     before_id: uuid.UUID | None = None,
+    after: datetime | None = None,
 ) -> list[CollectionMessage]:
-    """A page of one book's conversation, oldest-first within the page.
+    """A page of the collection's room, oldest-first within the page.
+
+    ``book_id`` is an optional FILTER over the one room, not a room of its own.
+    ``after`` fetches only what arrived since a timestamp — the poll the live
+    view uses, so a quiet room costs one tiny query rather than a full page.
 
     Pages backward with (``before``, ``before_id``). Both halves matter: two
     messages posted in the same millisecond tie on ``created_at``, and paging on
@@ -98,8 +105,20 @@ async def list_messages(
 
     stmt = select(CollectionMessage).where(
         CollectionMessage.collection_id == collection_id,
-        CollectionMessage.book_id == book_id,
     )
+    if book_id is not None:
+        stmt = stmt.where(CollectionMessage.book_id == book_id)
+
+    if after is not None:
+        # Forward poll: oldest-first, newest N. Deliberately separate from the
+        # backward paging below — mixing the two directions in one branch is how
+        # a cursor ends up applied against the wrong end of the range.
+        stmt = _visible(stmt.where(CollectionMessage.created_at > after), hidden)
+        stmt = stmt.order_by(
+            CollectionMessage.created_at.asc(), CollectionMessage.id.asc()
+        ).limit(limit)
+        return list((await db.execute(stmt)).scalars().all())
+
     if before is not None:
         if before_id is None:
             # No tie-breaker supplied (an older client, or a hand-made request):
@@ -132,16 +151,18 @@ async def list_messages(
 async def post_message(
     db: AsyncSession,
     collection: Collection,
-    book_id: uuid.UUID,
     sender_id: uuid.UUID,
     body: str,
+    book_id: uuid.UUID | None = None,
 ) -> tuple[CollectionMessage, str]:
     """Say something about a book in this collection. Returns (message, verdict).
 
     The caller has already established membership. What is checked here:
 
     - a non-empty body within the length bound;
-    - the book is still IN the collection (it can be pulled mid-conversation);
+    - IF a book is attached, that it is still in the collection — an attachment
+      pointing at a book the collection does not hold would render as a label
+      nobody else can click;
     - moderation, with a group's stance on each verdict:
         * **crisis** — sends, and the sender gets the resources back. Care, not
           punishment; the same stance Echo and resonance take.
@@ -154,7 +175,7 @@ async def post_message(
         raise ChatError("Message body is required")
     if len(body) > MAX_MESSAGE_CHARS:
         raise ChatError(f"Message must be {MAX_MESSAGE_CHARS} characters or fewer")
-    if not await book_is_in_collection(db, collection.id, book_id):
+    if book_id is not None and not await book_is_in_collection(db, collection.id, book_id):
         raise ChatError("That book isn't in this collection")
 
     # The VERDICT is not enough to decide here: `classify_text` returns HOLD for
@@ -222,6 +243,66 @@ async def notify_targets(
         return []
     hidden = await hidden_author_ids(db, sender_id)
     return [uid for uid in member_ids if uid not in hidden]
+
+
+# Conversation starters. Every one is either a QUESTION (obviously an invitation,
+# true of nobody in particular) or a FACT computed from this collection's own
+# data. Nothing in between — a fabricated "fun fact" about a book would be the
+# one place in this product that invents something about your reading.
+_STARTERS = [
+    "What's the last book here that kept you up too late?",
+    "Which of these would you press into a stranger's hands?",
+    "Anyone else bounce off one of these? No wrong answers.",
+    "What were you reading right before this collection existed?",
+    "Which one has the best first line?",
+    "If you could un-read one of these to read it fresh — which?",
+    "What's the book you keep meaning to start here?",
+]
+
+
+async def conversation_sparks(
+    db: AsyncSession, collection: Collection, viewer_id: uuid.UUID
+) -> list[dict]:
+    """A few things to say when nobody knows how to start.
+
+    Returns `{kind, text}` where kind is "fact" or "question". Facts are counted
+    from this collection and are checkable by anyone in it; questions are plainly
+    questions. There is deliberately no third category of invented trivia — the
+    rest of this product refuses to fabricate claims about books, and a chat
+    widget is not the place to make an exception.
+    """
+    import random
+
+    sparks: list[dict] = []
+
+    items = (await db.execute(
+        select(Book.title, Book.author, CollectionItem.created_at)
+        .join(CollectionItem, CollectionItem.book_id == Book.id)
+        .where(CollectionItem.collection_id == collection.id)
+        .order_by(CollectionItem.created_at.desc())
+    )).all()
+    member_count = (await db.execute(
+        select(func.count(CollectionMember.id))
+        .where(CollectionMember.collection_id == collection.id)
+    )).scalar() or 0
+
+    if items:
+        newest = items[0]
+        sparks.append({
+            "kind": "fact",
+            "text": f"The newest arrival here is “{newest.title}”"
+                    + (f" by {newest.author}." if newest.author else "."),
+        })
+    if len(items) >= 3:
+        sparks.append({
+            "kind": "fact",
+            "text": f"There are {len(items)} books on this shelf and "
+                    f"{member_count} of you. That's a lot of opinions.",
+        })
+
+    # Questions are shuffled so the same two do not greet the same room forever.
+    sparks += [{"kind": "question", "text": t} for t in random.sample(_STARTERS, 3)]
+    return sparks
 
 
 async def list_conversations(
