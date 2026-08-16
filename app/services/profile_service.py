@@ -12,6 +12,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.models.book import Book
 from app.models.book_entry import BookEntry
 from app.models.collection import Collection
 from app.models.user import User
@@ -134,6 +135,22 @@ def _entry_card(e: BookEntry, *, with_checkin: bool = False) -> dict:
     return card
 
 
+def _book_card(b) -> dict:
+    """A card for a book nobody in this library has an entry for — one a member
+    added. No emotion, status or progress: those are one reader's, and this
+    viewer has not read it."""
+    return {
+        "entry_id": None,
+        "book_id": str(b.id),
+        "title": b.title,
+        "author": b.author,
+        "cover_url": b.cover_url,
+        "dominant_emotion": None,
+        "status": None,
+        "progress": None,
+    }
+
+
 async def _visible_collections(
     db: AsyncSession, owner_id: uuid.UUID, viewer_class: str, entries_by_id: dict
 ) -> list[dict]:
@@ -144,6 +161,19 @@ async def _visible_collections(
         .order_by(Collection.position.asc())
     )
     collections = result.scalars().all()
+
+    # One lookup for every book referenced by an item the viewer has no entry
+    # for, rather than a query per card.
+    wanted = {
+        i.book_id for c in collections for i in c.items
+        if i.book_id and i.entry_id not in entries_by_id
+    }
+    books_by_id = {}
+    if wanted:
+        books_by_id = {
+            b.id: b for b in (await db.execute(select(Book).where(Book.id.in_(wanted)))).scalars().all()
+        }
+
     out = []
     for c in collections:
         # A collection is shown only if the viewer may see it at its own visibility.
@@ -153,7 +183,17 @@ async def _visible_collections(
             if c.visibility == "community" and viewer_class == VIEWER_ANON:
                 continue
         items = sorted(c.items, key=lambda i: i.position)
-        cards = [_entry_card(entries_by_id[i.entry_id]) for i in items if i.entry_id in entries_by_id]
+        # An item's identity is its BOOK (#5). Building cards from `entry_id`
+        # alone hid every book a MEMBER added — they have no entry in the
+        # owner's library, so the collection looked empty to its own owner.
+        # The owner's own entry is still preferred when there is one: it carries
+        # their emotions, status and progress, which the catalog row cannot.
+        cards = []
+        for i in items:
+            if i.entry_id in entries_by_id:
+                cards.append(_entry_card(entries_by_id[i.entry_id]))
+            elif i.book_id and i.book_id in books_by_id:
+                cards.append(_book_card(books_by_id[i.book_id]))
         out.append({
             "id": str(c.id),
             "title": c.title,

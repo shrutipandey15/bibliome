@@ -368,3 +368,36 @@ async def test_deleting_the_collection_takes_the_conversation_with_it(client):
     async with async_session() as s:
         rows = (await s.execute(select(CollectionMessage))).scalars().all()
     assert rows == []
+
+
+async def test_a_book_added_through_the_editor_is_talkable(client):
+    """The integration that was broken: the collections editor added items by
+    `entry_id`, which leaves `book_id` NULL — so the book existed on the shelf
+    card but the discussion said "add a book to this collection". Adding by book
+    is what makes a conversation reachable.
+    """
+    owner = await _auth(client, "o@example.com", "owner")
+    cid = (await client.post("/api/collections", json={"title": "Ruined me"},
+                             headers=owner)).json()["id"]
+    book = await _book(client, owner, "Mistborn")
+    await client.post(f"/api/collections/{cid}/books", json={"book_id": book}, headers=owner)
+
+    rows = (await client.get(f"/api/collections/{cid}/conversations", headers=owner)).json()
+    assert [r["title"] for r in rows] == ["Mistborn"]
+    assert (await _say(client, owner, cid, book, "the ending")).status_code == 201
+
+
+async def test_a_member_added_book_shows_on_the_owners_collection(client):
+    """A book a member added has no entry in the OWNER's library. Building the
+    collection card from `entry_id` alone made it invisible to its own owner.
+    """
+    owner = await _auth(client, "o@example.com", "owner")
+    friend = await _auth(client, "f@example.com", "friend")
+    cid, _seed = await _room(client, owner, friend)
+
+    theirs = await _book(client, friend, "The Employees")
+    await client.post(f"/api/collections/{cid}/books", json={"book_id": theirs}, headers=friend)
+
+    profile = (await client.get("/api/me/profile", headers=owner)).json()
+    collection = next(c for c in profile["collections"] if c["id"] == cid)
+    assert "The Employees" in [b["title"] for b in collection["books"]]
