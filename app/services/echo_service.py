@@ -12,12 +12,11 @@ from sqlalchemy import and_, func, or_, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.models.book_entry import BookEntry
 from app.models.echo import Echo, EchoReaction, EchoReply
 from app.models.prompt import Prompt
 from app.models.user import User
-from app.services.book_identity import resolve_book
 from app.services.book_search import normalize
+from app.services.entry_service import shelve_book
 from app.services.moderation import VERDICT_CRISIS, VERDICT_HOLD, classify_text
 from app.services.social_service import hidden_author_ids, is_blocked_between
 from app.utils.emotions import canonicalize
@@ -371,31 +370,14 @@ async def add_book_to_shelf(db: AsyncSession, user_id: uuid.UUID, echo: Echo) ->
     as `want_to_read`. Idempotent — reacting twice never creates a duplicate. Returns
     True only when a new entry was created (so the UI can confirm). Emotion-only echoes
     (no book anchor) add nothing.
+
+    The shelving itself lives in `entry_service.shelve_book`, shared with TBR
+    fast-add: both are one-tap shelving and must dedupe by the same rule.
     """
     if not echo.book_title:
         return False
-    t_norm = normalize(echo.book_title)
-    a_norm = normalize(echo.book_author or "")
-
-    existing = (await db.execute(
-        select(BookEntry).where(BookEntry.user_id == user_id)
-    )).scalars().all()
-    for e in existing:
-        if normalize(e.title) == t_norm and normalize(e.author or "") == a_norm:
-            return False  # already on their shelf — don't touch its status
-
-    # Same find-or-create every other write path uses, so a book added from an
-    # echo lands on the same canonical row as one added from search (B8.1).
-    book = await resolve_book(db, echo.book_title, echo.book_author)
-    db.add(BookEntry(
-        user_id=user_id,
-        book_id=book.id if book else None,
-        title=echo.book_title,
-        author=echo.book_author,
-        status="want_to_read",
-    ))
-    await db.flush()
-    return True
+    _, created = await shelve_book(db, user_id, echo.book_title, echo.book_author)
+    return created
 
 
 async def current_prompt(db: AsyncSession) -> Prompt | None:

@@ -31,6 +31,8 @@ from app.schemas.entry import (
     EmotionOut,
     ImportResponse,
     ShelfPositionUpdate,
+    TbrAdd,
+    TbrAddResponse,
 )
 from app.services.import_service import MAX_IMPORT_BYTES, import_entries, parse_import_csv
 from app.schemas.arc import ArcCardResponse
@@ -43,6 +45,7 @@ from app.services.entry_service import (
     finish_entry,
     get_entry_by_id,
     list_entries,
+    shelve_book,
     update_entry,
 )
 from app.services.checkin_service import (
@@ -168,6 +171,37 @@ async def create_new_entry(
     # computed on the read path.
     background_tasks.add_task(recompute_resonance, current_user.id)
     return _entry_to_response(entry)
+
+
+@router.post("/tbr", response_model=TbrAddResponse)
+async def add_to_tbr(
+    request: Request,
+    data: TbrAdd,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """One-tap shelving from search: add a book as `want_to_read` (B2.2).
+
+    Idempotent, and it never overwrites an existing entry — tapping a book already
+    on the shelf returns that entry with `created: false` rather than demoting a
+    finished book back to intention.
+
+    No DNA recalculation is scheduled, unlike every other write path here: a
+    `want_to_read` is excluded from every book claim DNA makes (see
+    `dna_signals.OPENED_STATUSES`), so shelving cannot change the profile. The
+    catalog still gets fed, because a shelved book is a real book.
+    """
+    await entries_limiter.check(request)
+
+    entry, created = await shelve_book(
+        db, current_user.id, data.title, data.author, data.cover_url, data.isbn
+    )
+    if created:
+        background_tasks.add_task(
+            _feed_catalog, entry.title, entry.author, entry.cover_url, entry.isbn
+        )
+    return TbrAddResponse(entry=_entry_to_response(entry), created=created)
 
 
 @router.post("/import", response_model=ImportResponse)
@@ -428,7 +462,12 @@ async def patch_entry_status(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Change an entry's reading status (want_to_read / reading / finished)."""
+    """Change an entry's reading status.
+
+    The full vocabulary is want_to_read / reading / finished / abandoned /
+    paused / reread — see ``EntryStatus``, which is the list this route, the
+    entry schemas, and the ``check_entry_status`` constraint all have to agree on.
+    """
     await entries_limiter.check(request)
 
     entry = await get_owned_entry(db, entry_id, current_user.id)

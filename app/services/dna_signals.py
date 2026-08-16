@@ -65,6 +65,8 @@ GATES: dict[str, int] = {
     "contradiction": 10,
     "drift": 15,
     "abandonment": 10,
+    # Counted in STATED REASONS, not books — see GATE_POPULATION in dna_insights.
+    "dnf_reason": 3,
     "arc": 5,
     "seasonality": 25,
 }
@@ -381,18 +383,66 @@ def stated_vs_revealed(sigs: list[EntrySig], reads_for: list[str] | None) -> dic
     )
 
 
-# Books that were opened. `want_to_read` is excluded from the abandonment
-# denominator entirely: a book on the pile was never started, so it can neither
-# be abandoned nor finished, and counting it as "not finished" inflated the
-# denominator with books the reader never opened.
+# Books that were opened — the boundary for EVERY claim DNA makes about books,
+# applied once in `build_dna`, not per-signal.
 #
-# `paused` COUNTS AS ABANDONED here. A paused book is one the reader stopped
-# reading; the distinction between "paused" and "abandoned" is largely how
+# `want_to_read` is excluded: a book on the pile was never started, so it carries
+# no reading. It has no emotions, so it was always a no-op for the emotion
+# vectors — but it does carry a placeholder `intensity`, and it is still a row,
+# so leaving it in silently corrupted the two signals that count rows and average
+# intensity: `book_count` ("you've logged 26 books" when six were read) and
+# `intensity_signature` (a shelf of 5s drags an 8-or-nothing reader down to a
+# "careful 4–5 rater"). Both are supposed to be sentences the reader can check
+# against their own shelf by hand, and neither was.
+#
+# `paused` COUNTS AS ABANDONED in `abandonment()`. A paused book is one the reader
+# stopped reading; the distinction between "paused" and "abandoned" is largely how
 # generous the reader feels about their own intentions at the moment they tap it,
 # and treating it as a finish would make the rate an undercount. `reading` also
 # counts in the denominator but not as abandoned — it is genuinely in progress.
-_OPENED_STATUSES = frozenset({"reading", "finished", "abandoned", "paused", "reread"})
+OPENED_STATUSES = frozenset({"reading", "finished", "abandoned", "paused", "reread"})
+_OPENED_STATUSES = OPENED_STATUSES  # legacy private alias
 _DNF_STATUSES = frozenset({"abandoned", "paused"})
+
+
+def opened_only(sigs: list[EntrySig]) -> list[EntrySig]:
+    """Book sigs the reader actually opened. The gate for book claims."""
+    return [s for s in sigs if s.status in OPENED_STATUSES]
+
+
+def dnf_reasons(sigs: list[EntrySig]) -> dict | None:
+    """Why this reader puts books down — the reasons themselves, tallied (B2.3/#4).
+
+    Distinct from `abandonment()`, which asks which EMOTION correlates with not
+    finishing and only speaks when such an emotion exists. A reader can have a
+    perfectly clear pattern in their stated reasons — five books abandoned out of
+    boredom — while no emotion correlates at all, and until now that reader was
+    told nothing, despite having answered the question every time.
+
+    Counts only books with a stated reason, and reports that count as its own
+    denominator: "5 of the 7 you put down" is checkable, "5 of your books" is not.
+    Returns None below three stated reasons — under that, a tally is an anecdote.
+    """
+    dnf = [s for s in sigs if s.status in _DNF_STATUSES]
+    stated = [s for s in dnf if s.dnf_reason]
+    if len(stated) < 3:
+        return None
+
+    counts = Counter(s.dnf_reason for s in stated)
+    ranked = counts.most_common()
+    top_reason, top_books = ranked[0]
+    return {
+        # Descending, so copy can read the first one or list them all.
+        "counts": [{"reason": r, "books": n} for r, n in ranked],
+        "top_reason": top_reason,
+        "top_books": top_books,
+        "stated": len(stated),
+        "dnf_total": len(dnf),
+        # Does one reason account for the whole pile? Changes the sentence from a
+        # breakdown into a much stronger single claim.
+        "unanimous": len(ranked) == 1,
+        "share": round(top_books / len(stated), 2),
+    }
 
 
 def abandonment(sigs: list[EntrySig]) -> dict | None:

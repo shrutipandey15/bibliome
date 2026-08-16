@@ -133,8 +133,25 @@ def test_every_applicable_template_renders_without_error():
                          "abandonment": {"emotion": "amusement", "fraction": 0.8,
                                          "dnf_reason": None, "dnf_reason_books": 0}}
 
+    # The three DNF-tally variants partition on the top reason's share, so each
+    # needs its own context: all-one-reason, a dominant one, and a flat spread.
+    def _dnf_ctx(counts):
+        stated = sum(n for _, n in counts)
+        return {**ctx_intense, "dnf_stated_count": stated, "dnf_reasons": {
+            "counts": [{"reason": r, "books": n} for r, n in counts],
+            "top_reason": counts[0][0], "top_books": counts[0][1],
+            "stated": stated, "dnf_total": stated,
+            "unanimous": len(counts) == 1,
+            "share": round(counts[0][1] / stated, 2),
+        }}
+
+    ctx_dnf_unanimous = _dnf_ctx([("bored", 4)])
+    ctx_dnf_dominant = _dnf_ctx([("bored", 5), ("lost_me", 1), ("too_much", 1)])
+    ctx_dnf_spread = _dnf_ctx([("bored", 2), ("lost_me", 2), ("too_much", 2)])
+
     candidates = [ctx_intense, ctx_careful, ctx_confirmed, ctx_confirmed_elsewhere,
-                  ctx_no_dnf_reason]
+                  ctx_no_dnf_reason, ctx_dnf_unanimous, ctx_dnf_dominant,
+                  ctx_dnf_spread]
     for t in REGISTRY:
         ctx = next((c for c in candidates if t.applicable(c)), None)
         assert ctx is not None, f"{t.category}/{t.variant} applicable to no crafted ctx"
@@ -187,3 +204,170 @@ def test_locked_list_names_what_unlocks_and_includes_seasonality():
     assert "pairing" in cats  # gate 15, not reached at 6 books
     for l in locked:
         assert l["reason"] and l["unlocks_at"]
+
+
+# ── The TBR pile is not a reading (B2.2 fast-add) ──
+
+def test_want_to_read_changes_nothing_about_the_dna():
+    """Shelving a book must not move a single claim DNA makes about books.
+
+    A `want_to_read` carries no emotions, so it never touched the emotion
+    vectors — but it is still a row with a placeholder `intensity`, and that was
+    enough to inflate `book_count` and rewrite the reader's rating style. One-tap
+    fast-add makes shelving cheap and high-volume, which turns that from a rounding
+    error into a profile written by books nobody opened.
+
+    Asserted over the whole payload rather than the two fields known to have
+    broken, so a signal added later that forgets the boundary fails here.
+    """
+    read = ([sig(["grief", "longing"], intensity=9) for _ in range(3)]
+            + [sig(["comfort"], intensity=8) for _ in range(3)])
+    pile = [sig([], intensity=5, status="want_to_read") for _ in range(20)]
+
+    assert build_dna(read + pile) == build_dna(read)
+
+
+def test_want_to_read_alone_never_unlocks_a_rating_style():
+    """A shelf of pure intention stays below the floor instead of inventing a reader.
+
+    Twenty placeholder 5s clear every count-based gate (rating style needs 8) while
+    saying nothing about how this person actually rates.
+    """
+    res = build_dna([sig([], intensity=5, status="want_to_read") for _ in range(20)])
+    assert res["enough"] is False
+    assert res["book_count"] == 0
+
+
+def test_opened_statuses_is_every_status_but_want_to_read():
+    """The boundary is defined by exclusion, so a new status is opened by default.
+
+    A status added later is a way of reading until someone says otherwise; only
+    the pile is not.
+    """
+    import typing
+
+    from app.schemas.entry import EntryStatus
+
+    assert S.OPENED_STATUSES == set(typing.get_args(EntryStatus)) - {"want_to_read"}
+
+
+# ── #4: DNF reasons — the reader's own answers, counted ──
+
+def dnf(reason, status="abandoned"):
+    """A book put down, optionally with a stated reason."""
+    return S.EntrySig(emotions=["grief"], intensity=7, ts=NOW,
+                      status=status, dnf_reason=reason)
+
+
+def test_dnf_tally_needs_three_stated_reasons():
+    """Two answers are an anecdote. The gate counts STATED REASONS, not books —
+    a reader with 400 books and two stated reasons has not earned this claim,
+    and one with 12 books and three has."""
+    assert S.dnf_reasons([dnf("bored"), dnf("bored")]) is None
+    assert S.dnf_reasons([dnf("bored")] * 3) is not None
+
+
+def test_dnf_tally_ignores_books_put_down_without_a_reason():
+    """An unanswered 'why?' is not evidence of anything and must not pad the
+    denominator — "5 of the 7 you put down" has to be checkable by hand."""
+    res = S.dnf_reasons([dnf("bored")] * 3 + [dnf(None)] * 4)
+    assert res["stated"] == 3
+    assert res["dnf_total"] == 7
+
+
+def test_dnf_tally_ignores_finished_books():
+    """Only books actually put down. A finished book carrying a stale dnf_reason
+    (edited from abandoned back to finished) must not count as an abandonment."""
+    finished_with_reason = S.EntrySig(
+        emotions=["comfort"], intensity=8, ts=NOW, status="finished", dnf_reason="bored"
+    )
+    assert S.dnf_reasons([dnf("bored")] * 3 + [finished_with_reason])["stated"] == 3
+
+
+def test_dnf_tally_counts_paused_as_put_down():
+    """Same rule abandonment() uses: paused is a book the reader stopped reading."""
+    res = S.dnf_reasons([dnf("bored", status="paused")] * 3)
+    assert res["stated"] == 3
+
+
+def test_dnf_insight_fires_without_any_emotion_correlation():
+    """The whole point of #4.
+
+    `abandonment()` only speaks when some emotion correlates with not finishing.
+    A reader whose DNFs share no emotion but share a stated reason was told
+    nothing, despite having answered the question every time.
+    """
+    # Every DNF carries a DIFFERENT emotion, so no emotion can correlate.
+    varied = [
+        S.EntrySig(emotions=[e], intensity=7, ts=NOW, status="abandoned", dnf_reason="bored")
+        for e in ("grief", "awe", "confusion", "desire")
+    ]
+    sigs = [sig(["comfort"]) for _ in range(8)] + varied
+    res = build_dna(sigs, insight_limit=99)
+
+    cats = {i["category"] for i in res["insights"]}
+    assert "dnf_reason" in cats
+
+
+def test_dnf_insight_text_is_countable_by_hand():
+    """Every figure in the sentence must be one the reader can verify on their
+    own shelf — the falsifiability rule (B7.7)."""
+    sigs = ([sig(["comfort"]) for _ in range(8)]
+            + [dnf("bored")] * 5 + [dnf("lost_me")] * 2)
+    res = build_dna(sigs, insight_limit=99)
+    text = next(i["text"] for i in res["insights"] if i["category"] == "dnf_reason")
+
+    assert "7 books" in text          # stated reasons, not the whole shelf
+    assert "5 bored you" in text
+    assert "2 lost you" in text
+
+
+def test_dnf_tally_agrees_in_number():
+    """"1 were too much" is the seam that makes hand-written copy read as generated."""
+    sigs = ([sig(["comfort"]) for _ in range(8)]
+            + [dnf("bored")] * 3 + [dnf("too_much")] + [dnf("badly_written")])
+    text = next(i["text"] for i in build_dna(sigs, insight_limit=99)["insights"]
+                if i["category"] == "dnf_reason")
+
+    assert "1 was too much" in text
+    assert "1 was badly written" in text
+    assert "were too much" not in text
+
+
+def test_dnf_gate_population_is_stated_reasons_not_tagged_books():
+    """A claim carries its own denominator.
+
+    Gating on tagged_count would deny this finding to a reader who answers "why
+    did you put it down?" every time but tags few books.
+    """
+    from app.services.dna_insights import GATE_POPULATION
+    assert GATE_POPULATION["dnf_reason"] == "dnf_stated_count"
+
+
+def test_every_gate_population_key_is_produced(monkeypatch):
+    """`_population` tolerates a missing key so partial contexts don't crash.
+
+    That tolerance would also swallow a typo in GATE_POPULATION — the category
+    would silently stay locked forever, with no error anywhere. So every
+    denominator named there must actually be present in the context build_dna
+    really constructs, captured here rather than reconstructed.
+    """
+    from app.services import dna_insights as DI
+
+    seen = {}
+    real = DI.generate_insights
+    def _capture(ctx, **kw):
+        seen.update(ctx)
+        return real(ctx, **kw)
+    monkeypatch.setattr(DI, "generate_insights", _capture)
+
+    sigs = ([sig(["comfort"], arc_start="comfort", arc_end="catharsis")
+             for _ in range(12)]
+            + [dnf("bored")] * 3)
+    assert DI.build_dna(sigs, insight_limit=99)["enough"] is True
+
+    for category, key in DI.GATE_POPULATION.items():
+        assert key in seen, f"{category}'s denominator {key!r} is never set"
+        assert isinstance(seen[key], int) and seen[key] >= 0
+
+    assert seen["dnf_stated_count"] == 3

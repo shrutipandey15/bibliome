@@ -136,6 +136,49 @@ async def test_status_patch_toggles_finished_at(client):
     assert r.json()["finished_at"] is None
 
 
+async def test_status_vocabulary_is_one_vocabulary(client):
+    """The status vocabulary is declared in three places; they must not drift.
+
+    ``EntryStatus`` (write/read schemas), ``StatusUpdate.status`` (the PATCH
+    route), and the ``check_entry_status`` DB constraint each spell the list out
+    separately, so any one of them can quietly fall behind the others — which is
+    how the route came to advertise three statuses while the DB stored six.
+    """
+    import re
+    import typing
+
+    from app.models.book_entry import BookEntry
+    from app.schemas.checkin import StatusUpdate
+    from app.schemas.entry import EntryStatus
+
+    declared = set(typing.get_args(EntryStatus))
+    route = set(typing.get_args(StatusUpdate.model_fields["status"].annotation))
+    constraint = next(
+        c for c in BookEntry.__table__.constraints
+        if getattr(c, "name", None) == "check_entry_status"
+    )
+    stored = set(re.findall(r"'([a-z_]+)'", str(constraint.sqltext)))
+
+    assert declared == route == stored
+
+
+async def test_status_patch_accepts_every_declared_status(client):
+    """Every status in the vocabulary is reachable through the PATCH route."""
+    import typing
+
+    from app.schemas.entry import EntryStatus
+
+    headers = await _auth(client)
+    entry_id = (await _create(client, headers, status="reading")).json()["id"]
+
+    for value in typing.get_args(EntryStatus):
+        r = await client.patch(
+            f"/api/entries/{entry_id}/status", json={"status": value}, headers=headers
+        )
+        assert r.status_code == 200, f"{value}: {r.text}"
+        assert r.json()["status"] == value
+
+
 async def test_status_patch_marks_dna_dirty(client, db, monkeypatch):
     """Finishing a book must refresh the reader's DNA.
 
@@ -253,3 +296,187 @@ async def test_emotion_vocabulary_endpoint(client):
     # phrase is the first-person line the UI shows, distinct from the plain word.
     conf = next(e for e in body["emotions"] if e["slug"] == "confusion")
     assert conf["name"] == "confusion" and conf["phrase"] == "I lost the plot"
+
+
+# ── B2.2: TBR fast-add — one tap, no modal ──
+
+async def _tbr(client, headers, **over):
+    body = {"title": "Piranesi", "author": "Susanna Clarke", **over}
+    return await client.post("/api/entries/tbr", json=body, headers=headers)
+
+
+async def test_tbr_add_shelves_as_want_to_read(client):
+    headers = await _auth(client)
+    r = await _tbr(client, headers)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["created"] is True
+    assert body["entry"]["status"] == "want_to_read"
+    assert body["entry"]["title"] == "Piranesi"
+
+
+async def test_tbr_add_is_idempotent(client):
+    """A one-tap surface has no confirmation step, so the same book gets tapped
+    twice. The second tap must return the first entry, not a duplicate."""
+    headers = await _auth(client)
+    first = (await _tbr(client, headers)).json()
+    second = (await _tbr(client, headers)).json()
+
+    assert second["created"] is False
+    assert second["entry"]["id"] == first["entry"]["id"]
+
+    listed = (await client.get("/api/entries", headers=headers)).json()
+    assert len([e for e in listed["entries"] if e["title"] == "Piranesi"]) == 1
+
+
+async def test_tbr_add_never_demotes_a_book_already_read(client):
+    """Shelving a book the reader already finished must not reset it to intention.
+
+    The destructive version of this bug is silent: the entry keeps its id, so the
+    UI shows success while the finish date and status are gone.
+    """
+    headers = await _auth(client)
+    created = (await _create(
+        client, headers, title="Piranesi", author="Susanna Clarke",
+        status="finished", emotions=[{"emotion_id": "awe", "strength": 9}],
+    )).json()
+
+    r = await _tbr(client, headers)
+    assert r.json()["created"] is False
+
+    after = (await client.get(f"/api/entries/{created['id']}", headers=headers)).json()
+    assert after["status"] == "finished"
+    assert after["finished_at"] == created["finished_at"]
+    assert [e["emotion_id"] for e in after["emotions"]] == ["awe"]
+
+
+async def test_tbr_add_dedupes_on_normalized_title_and_author(client):
+    """Search results vary in punctuation and spacing; the catalog's identity
+    function is what decides sameness, not the raw string."""
+    headers = await _auth(client)
+    await _tbr(client, headers)
+    r = await _tbr(client, headers, title="  PIRANESI ", author="Susanna  Clarke")
+    assert r.json()["created"] is False
+
+
+async def test_tbr_add_rejects_a_rating(client):
+    """The fast-add accepts identity fields only — it must not let a caller
+    smuggle in a reading (intensity, emotions, status) for a book never opened."""
+    headers = await _auth(client)
+    r = await client.post(
+        "/api/entries/tbr",
+        json={"title": "Piranesi", "intensity": 9, "status": "finished"},
+        headers=headers,
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["entry"]["status"] == "want_to_read"
+
+
+async def test_tbr_add_does_not_move_the_dna(client, db):
+    """End-to-end guard for the same invariant the pure test pins: fast-adding
+    books must leave the reader's DNA payload untouched."""
+    headers = await _auth(client)
+    for i in range(6):
+        await _create(client, headers, title=f"Read {i}", intensity=9,
+                      emotions=[{"emotion_id": "grief", "strength": 9}])
+    before = (await client.get("/api/dna/profile", headers=headers)).json()
+
+    for i in range(20):
+        await _tbr(client, headers, title=f"Pile {i}", author=None)
+    after = (await client.get("/api/dna/profile", headers=headers)).json()
+
+    assert after["book_count"] == before["book_count"] == 6
+
+
+# ── B2.3 / A1: a reread keeps the book's finish history ──
+
+async def test_reread_preserves_finished_at(client):
+    """Marking a finished book as a reread must not erase when it was finished.
+
+    A reread is evidence the book WAS finished. Clearing the date dropped the
+    book out of the calendar and mirror, silently, on a status change the reader
+    reads as celebratory.
+    """
+    headers = await _auth(client)
+    entry_id = (await _create(client, headers, status="finished")).json()["id"]
+    finished_on = (await client.get(f"/api/entries/{entry_id}", headers=headers)).json()["finished_at"]
+    assert finished_on is not None
+
+    r = await client.patch(
+        f"/api/entries/{entry_id}/status", json={"status": "reread"}, headers=headers
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["finished_at"] == finished_on
+
+
+async def test_only_reread_keeps_the_finish_date(client):
+    """Every other non-finished status still means "not finished" and clears it.
+
+    Written over the vocabulary rather than a hand-picked status or two, so a
+    status added later has to make this decision explicitly instead of
+    inheriting whichever branch it happens to fall into.
+    """
+    import typing
+
+    from app.schemas.entry import EntryStatus
+
+    headers = await _auth(client)
+    for value in typing.get_args(EntryStatus):
+        if value == "finished":
+            continue
+        entry_id = (await _create(client, headers, title=f"Book {value}",
+                                  status="finished")).json()["id"]
+        r = await client.patch(
+            f"/api/entries/{entry_id}/status", json={"status": value}, headers=headers
+        )
+        kept = r.json()["finished_at"] is not None
+        assert kept == (value == "reread"), f"{value} kept finished_at: {kept}"
+
+
+async def test_dnf_reason_vocabulary_matches_the_client(client):
+    """The DNF reasons are declared in the backend and re-typed in the UI.
+
+    `DnfReason` is the source of truth; EntryModal's DNF_OPTIONS mirrors it. A
+    reason offered by the UI but rejected by the API is a 422 the reader cannot
+    act on, so the two lists are pinned here the same way the status vocabulary is.
+    """
+    import typing
+
+    from app.schemas.entry import DnfReason
+
+    assert set(typing.get_args(DnfReason)) == {
+        "bored", "too_much", "badly_written", "wrong_time", "lost_me", "drifted",
+    }
+
+
+async def test_every_dnf_reason_round_trips(client):
+    """Each reason in the vocabulary is actually writable and readable back."""
+    import typing
+
+    from app.schemas.entry import DnfReason
+
+    headers = await _auth(client)
+    for reason in typing.get_args(DnfReason):
+        r = await _create(client, headers, title=f"DNF {reason}",
+                          status="abandoned", dnf_reason=reason)
+        assert r.status_code == 201, f"{reason}: {r.text}"
+        assert r.json()["dnf_reason"] == reason
+
+
+async def test_reread_keeps_finish_date_on_the_edit_path_too(client):
+    """The PUT path must agree with the status-tap path.
+
+    They are separate branches, so history could survive a status tap and die on
+    an edit — the kind of split that makes the loss look random to the reader.
+    """
+    headers = await _auth(client)
+    created = (await _create(client, headers, status="finished")).json()
+    finished_on = created["finished_at"]
+
+    r = await client.put(
+        f"/api/entries/{created['id']}",
+        json={"status": "reread"},
+        headers=headers,
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["finished_at"] == finished_on

@@ -75,6 +75,29 @@ class EntryCreate(BaseModel):
     _check_cover = field_validator("cover_url")(_validate_cover)
 
 
+class TbrAdd(BaseModel):
+    """One-tap shelving from a search result (B2.2).
+
+    Deliberately only the identity fields a search result carries. No intensity,
+    no emotions, no dates: the reader has not read this book, and a fast-add that
+    accepted a rating would be inventing one. `status` is not a field either —
+    this endpoint shelves as `want_to_read` or it does nothing.
+    """
+    title: str = Field(min_length=1, max_length=300)
+    author: str | None = Field(default=None, max_length=200)
+    cover_url: str | None = Field(default=None, max_length=500)
+    isbn: str | None = Field(default=None, max_length=13)
+
+    _check_cover = field_validator("cover_url")(_validate_cover)
+
+
+class TbrAddResponse(BaseModel):
+    entry: "EntryResponse"
+    # False when the book was already on the shelf, so the UI can say "already
+    # there" instead of falsely confirming a new add.
+    created: bool
+
+
 class EntryUpdate(BaseModel):
     # Bounds mirror EntryCreate exactly. They were missing here, so an update
     # could put a value past the column width and turn a 422 into a 500.
@@ -124,6 +147,10 @@ class EntryResponse(BaseModel):
     finish_thought: str | None = None
 
     model_config = {"from_attributes": True}
+
+
+# TbrAddResponse forward-references EntryResponse, declared above it.
+TbrAddResponse.model_rebuild()
 
 
 class EntryFinish(BaseModel):

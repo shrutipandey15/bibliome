@@ -8,6 +8,7 @@ from sqlalchemy.orm import selectinload
 from app.models.book_entry import BookEntry, EntryEmotion
 from app.schemas.entry import EntryCreate, EntryUpdate
 from app.services.book_identity import resolve_book
+from app.services.book_search import normalize
 from app.utils.emotions import canonicalize
 
 
@@ -36,6 +37,54 @@ def _default_finished_at(status: str, finished_at: date | None) -> date | None:
     if status == "finished":
         return finished_at or date.today()
     return finished_at
+
+
+async def shelve_book(
+    db: AsyncSession,
+    user_id: uuid.UUID,
+    title: str,
+    author: str | None = None,
+    cover_url: str | None = None,
+    isbn: str | None = None,
+) -> tuple[BookEntry, bool]:
+    """Put a book on the shelf as `want_to_read`, idempotently (B2.2).
+
+    The shared path for every surface that shelves a book in one tap — TBR
+    fast-add from search and echo's "to my shelf" — because they are the same act
+    and must dedupe by the same rule. Returns ``(entry, created)``; `created` is
+    False when the book was already on the shelf.
+
+    Two guarantees the deliberate `create_entry` path doesn't need and doesn't
+    make. A one-tap surface has no confirmation step, so the same book gets tapped
+    twice; and the book may already be there under a status that represents real
+    reading. **An existing entry is returned untouched** — shelving never demotes
+    a finished book back to intention.
+    """
+    t_norm = normalize(title)
+    a_norm = normalize(author or "")
+
+    existing = (await db.execute(
+        select(BookEntry).where(BookEntry.user_id == user_id)
+    )).scalars().all()
+    for e in existing:
+        if normalize(e.title) == t_norm and normalize(e.author or "") == a_norm:
+            return await get_entry_by_id(db, e.id, user_id), False
+
+    # Same find-or-create as every other write path, so a book shelved from search
+    # lands on the same canonical row as one logged in full (B8.1).
+    book = await resolve_book(db, title, author, isbn, cover_url)
+    entry = BookEntry(
+        user_id=user_id,
+        book_id=book.id if book else None,
+        title=title,
+        author=author,
+        cover_url=cover_url,
+        isbn=isbn,
+        status="want_to_read",
+    )
+    db.add(entry)
+    await db.flush()
+    return await get_entry_by_id(db, entry.id, user_id), True
 
 
 async def create_entry(db: AsyncSession, user_id: uuid.UUID, data: EntryCreate) -> BookEntry:
@@ -189,10 +238,16 @@ async def update_entry(
     # Keep finished_at consistent with status (P5-7): a book that just became
     # finished gets today's date if none was supplied; clearing to a non-finished
     # status drops the finish date.
+    #
+    # `reread` keeps its date, for the same reason it does in
+    # `checkin_service.update_status` — a reread is evidence the book WAS
+    # finished. Both write paths have to agree, or the history survives a status
+    # tap and dies on an edit.
     if "status" in update_data or "finished_at" in update_data:
         if entry.status == "finished" and entry.finished_at is None:
             entry.finished_at = date.today()
-        elif entry.status != "finished" and "status" in update_data and "finished_at" not in update_data:
+        elif (entry.status not in ("finished", "reread")
+              and "status" in update_data and "finished_at" not in update_data):
             entry.finished_at = None
 
     # A closed book has no "how far in" — the status is the answer. Leaving the

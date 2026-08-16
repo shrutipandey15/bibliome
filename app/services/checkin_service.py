@@ -52,10 +52,16 @@ async def update_status(
     entry.status = status
     # Keep finished_at consistent so the calendar/mirror key correctly (P5-7):
     # entering 'finished' stamps today if unset; leaving it drops the date.
+    #
+    # `reread` is the exception, and it has to be. A reread is evidence the book
+    # WAS finished, not evidence it wasn't — clearing the date on the way in
+    # erased the original finish from the calendar and the mirror, silently, on
+    # a status change the reader would read as celebratory. Every other
+    # non-finished status genuinely means "not finished", so it still clears.
     if status == "finished":
         if entry.finished_at is None:
             entry.finished_at = date.today()
-    else:
+    elif status != "reread":
         entry.finished_at = None
     await db.flush()
     return entry

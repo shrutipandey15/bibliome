@@ -25,6 +25,7 @@ UNLOCK_REASONS: dict[str, str] = {
     "blind_spot": "needs 10 books before a gap means anything",
     "contradiction": "needs 10 books — and telling me what you read for",
     "abandonment": "needs 10 books, a few of them put down unfinished",
+    "dnf_reason": "needs 3 books you put down and said why",
     "pairing": "needs 15 books to see which feelings travel together",
     "drift": "needs 15 books and two snapshots to see movement",
     "seasonality": "needs 25 books across a full year",
@@ -255,6 +256,79 @@ ABANDONMENT = [
     ),
 ]
 
+# ── 6b. DNF reasons — the reader's own answers, counted (gate 3 stated) ──
+#
+# The gate is 3 STATED REASONS, not books on the shelf: this claim reads the
+# dnf_reason column and nothing else, so a reader who has answered the question
+# three times has earned it whether their shelf holds 12 books or 400. See
+# GATE_POPULATION — a claim carries its own denominator.
+# (singular, plural). The tally puts a number in front of every one of these, and
+# "1 were too much" is the kind of seam that makes generated-sounding copy — the
+# whole point of hand-writing these sentences is that they read as written.
+DNF_REASON_NOUN: dict[str, tuple[str, str]] = {
+    "bored": ("bored you", "bored you"),
+    "too_much": ("was too much", "were too much"),
+    "badly_written": ("was badly written", "were badly written"),
+    "wrong_time": ("caught you at the wrong time", "caught you at the wrong time"),
+    "lost_me": ("lost you", "lost you"),
+    "drifted": ("you just drifted from", "you just drifted from"),
+}
+
+
+def _reason_noun(reason: str | None, n: int = 2) -> str:
+    forms = DNF_REASON_NOUN.get(reason or "")
+    if not forms:
+        return ""
+    return forms[0] if n == 1 else forms[1]
+
+
+def _reason_tally(c) -> str:
+    """"5 bored you, 2 lost you, 1 was the wrong time" — every figure countable."""
+    return ", ".join(
+        f"{row['books']} {_reason_noun(row['reason'], row['books'])}"
+        for row in c["dnf_reasons"]["counts"]
+        if _reason_noun(row["reason"])
+    )
+
+
+DNF_REASONS = [
+    InsightTemplate(
+        # One reason accounts for every book they put down. Much stronger than a
+        # breakdown, and rarer, so it outranks it.
+        "dnf_reason", "unanimous", GATES["dnf_reason"], True,
+        lambda c: bool(c.get("dnf_reasons") and c["dnf_reasons"]["unanimous"]),
+        lambda c: (f"You've put down {c['dnf_reasons']['stated']} books and given "
+                   f"the same reason every time: they "
+                   f"{_reason_noun(c['dnf_reasons']['top_reason'])}."),
+        lambda c: 0.9,
+    ),
+    InsightTemplate(
+        # A dominant reason, with the rest still visible in the tally.
+        "dnf_reason", "dominant", GATES["dnf_reason"], True,
+        lambda c: bool(c.get("dnf_reasons")
+                       and not c["dnf_reasons"]["unanimous"]
+                       and c["dnf_reasons"]["share"] >= 0.5),
+        lambda c: (f"Of the {c['dnf_reasons']['stated']} books you've put down and "
+                   f"said why: {_reason_tally(c)}. Mostly it isn't the book — it's "
+                   f"that they {_reason_noun(c['dnf_reasons']['top_reason'])}."
+                   if c["dnf_reasons"]["top_reason"] in ("wrong_time", "drifted")
+                   else f"Of the {c['dnf_reasons']['stated']} books you've put down "
+                        f"and said why: {_reason_tally(c)}."),
+        lambda c: min(1.0, c["dnf_reasons"]["share"]),
+    ),
+    InsightTemplate(
+        # No single reason dominates — the breakdown IS the finding.
+        "dnf_reason", "spread", GATES["dnf_reason"], True,
+        lambda c: bool(c.get("dnf_reasons")
+                       and not c["dnf_reasons"]["unanimous"]
+                       and c["dnf_reasons"]["share"] < 0.5),
+        lambda c: (f"You put books down for no one reason: {_reason_tally(c)}. "
+                   f"That's {c['dnf_reasons']['stated']} books, "
+                   f"{len(c['dnf_reasons']['counts'])} different reasons."),
+        lambda c: 0.5,
+    ),
+]
+
 # ── 7. Range (gate 8; narrowing variant needs a prior snapshot) ──
 RANGE = [
     InsightTemplate(
@@ -294,7 +368,7 @@ ARC = [
 # from the *renderable* registry — it is only ever a locked entry this pass.
 REGISTRY: list[InsightTemplate] = (
     CONTRADICTION + CONFIRMATION + BLIND_SPOT + DRIFT + INTENSITY + PAIRING
-    + ABANDONMENT + RANGE + ARC
+    + ABANDONMENT + DNF_REASONS + RANGE + ARC
 )
 
 # Category order for stable ranking ties + the locked list.
@@ -305,7 +379,7 @@ REGISTRY: list[InsightTemplate] = (
 # listing both would tell a 6-book reader twice that one thing isn't ready yet.
 CATEGORY_ORDER = [
     "contradiction", "confirmation", "blind_spot", "drift", "intensity_signature",
-    "pairing", "abandonment", "range", "arc", "seasonality",
+    "pairing", "abandonment", "dnf_reason", "range", "arc", "seasonality",
 ]
 
 
@@ -321,11 +395,26 @@ CATEGORY_ORDER = [
 #
 # The rule this encodes: a claim carries its own scope. Adding an insight that
 # reads some other column means adding its denominator here too.
-GATE_POPULATION: dict[str, str] = {"arc": "arc_count"}
+GATE_POPULATION: dict[str, str] = {
+    "arc": "arc_count",
+    # The DNF tally reads the dnf_reason column and nothing else. Gating it on
+    # tagged books would deny the finding to a reader who has answered "why did
+    # you put it down?" ten times but tags few books — and would report it as
+    # "based on N books" where N counts books that could never have contributed.
+    "dnf_reason": "dnf_stated_count",
+}
 
 
 def _population(ctx: dict, category: str) -> int:
-    return ctx[GATE_POPULATION.get(category, "tagged_count")]
+    """How many books could have supplied THIS category's evidence.
+
+    Absent key → 0 → the category is locked rather than raising. Callers build
+    ctx by hand (the locked list is generated from partial contexts), and a
+    missing denominator honestly means "no evidence for this yet", not a crash.
+    `test_every_gate_population_key_is_produced` keeps that tolerance from
+    hiding a typo in GATE_POPULATION.
+    """
+    return ctx.get(GATE_POPULATION.get(category, "tagged_count"), 0)
 
 
 def generate_insights(ctx: dict, *, limit: int = 4) -> tuple[list[dict], list[dict]]:
@@ -422,7 +511,13 @@ def build_dna(
     books: ``book_count``, rating style, abandonment, arcs, pairing, and
     stated-vs-revealed all stay book-only, because "you've logged 12 books" and
     "the books you rate highest" have to remain true sentences.
+
+    "Book-only" also means *opened* books. A `want_to_read` is a shelved
+    intention, not a reading, so it is dropped here — once, at the boundary,
+    rather than re-filtered by each signal that happens to remember to.
     """
+    # Drop the pile before anything counts rows or averages intensity.
+    sigs = sig.opened_only(sigs)
     book_count = len(sigs)
     # Every signal below reads one of these two lists, and which one it reads is
     # the whole editorial decision above.
@@ -465,6 +560,10 @@ def build_dna(
     pairs = sig.co_occurrence(sigs)
     top_pair = pairs.most_common(1)[0] if pairs else None
 
+    # Books only, and computed once: the tally is both a signal and its own gate
+    # population, and the two must be the same number.
+    dnf_tally = sig.dnf_reasons(sigs)
+
     prev_current = (prev_snapshot or {}).get("current_vector")
     prev_enduring = (prev_snapshot or {}).get("enduring_vector")
     range_prev_distinct = (
@@ -492,6 +591,10 @@ def build_dna(
         "top_pair": top_pair,
         "stated": sig.stated_vs_revealed(sigs, reads_for),
         "abandonment": sig.abandonment(sigs),
+        "dnf_reasons": dnf_tally,
+        # This claim's own denominator: books put down WITH a stated reason. Not
+        # tagged_count — see GATE_POPULATION.
+        "dnf_stated_count": dnf_tally["stated"] if dnf_tally else 0,
         "arc": sig.arc_shape(sigs),
         "drift": drift_val,
         "has_two_snapshots": snapshot_count >= 2,
