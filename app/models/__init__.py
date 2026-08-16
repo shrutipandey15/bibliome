@@ -14,6 +14,7 @@ from app.models.collection import (
     Collection, CollectionInvite, CollectionItem, CollectionMember, CollectionMessage,
 )
 from app.models.prompt import Prompt
+from app.models.push import PushSubscription
 from app.models.journal import JournalEntry, JournalEmotion, JournalKeyBundle
 from app.models.resonance import ResonanceMatch, ResonanceMessage, ResonanceThread
 
@@ -44,6 +45,7 @@ __all__ = [
     "CollectionInvite",
     "CollectionMessage",
     "Prompt",
+    "PushSubscription",
     "JournalEntry",
     "JournalEmotion",
     "JournalKeyBundle",

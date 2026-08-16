@@ -91,6 +91,21 @@ class Settings(BaseSettings):
     def email_enabled(self) -> bool:
         return bool(self.SMTP_HOST and self.SMTP_USER and self.SMTP_PASSWORD)
 
+    # Web Push (VAPID). Self-hosted rather than FCM/OneSignal: a third party
+    # would learn who is being notified about what, on a product whose whole
+    # premise is a private mirror. VAPID needs no vendor account.
+    #
+    # Generate a pair with:  python -m scripts.gen_vapid_keys
+    VAPID_PUBLIC_KEY: str | None = None
+    VAPID_PRIVATE_KEY: str | None = None
+    # A mailto: the push service can contact if a batch misbehaves. Required by
+    # the VAPID spec; browsers reject subscriptions signed without one.
+    VAPID_SUBJECT: str = "mailto:support@bibliome.app"
+
+    @property
+    def push_enabled(self) -> bool:
+        return bool(self.VAPID_PUBLIC_KEY and self.VAPID_PRIVATE_KEY)
+
     @property
     def cookie_secure(self) -> bool:
         # Secure flag in production; omitted on plain-http localhost dev.

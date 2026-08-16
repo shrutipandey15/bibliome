@@ -7,6 +7,7 @@ Precedence rules (blueprint Feature 5):
     ("3 readers responded…") rather than N pings.
 """
 
+import logging
 import uuid
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -14,6 +15,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.services.push_service import push_to_user
 from app.models.notification import (
     Notification,
     NotificationPrefs,
@@ -22,6 +24,8 @@ from app.models.notification import (
     TIER_SECURITY,
 )
 from app.services.social_service import is_blocked_between
+
+logger = logging.getLogger("bibliome.notifications")
 
 
 async def get_or_create_prefs(db: AsyncSession, user_id: uuid.UUID) -> NotificationPrefs:
@@ -120,6 +124,9 @@ async def notify(
             if deliver_after < existing.deliver_after.replace(tzinfo=timezone.utc):
                 existing.deliver_after = deliver_after
             await db.flush()
+            # No push: this event coalesced into a notification the reader has
+            # not read yet, so they have already been knocked on for it. Pushing
+            # again is how a five-message burst becomes five buzzes.
             return existing
 
     n = Notification(
@@ -128,6 +135,19 @@ async def notify(
     )
     db.add(n)
     await db.flush()
+
+    # Push rides on the SAME decisions made above — prefs, blocks, self-suppression
+    # and quiet hours — rather than re-deriving them. Anything that stopped a
+    # notification being created has already returned; anything deferred by quiet
+    # hours is not pushed now, because the point of quiet hours is the phone
+    # staying silent. Best effort: a failed push must never fail the write that
+    # caused it.
+    if deliver_after <= now:
+        try:
+            await push_to_user(db, user_id, kind, payload)
+        except Exception:  # noqa: BLE001 — a courtesy layer cannot break the caller
+            logger.exception("push failed for notification %s", n.id)
+
     return n
 
 
