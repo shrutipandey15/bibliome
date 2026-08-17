@@ -52,8 +52,13 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins_list,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    # Spelled out rather than "*". With allow_credentials the wildcard is the
+    # riskier default: it lets an allowed origin drive any method and send any
+    # header with the session attached. These are what the client actually uses
+    # — Content-Type and Authorization are the only headers apiFetch sets, and
+    # the routers only ever expose these five verbs.
+    allow_methods=["GET", "POST", "PATCH", "PUT", "DELETE"],
+    allow_headers=["Content-Type", "Authorization"],
 )
 
 # Routers

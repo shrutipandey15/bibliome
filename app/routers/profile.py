@@ -84,6 +84,12 @@ def _sanitize_bio(text: str | None) -> str | None:
 
 # ── Profile ──
 
+# The only User columns PATCH /me/profile may write. Keep in step with
+# ProfileUpdate; anything absent here is ignored rather than rejected, so an
+# older client sending a field we have since retired still succeeds.
+ALLOWED_PROFILE_FIELDS = frozenset({"display_name", "bio", "profile_visibility"})
+
+
 @router.get("/me/profile")
 async def get_my_profile(
     db: AsyncSession = Depends(get_db),
@@ -102,7 +108,14 @@ async def update_my_profile(
     update = data.model_dump(exclude_unset=True)
     if "bio" in update:
         update["bio"] = _sanitize_bio(update["bio"])
+    # setattr straight off the payload is only as safe as ProfileUpdate is
+    # narrow, and that coupling is invisible from here: adding one field to the
+    # schema — is_admin, email, password_hash — would silently make it writable
+    # by anyone who can PATCH their own profile. The allowlist is spelled out at
+    # the loop so the blast radius of a schema edit stays local to the schema.
     for field, value in update.items():
+        if field not in ALLOWED_PROFILE_FIELDS:
+            continue
         setattr(current_user, field, value)
     await db.flush()
     return await compose_profile(db, current_user.id, current_user)

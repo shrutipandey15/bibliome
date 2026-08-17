@@ -117,3 +117,37 @@ async def test_forgot_password_is_uniform_for_unknown_email(client):
     r = await client.post("/api/auth/forgot-password", json={"email": "nobody@example.com"})
     assert r.status_code == 200
     assert "if that email exists" in r.json()["message"].lower()
+
+
+async def test_reset_password_is_rate_limited(client):
+    """POST /auth/reset-password sits behind auth_limiter like the rest of /auth.
+
+    Without this the endpoint was an unthrottled guessing oracle: the reset
+    token is the only thing between a caller and an account, and there is no
+    lockout keyed to it the way login_lockout is keyed to an email. [#3]
+
+    conftest relaxes auth_limiter to 100000 because every test shares one
+    synthetic IP, so this test restores the production cap for its own duration
+    — otherwise it would pass whether or not the route is wired to the limiter.
+    """
+    from app.middleware import rate_limit
+
+    original = rate_limit.auth_limiter.max_requests
+    rate_limit.auth_limiter.max_requests = 10
+    rate_limit.auth_limiter._hits.clear()
+    try:
+        await _assert_reset_password_limited(client)
+    finally:
+        rate_limit.auth_limiter.max_requests = original
+        rate_limit.auth_limiter._hits.clear()
+
+
+async def _assert_reset_password_limited(client):
+    body = {"token": "not-a-real-token", "new_password": "hunter2pass"}
+
+    for _ in range(10):
+        r = await client.post("/api/auth/reset-password", json=body)
+        assert r.status_code == 400, r.text  # rejected on the token, not the limit
+
+    r = await client.post("/api/auth/reset-password", json=body)
+    assert r.status_code == 429, r.text

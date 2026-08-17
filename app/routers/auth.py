@@ -78,10 +78,18 @@ async def register(
     email = data.email.lower().strip()
     username = data.username.strip()
 
-    disposable_domains = {"tempmail", "throwaway", "mailinator", "guerrilla", "yopmail", "10minutemail"}
-    email_domain = email.split("@")[1].split(".")[0] if "@" in email else ""
-    if email_domain in disposable_domains:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Please use a real email address")
+    # There was a disposable-domain blocklist here. It was removed rather than
+    # extended: it matched only the first label of the domain, so it let through
+    # guerrillamail.com and temp-mail.org — two of the six it was written to
+    # catch — was bypassed by any subdomain (x.mailinator.com), and rejected a
+    # legitimate tempmail.mycompany.co.uk. Six names cannot cover a space of
+    # thousands of providers, so it bought no real protection while occasionally
+    # turning away a real reader.
+    #
+    # If signup abuse ever becomes a genuine problem, the fix is a maintained
+    # blocklist matched on the full registrable domain, or email verification
+    # (there is none today) — not a hand-written set of substrings. Until then
+    # register_limiter is what actually rate-limits abuse.
 
     try:
         user = await register_user(db, email=email, username=username, password=data.password, display_name=data.display_name)
@@ -130,7 +138,12 @@ async def forgot_password(
 
 
 @router.post("/reset-password")
-async def reset_password(data: ResetPasswordRequest, response: Response, db: AsyncSession = Depends(get_db)):
+async def reset_password(
+    data: ResetPasswordRequest,
+    request: Request,
+    response: Response,
+    db: AsyncSession = Depends(get_db),
+):
     """Reset password using the token from the reset email.
 
     A reset proves control of the email, not knowledge of the old password — so
@@ -140,7 +153,13 @@ async def reset_password(data: ResetPasswordRequest, response: Response, db: Asy
     We therefore mark the wrap stale and say so in the response. With the recovery
     code the journal comes back; without it, it is gone for good. The API states
     that plainly at the moment it becomes true (journalCryptoContract.md §5).
+
+    Rate-limited like the rest of /auth: the token is the only thing standing
+    between a caller and an account takeover, so an unthrottled endpoint here is
+    an offline-speed guessing oracle against a token we do not lock out on.
     """
+    await auth_limiter.check(request)
+
     result = await db.execute(
         select(User).where(User.reset_token == hash_token(data.token))
     )
