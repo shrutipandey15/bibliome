@@ -12,9 +12,12 @@ build/
 venv/
 env/
 
-# Environment variables
+# Environment variables. The bare pattern matches at any depth, but
+# deploy/env.production is spelled out because it was committed once anyway —
+# it carried a live VAPID private key until the history was rewritten.
 .env
 env.production
+deploy/env.production
 
 # IDE
 .vscode/
