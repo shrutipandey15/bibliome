@@ -45,19 +45,11 @@ jobs:
       - name: Run tests
         run: python -m pytest
 
-      # The two DNA engine guards. Neither touches the database.
-      #
-      # The probe fails if any archetype's win share leaves the accepted band on
-      # the correlated shelf model — its own docstring asked to be wired in here
-      # "so the next re-anchor can't regress silently", and for a while it wasn't.
-      # The audit fails on broken invariants: a vocabulary table missing a slug, an
-      # un-normalised baseline, two archetypes sharing a primary pair, a type that
-      # cannot win on its own anchors, a gate that refuses an ordinary reader.
-      #
-      # Deliberately NOT --strict. The audit's warnings are deviations that want a
-      # human decision, not build breakage; run it locally and read the numbers.
       - name: DNA archetype distribution probe
         run: python -m scripts.dna_bias_probe
 
       - name: DNA engine audit
         run: python -m scripts.dna_audit
+
+      - name: DNA personality recovery
+        run: python -m scripts.dna_recovery --readers 120
