@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 from app.services import dna_signals as sig
-from app.services.dna_signals import GATES, MIN_BOOKS_FOR_DNA
+from app.services.dna_signals import GATES, MIN_BOOKS_FOR_DNA, MIN_EFFECTIVE_BOOKS_FOR_DNA
 from app.utils.emotions import EMOTIONS_BY_SLUG
 
 # Human-readable "what unlocks this" strings for the locked list (B7.6).
@@ -527,7 +527,19 @@ def build_dna(
     # are five titles we know nothing about — computing a profile from them would
     # be reading tea leaves in an empty cup.
     tagged = [s for s in sigs if s.emotions]
-    if len(tagged) < MIN_BOOKS_FOR_DNA:
+    # Two conditions, one gate. The raw count is the promise we print; the Kish
+    # effective sample size is the one that refuses to build a present-tense label
+    # out of a shelf the recency weighting has collapsed to a single book. See
+    # MIN_EFFECTIVE_BOOKS_FOR_DNA. The message is deliberately identical on both
+    # branches — "5 books" is still exactly what is required.
+    #
+    # KNOWN ROUGH EDGE: for a reader with >=5 tagged books whose ESS is short, that
+    # message reads "7 books with a feeling logged. At 5, the mirror starts to see
+    # you." — true but self-contradictory. Rare (it needs one recent book beside a
+    # set of fully decayed ones) and deliberately left alone this pass rather than
+    # invent copy; give this branch its own line when the wording is decided.
+    ess = sig.effective_sample_size(tagged)
+    if len(tagged) < MIN_BOOKS_FOR_DNA or ess < MIN_EFFECTIVE_BOOKS_FOR_DNA:
         return {
             "enough": False,
             "book_count": book_count,
@@ -622,8 +634,11 @@ def build_dna(
         "margin": gap,
         # When the leader barely clears the field, say so rather than pretending
         # the label was decisive.
+        # `scores` comes back ordered by true rank, so second place is just the
+        # next key. Re-sorting it here would rank the ROUNDED values and could name
+        # a runner-up that is not actually second.
         "runner_up": (
-            sig.archetype_dict(sorted(scores, key=scores.get, reverse=True)[1])["name"]
+            sig.archetype_dict(list(scores)[1])["name"]
             if archetype_id and gap < sig.HEDGE_ARCHETYPE_GAP else None
         ),
         # The receipt. Books only — `sigs`, not `vector_sigs` — because this line

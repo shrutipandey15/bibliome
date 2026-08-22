@@ -1,12 +1,12 @@
 """Archetype distribution probe for score_archetype().
 
 Why this exists: the P1-5 fix was validated against *independent uniform* readers,
-a model under which the scorer looks fair (~12.5% each). Real tagging is
+a model under which the scorer looks fair (~10% each, ~12.5% when it was written). Real tagging is
 correlated — a book makes you feel several things at once, and the picker groups
 by family — and under correlated tagging the scorer collapses onto two labels.
 
 Run:  python -m scripts.dna_bias_probe
-Exit code 1 if any archetype's win share falls outside [6%, 20%] on the
+Exit code 1 if any archetype's win share falls outside [4.8%, 16%] on the
 correlated model. Wire it into CI so the next re-anchor can't regress silently.
 
 No DB, no I/O. Pure math over app.services.dna_signals.
@@ -30,30 +30,67 @@ from app.services.dna_signals import (
     recency_weight,
     score_archetype,
 )
-from app.utils.emotions import EMOTIONS
+from app.utils.emotions import EMOTIONS, LOST_ME_SLUGS
 
 FAMILY = {e["slug"]: e["family"] for e in EMOTIONS}
 IDS = [t["id"] for t in PERSONALITY_TYPES]
 FAIR = 1.0 / len(IDS)
-LOWER, UPPER = 0.06, 0.20
+# Rescaled from (0.06, 0.20) when the engine went from 8 archetypes to 10: the
+# original band was 0.48x-1.6x of a 12.5% fair share, and this is the same
+# multiplier against a 10% one. Widening it to keep the old absolute numbers would
+# have quietly loosened the test at exactly the moment two new types made it
+# matter more.
+LOWER, UPPER = 0.048, 0.16
+
+# Under-winners we are knowingly carrying, so CI is green on the debt we have
+# already looked at while a NEW one still fails the run. Membership is the record
+# of a decision, not a mute button — take a type out of here rather than widen the
+# band for it. An entry that is back inside the band FAILS the run too, so the
+# list cannot quietly rot into a permanent exemption.
+#
+# EMPTY as of the quiet_witness re-anchor. It held `quiet_witness`, which had
+# under-won since before the 10-archetype change (5.1% on 8 types, 4.2% on 10).
+# The cause was structural: its anchors were the two most contested slugs plus the
+# rarest experiential one, so it owned nothing. Moving it from awe to recognition
+# — which is what "books are your confessional" always meant — took it to 8.1% and
+# closed the debt rather than documenting it.
+KNOWN_SHORTFALL: set[str] = set()
 
 # What a real book actually makes you feel, together. Tags inside one of these
 # bundles are correlated by construction — which is the whole point, because the
 # scorer is a linear sum over marginal frequencies and therefore silently rewards
 # archetypes whose three primaries co-occur.
 BOOK_BUNDLES: dict[str, list[str]] = {
-    "romantasy_dark":   ["desire", "dread", "devastation", "rage", "awe"],
-    "romantasy_soft":   ["desire", "longing", "joy", "awe"],
-    "grief_litfic":     ["grief", "devastation", "catharsis", "tenderness"],
-    "cozy":             ["comfort", "tenderness", "joy"],
-    "thriller":         ["dread", "rage", "awe"],
-    "quiet_litfic":     ["recognition", "tenderness", "longing", "awe"],
-    "memoir":           ["recognition", "grief", "catharsis", "nostalgia"],
-    "comic_novel":      ["amusement", "joy", "recognition"],
-    "epic_fantasy":     ["awe", "dread", "devastation", "longing"],
-    "sad_romance":      ["longing", "grief", "desire", "devastation"],
+    "romantasy_dark":       ["desire", "dread", "devastation", "rage", "awe", "absorption"],
+    "romantasy_soft":       ["desire", "longing", "joy", "awe", "absorption"],
+    "grief_litfic":         ["grief", "devastation", "catharsis", "tenderness"],
+    "cozy":                 ["comfort", "tenderness", "joy"],
+    "thriller":             ["dread", "rage", "awe", "absorption"],
+    "quiet_litfic":         ["recognition", "tenderness", "longing", "awe"],
+    "memoir":               ["recognition", "grief", "catharsis", "nostalgia"],
+    "comic_novel":          ["amusement", "joy", "recognition"],
+    "epic_fantasy":         ["awe", "dread", "devastation", "longing"],
+    "epic_fantasy_hopeful": ["awe", "absorption", "joy", "longing"],
+    "horror":               ["dread", "revulsion", "absorption", "rage"],
+    "sad_romance":          ["longing", "grief", "desire", "devastation", "absorption"],
+    # absorption was added to the five bundles above that plainly carry it — a
+    # page-turner is a property of lots of books, not of two new genres. Seeding it
+    # only into the new bundles would have given it a tiny simulated base rate and
+    # made World-Diver and Adrenaline Seeker unwinnable by construction, so the
+    # probe would then have blessed thresholds derived from a rigged distribution.
+    #
+    # epic_fantasy was SPLIT rather than reused: it is grimdark-coded (awe, dread,
+    # devastation, longing) and does not represent the reader World-Diver targets,
+    # so epic_fantasy_hopeful tests that type fairly instead of borrowing a shelf
+    # built to test somebody else. horror does the same for Adrenaline Seeker.
+    #
+    # epic_fantasy_hopeful carries longing, NOT comfort. Comfort was the first
+    # draft and it distorted two types at once: it pushed comfort's simulated base
+    # rate to 0.048 against a 0.028 prior, taking Comfort Architect to 16.3%, while
+    # World-Diver rode the same bundle to 19.3%. "Worlds you don't want to leave"
+    # is longing anyway — the cozy bundle is where comfort belongs.
 }
-LOST_ME = [s for s in _ALL_SLUGS if FAMILY[s] == "It lost me"]
+LOST_ME = [s for s in _ALL_SLUGS if s in LOST_ME_SLUGS]
 
 
 def _norm(counts: Counter) -> dict[str, float]:
@@ -103,7 +140,7 @@ def tie_rate() -> None:
 
 def uniform_reader() -> None:
     """The most average reader possible. Should not be a 5-way tie."""
-    exp = [s for s in _ALL_SLUGS if FAMILY[s] != "It lost me"]
+    exp = [s for s in _ALL_SLUGS if s not in LOST_ME_SLUGS]
     best, scores, margin = score_archetype(_norm(Counter(dict.fromkeys(exp, 1))))
     print("\nTHE PERFECTLY BALANCED READER (equal share of all 14 experiential tags)")
     print("-" * 70)
@@ -135,7 +172,7 @@ def leverage() -> None:
 def independent_population(n_readers: int = 20_000, seed: int = 21) -> dict[str, float]:
     """The model the P1-5 fix was validated against: tags drawn independently."""
     random.seed(seed)
-    exp = [s for s in _ALL_SLUGS if FAMILY[s] != "It lost me"]
+    exp = [s for s in _ALL_SLUGS if s not in LOST_ME_SLUGS]
     wins: Counter = Counter()
     for _ in range(n_readers):
         weights = [random.gammavariate(4, 1) for _ in exp]
@@ -480,8 +517,20 @@ def main() -> int:
     drift_threshold()
 
     worst = sorted(shares.items(), key=lambda kv: -abs(kv[1] - FAIR))
-    print(f"\nfair share = {FAIR:.1%};  accepted band = {LOWER:.0%}–{UPPER:.0%}")
-    failures = [(k, v) for k, v in shares.items() if not LOWER <= v <= UPPER]
+    print(f"\nfair share = {FAIR:.1%};  accepted band = {LOWER:.1%}–{UPPER:.1%}")
+    for k in sorted(KNOWN_SHORTFALL):
+        print(f"  known shortfall, not failed: {k:24} {shares[k]:.1%}")
+    failures = [(k, v) for k, v in shares.items()
+                if not LOWER <= v <= UPPER and k not in KNOWN_SHORTFALL]
+    # A shortfall that has been fixed must leave the list. Otherwise the exemption
+    # outlives the problem and silently covers the next regression in that type.
+    recovered = [k for k in KNOWN_SHORTFALL if LOWER <= shares.get(k, 0) <= UPPER]
+    if recovered:
+        print("FAIL — these are in KNOWN_SHORTFALL but back inside the band; "
+              "delete them from the set:")
+        for k in recovered:
+            print(f"   {k:26} {shares[k]:.1%}")
+        return 1
     if failures:
         print("FAIL — archetypes outside the band on the correlated model:")
         for k, v in sorted(failures, key=lambda kv: -kv[1]):

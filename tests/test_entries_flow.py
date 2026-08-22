@@ -287,7 +287,7 @@ async def test_emotion_vocabulary_endpoint(client):
     r = await client.get("/api/emotions")
     assert r.status_code == 200
     body = r.json()
-    assert body["count"] == 18
+    assert body["count"] == 19
     slugs = {e["slug"] for e in body["emotions"]}
     assert "nostalgia" in slugs and "devastation" in slugs
     assert "two_am" not in slugs and "chaos" not in slugs  # old vocab retired
@@ -295,7 +295,10 @@ async def test_emotion_vocabulary_endpoint(client):
         assert e["slug"] and e["name"] and e["color"] and e["symbol"] and e["family"] and e["phrase"]
     # phrase is the first-person line the UI shows, distinct from the plain word.
     conf = next(e for e in body["emotions"] if e["slug"] == "confusion")
-    assert conf["name"] == "confusion" and conf["phrase"] == "I lost the plot"
+    assert conf["name"] == "confusion" and conf["phrase"] == "I have no idea what happened"
+    # The 19th slug is served like any other, families included.
+    absorb = next(e for e in body["emotions"] if e["slug"] == "absorption")
+    assert absorb["phrase"] == "I couldn't put it down" and absorb["family"] == "It got me"
 
 
 # ── B2.2: TBR fast-add — one tap, no modal ──

@@ -70,14 +70,18 @@ async def test_public_card_hedges_when_the_in_app_mirror_hedges(client):
     of that decision, not a second opinion with more confidence than the first.
     """
     h = await _user(client, "hedged")
-    # grief_romantic and control_intellectual held to a gap of ~0.0006, well inside
-    # HEDGE_ARCHETYPE_GAP, so build_dna fills in a runner-up. Asserted rather than
-    # skipped-if-absent: a guard that quietly opts out when its own fixture drifts
-    # is not a guard.
-    for i in range(6):
-        await _add_book(client, h, f"Grief {i}", ["grief", "catharsis", "devastation"])
-    for i in range(8):
+    # control_intellectual and midnight_arsonist held to a gap of ~0.0002, well
+    # inside HEDGE_ARCHETYPE_GAP, so build_dna fills in a runner-up. Asserted
+    # rather than skipped-if-absent: a guard that quietly opts out when its own
+    # fixture drifts is not a guard.
+    #
+    # Re-picked when quiet_witness was re-anchored onto recognition: the old shelf
+    # (grief_romantic vs control_intellectual) opened to a 0.023 gap and stopped
+    # exercising the hedge at all. The failure message below is what caught it.
+    for i in range(7):
         await _add_book(client, h, f"Control {i}", ["recognition", "dread", "awe"])
+    for i in range(6):
+        await _add_book(client, h, f"Arson {i}", ["amusement", "awe", "rage"])
 
     in_app = (await client.get("/api/dna/profile", headers=h)).json()
     assert in_app["runner_up"], (

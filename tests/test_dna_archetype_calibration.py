@@ -16,22 +16,24 @@ import pytest
 from app.services import dna_signals as S
 from app.services.dna_engine import PERSONALITY_TYPES
 from app.services.dna_signals import score_archetype
-from app.utils.emotions import EMOTIONS
+from app.utils.emotions import EMOTIONS, LOST_ME_SLUGS
 
 FAMILY = {e["slug"]: e["family"] for e in EMOTIONS}
-EXPERIENTIAL = [s for s in S._ALL_SLUGS if FAMILY[s] != "It lost me"]
+EXPERIENTIAL = [s for s in S._ALL_SLUGS if s not in LOST_ME_SLUGS]
 
 BOOK_BUNDLES = {
-    "romantasy_dark": ["desire", "dread", "devastation", "rage", "awe"],
-    "romantasy_soft": ["desire", "longing", "joy", "awe"],
-    "grief_litfic":   ["grief", "devastation", "catharsis", "tenderness"],
-    "cozy":           ["comfort", "tenderness", "joy"],
-    "thriller":       ["dread", "rage", "awe"],
-    "quiet_litfic":   ["recognition", "tenderness", "longing", "awe"],
-    "memoir":         ["recognition", "grief", "catharsis", "nostalgia"],
-    "comic_novel":    ["amusement", "joy", "recognition"],
-    "epic_fantasy":   ["awe", "dread", "devastation", "longing"],
-    "sad_romance":    ["longing", "grief", "desire", "devastation"],
+    "romantasy_dark":       ["desire", "dread", "devastation", "rage", "awe", "absorption"],
+    "romantasy_soft":       ["desire", "longing", "joy", "awe", "absorption"],
+    "grief_litfic":         ["grief", "devastation", "catharsis", "tenderness"],
+    "cozy":                 ["comfort", "tenderness", "joy"],
+    "thriller":             ["dread", "rage", "awe", "absorption"],
+    "quiet_litfic":         ["recognition", "tenderness", "longing", "awe"],
+    "memoir":               ["recognition", "grief", "catharsis", "nostalgia"],
+    "comic_novel":          ["amusement", "joy", "recognition"],
+    "epic_fantasy":         ["awe", "dread", "devastation", "longing"],
+    "epic_fantasy_hopeful": ["awe", "absorption", "joy", "longing"],
+    "horror":               ["dread", "revulsion", "absorption", "rage"],
+    "sad_romance":          ["longing", "grief", "desire", "devastation", "absorption"],
 }
 
 
@@ -142,14 +144,33 @@ def test_exact_ties_are_vanishingly_rare():
     assert ties / len(readers) < 0.01
 
 
+# Shelves that are genuinely unambiguous, meaning every tag points one way.
+#
+# `["amusement", "joy", "recognition"] -> midnight_arsonist` used to sit in this
+# list and was never actually unambiguous: midnight_arsonist is anchored on
+# amusement + awe + rage, so that reader matched ONE of its three anchors and won
+# on the strength of the others being unclaimed. When quiet_witness took over
+# recognition the fixture flipped to quiet_witness — correctly, on a one-anchor
+# match each way. A test that asserts an obvious answer has to use a shelf whose
+# answer is obvious.
 @pytest.mark.parametrize("tags,expected", [
     (["comfort", "tenderness", "joy"], "comfort_architect"),
     (["grief", "devastation", "catharsis"], "grief_romantic"),
-    (["amusement", "joy", "recognition"], "midnight_arsonist"),
     (["dread", "rage", "devastation"], "soft_masochist"),
+    (["amusement", "awe", "rage"], "midnight_arsonist"),
+    (["tenderness", "recognition", "nostalgia"], "quiet_witness"),
+    (["desire", "absorption", "longing"], "obsessive_romantic"),
+    (["awe", "absorption", "joy"], "world_diver"),
+    (["dread", "revulsion", "absorption"], "adrenaline_seeker"),
+    (["recognition", "dread", "awe"], "control_intellectual"),
+    (["longing", "joy", "catharsis"], "emotional_archaeologist"),
 ])
 def test_unambiguous_readers_still_get_the_obvious_label(tags, expected):
-    """Calibration must not cost the engine its plain-language correctness."""
+    """Calibration must not cost the engine its plain-language correctness.
+
+    Every archetype is covered, so a re-anchor cannot quietly make one of them
+    unreachable on its own anchors.
+    """
     assert score_archetype(_norm(Counter(dict.fromkeys(tags, 1))))[0] == expected
 
 

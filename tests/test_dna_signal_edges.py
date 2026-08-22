@@ -9,6 +9,7 @@ sentence is a lie.
 from datetime import datetime, timedelta, timezone
 
 from app.services.dna_insights import build_dna
+from app.services import dna_signals as sig
 from app.services.dna_signals import EntrySig
 from app.utils.emotions import EMOTIONS
 
@@ -85,6 +86,11 @@ def test_blind_spot_unlocks_once_ten_books_carry_a_feeling():
     assert "blind_spot" in {i["category"] for i in dna["insights"]}
 
 
+# 1/TAGGED must land exactly on the rare band's 0.05 edge, so the test proves the
+# denominator rather than the band.
+TAGGED = 20
+
+
 def test_rare_share_denominator_is_tagged_books():
     """`rare` says an emotion 'shows up in under X% of what you read'.
 
@@ -97,10 +103,18 @@ def test_rare_share_denominator_is_tagged_books():
     raw shelf of 30 instead, the same books read as 3.3% and every one of them is
     reported as rare. The raw denominator manufactures rarity out of untagged
     imports.
+
+    The tagged count is pinned to 20 and the padding derived from the vocabulary
+    size, not hardcoded: at 18 slugs this read `18 + 2`, and the 19th slug silently
+    moved every emotion to 1/21 = 4.8% — inside the rare band — so the test failed
+    on the boundary it exists to hold rather than on the behaviour it describes.
     """
     slugs = [e["slug"] for e in EMOTIONS]
-    sigs = [_sig([slug], 10 + i) for i, slug in enumerate(slugs)]   # 18 tagged
-    sigs += [_sig(["joy"], 40), _sig(["grief"], 41)]                # 20 tagged
+    assert len(slugs) <= TAGGED, "vocabulary outgrew the 1/20 = 5% construction"
+    sigs = [_sig([slug], 10 + i) for i, slug in enumerate(slugs)]
+    # Top up to exactly TAGGED tagged books by repeating emotions that are already
+    # present — a repeat lifts that one above 5% and leaves every other at exactly 5%.
+    sigs += [_sig([slugs[i % len(slugs)]], 40 + i) for i in range(TAGGED - len(slugs))]
     sigs += [_sig([], 200 + i) for i in range(10)]                  # untagged padding
     dna = _dna(sigs)
     rare_texts = [i["text"] for i in dna["insights"] if i["variant"] == "rare"]
@@ -265,3 +279,60 @@ def test_emotion_claims_still_report_the_tagged_count():
             assert insight["n"] == 5, (
                 f"{insight['category']} reports n={insight['n']}, not the 5 tagged books"
             )
+
+
+# ── The effective-sample-size half of the DNA gate ──
+#
+# MIN_BOOKS_FOR_DNA counts tagged books. It cannot see that the recency-weighted
+# vector the archetype is actually computed from may be listening to only one of
+# them, which is a present-tense label built on a shelf that no longer exists.
+
+def test_ess_is_scale_invariant_so_an_old_shelf_is_not_a_small_one():
+    """Age alone must not shrink the effective sample.
+
+    Five books all read two years ago decay to the same tiny weight, and the
+    weighted vector still averages five opinions evenly. Punishing that would gate
+    out every reader who simply stopped logging for a while — a different problem
+    from the one this exists to catch, and not one a DNA label is wrong about.
+    """
+    recent = sig.effective_sample_size([_sig(["joy"], 7) for _ in range(5)])
+    ancient = sig.effective_sample_size([_sig(["joy"], 730) for _ in range(5)])
+    assert round(recent, 6) == round(ancient, 6) == 5.0
+
+
+def test_ess_collapses_when_one_recent_book_dominates_a_stale_shelf():
+    """The case the condition is for: raw count 5, effective sample ~1."""
+    skewed = [_sig(["joy"], 2)] + [_sig(["grief"], 900) for _ in range(4)]
+    ess = sig.effective_sample_size(skewed)
+    assert ess < 1.5, ess
+    assert len([s for s in skewed if s.emotions]) == 5  # the raw gate sees five
+
+
+def test_untagged_books_do_not_prop_up_the_effective_sample():
+    """An untagged book contributes nothing to the vector, so it must not count
+    toward the gate that protects the vector either."""
+    tagged = [_sig(["joy"], 10 + i) for i in range(5)]
+    padded = tagged + [_sig([], 10 + i) for i in range(25)]
+    assert sig.effective_sample_size(tagged) == sig.effective_sample_size(padded)
+
+
+def test_skewed_shelf_is_gated_even_though_it_clears_the_raw_count():
+    """End to end: five tagged books, refused, because four of them are gone."""
+    skewed = [_sig(["joy"], 2)] + [_sig(["grief"], 900) for _ in range(4)]
+    out = _dna(skewed)
+    assert out["enough"] is False
+    assert out["tagged_count"] == 5           # the raw count was satisfied
+    assert out["needed"] == sig.MIN_BOOKS_FOR_DNA
+
+
+def test_an_ordinary_slow_reader_is_not_gated():
+    """The threshold must not land on people who merely read slowly.
+
+    Five tagged books spread evenly across two years is a normal shelf, not a
+    degenerate one, and it is exactly the population sitting at the five-book
+    minimum — the worst group to withhold from silently. This is the assertion
+    that pins MIN_EFFECTIVE_BOOKS_FOR_DNA down: at 3.0 this reader is refused.
+    """
+    slow = [_sig(["joy"], d) for d in (5, 90, 200, 400, 700)]
+    assert sig.effective_sample_size(slow) >= sig.MIN_EFFECTIVE_BOOKS_FOR_DNA
+    assert _dna(slow)["enough"] is True

@@ -365,17 +365,26 @@ def test_grief_romantic_and_soft_masochist_do_not_tie_on_grief_devastation():
 
 
 # Pairs sharing two primaries, which is a tie waiting to be broken by declaration
-# order. P1-5 separated grief_romantic/soft_masochist. This one is NOT yet fixed:
-# a reader tagging exactly comfort + longing scores 1.0 against 1.0 and gets
-# The Comfort Architect purely because it is listed first. Re-anchoring
-# obsessive_romantic is a voice decision, not a mechanical one, so it is recorded
-# here rather than hidden — the abstention work does at least make the card say
-# "closest to" and name the runner-up, since the margin comes back 0.0.
-KNOWN_TWIN_OVERLAP = {frozenset({"comfort_architect", "obsessive_romantic"})}
+# order. P1-5 separated grief_romantic/soft_masochist. The last one —
+# comfort_architect/obsessive_romantic, where a reader tagging exactly comfort +
+# longing scored 1.0 against 1.0 and got The Comfort Architect purely because it is
+# listed first — was closed by re-anchoring obsessive_romantic from comfort onto
+# absorption. The voice decision that note was waiting on got made.
+#
+# This is now EMPTY and must stay empty. It is deliberately kept as a named set
+# rather than deleted, so a future violation reads as "this list grew" instead of
+# as a fresh mystery.
+KNOWN_TWIN_OVERLAP: set[frozenset[str]] = set()
 
 
 def test_no_two_archetypes_share_more_than_one_primary():
-    """A shared pair is a tie waiting to be broken by declaration order."""
+    """A shared pair is a tie waiting to be broken by declaration order.
+
+    All 45 pairs across the 10 archetypes, not the 28 across the original 8: the
+    two absorption-anchored additions are exactly the kind of change that
+    reintroduces an overlap, and absorption itself now anchors three types.
+    """
+    assert len(PERSONALITY_TYPES) == 10, "update this test's coverage note"
     offenders = set()
     for i, a in enumerate(PERSONALITY_TYPES):
         for b in PERSONALITY_TYPES[i + 1:]:
@@ -393,6 +402,35 @@ def test_every_archetype_carries_exactly_two_anti_emotions():
     carried one and won 5.4% of simulated readers against an expected ~12.5%."""
     for t in PERSONALITY_TYPES:
         assert len(t["anti_emotions"]) == 2, f"{t['id']}: {t['anti_emotions']}"
+
+
+def test_no_archetype_carries_a_dead_anti_emotion():
+    """Both antis must be emotions readers actually tag.
+
+    Counting to two is not enough. Under centering an anti_emotion contributes
+    0.5 * (population_rate - this reader's rate), so an anti drawn from "It lost
+    me" — indifference, boredom, confusion, all at a 0.004 baseline — is ~0 for
+    everyone. Six of the ten types carried one, which meant they were measured on
+    ONE dimension of avoidance while the other four were measured on two: exactly
+    the asymmetry the "exactly two" rule exists to prevent, in a form the count
+    could not see.
+
+    Disengagement still tells against a reader, but through the vector rather than
+    a penalty term — frequency_vector normalises over the whole vocabulary, so
+    tagging boredom dilutes every other share. The anti was double-counting it.
+    """
+    for t in PERSONALITY_TYPES:
+        dead = [e for e in t["anti_emotions"] if e in LOST_ME_SLUGS]
+        assert not dead, (
+            f"{t['id']} has disengagement anti-emotion(s) {dead}; nobody tags them, "
+            "so this type effectively carries one anti, not two"
+        )
+        for e in t["anti_emotions"]:
+            rate = S.BASELINE_VECTOR.get(e, 0.0)
+            assert rate > 0.010, (
+                f"{t['id']}: anti {e!r} sits at baseline {rate:.4f}, at or below the "
+                "floor — its penalty never fires. See scripts/dna_audit.py FREE_ANTI"
+            )
 
 
 def test_comfort_architect_is_reachable_on_its_own_primaries():
@@ -443,3 +481,41 @@ def test_basis_is_absent_when_the_engine_abstained():
     assert res["enough"] is True
     assert res["archetype"] is None
     assert res["basis"] is None
+
+
+def test_score_archetype_returns_scores_in_true_rank_order():
+    """`scores` is ordered by the exact floats, so second place is list(scores)[1].
+
+    dna_insights builds the card's `runner_up` from that position. It used to
+    re-sort the dict itself, which ranked the ROUNDED values and could name a
+    runner-up that was not really second — the same rounding bug as ranking the
+    leader, one function further out. Measured at ~1 in 6000 simulated readers
+    before the fix (`python -m scripts.dna_audit`, code ROUNDED_RANK_DISAGREES).
+    """
+    vec = {slug: 0.0 for slug in S._ALL_SLUGS}
+    vec["dread"], vec["revulsion"], vec["absorption"], vec["awe"] = 0.3, 0.3, 0.3, 0.1
+    best, scores, _gap = score_archetype(vec)
+    assert list(scores)[0] == best
+    assert list(scores.values()) == sorted(scores.values(), reverse=True)
+
+
+def test_runner_up_position_matches_a_recomputed_exact_ranking():
+    """The hedge names a specific other archetype, so it must be the right one.
+
+    Recomputes the exact (unrounded) scores from the raw scorer and checks the
+    dict's second key against them, rather than against the dict's own order —
+    otherwise the assertion is true by construction and proves nothing.
+    """
+    for vec in (
+        {**{s: 0.0 for s in S._ALL_SLUGS}, "awe": 0.5, "absorption": 0.5},
+        {**{s: 0.0 for s in S._ALL_SLUGS}, "tenderness": 0.4, "awe": 0.4, "nostalgia": 0.2},
+        {**{s: 0.0 for s in S._ALL_SLUGS}, "dread": 0.34, "absorption": 0.33, "rage": 0.33},
+    ):
+        best, scores, _ = score_archetype(vec)
+        exact = sorted(
+            ((S._raw_archetype_score(vec, t) - S._BASELINE_OFFSET[t["id"]], t["id"])
+             for t in PERSONALITY_TYPES),
+            reverse=True,
+        )
+        assert list(scores)[0] == exact[0][1] == best
+        assert list(scores)[1] == exact[1][1]

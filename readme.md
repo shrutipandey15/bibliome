@@ -7,8 +7,9 @@ Bibliome started as a question I couldn't answer with any reading app I'd used: 
 but what reading did to me._ Star ratings can't hold that. "4/5, would recommend" is a review of a
 product. It says nothing about the fact that the book made you cry on a train.
 
-So the unit here isn't a rating. It's an econviniencemotion, plus how hard it hit. You log a book, you pick
-from 18 emotions — _it wrecked me_, _it saw me_, _it left me cold_ — and give each one a strength
+So the unit here isn't a rating. It's an emotion, plus how hard it hit. You log a book, you pick
+from 19 emotions — _I was not okay after_, _how did it know that about me_, _I felt absolutely
+nothing_ — and give each one a strength
 from 1 to 10. Do that five times and the system will tell you something about yourself. Do it fifty
 times and it gets uncomfortably specific.
 
@@ -22,19 +23,31 @@ second taxonomy anywhere. That constraint is load-bearing; the one time it drift
 grew its own copy) it silently broke the engine's scoring, and that bug is why the file now says
 "single source of truth" at the top in slightly aggressive language.
 
-They're grouped into five families, which are a UI grouping only — the DB stores the flat slug:
+They're grouped into six families, which are a UI grouping only — the DB stores the flat slug:
 
-| Family              | Emotions                                    |
-| ------------------- | ------------------------------------------- |
-| It hurt             | devastation, grief, dread, rage             |
-| It held me          | comfort, tenderness, joy, amusement         |
-| It wanted something | longing, desire, nostalgia                  |
-| It moved me         | awe, recognition, catharsis                 |
-| It lost me          | boredom, revulsion, confusion, indifference |
+| Family               | Emotions                             |
+| -------------------- | ------------------------------------ |
+| It wrecked me        | devastation, grief, catharsis        |
+| It felt good         | comfort, tenderness, joy, amusement  |
+| It got under my skin | dread, rage, revulsion               |
+| It made me want      | longing, desire, nostalgia           |
+| It got me            | awe, recognition, absorption         |
+| It lost me           | boredom, confusion, indifference     |
 
 "It lost me" is deliberately not an insult category. Those are registers of _disengagement_ — the
-book failing you — so they're valid to tag and they count against you as anti-emotions in scoring,
-but no personality archetype is anchored on them. Being bored a lot isn't an identity.
+book failing you — so they're valid to tag, but no personality archetype is anchored on them. Being
+bored a lot isn't an identity.
+
+They still tell against you, just not through a penalty term. The emotion vector is normalised over
+the whole vocabulary, so tagging boredom dilutes the share of everything else and lowers every
+archetype's raw score. Six archetypes used to ALSO carry one of these as an anti-emotion, which
+double-counted the same thing and — because nobody tags them — left those six measured on one real
+dimension of avoidance while the other four were measured on two. Every anti-emotion is now an
+emotion readers actually tag.
+
+Revulsion used to sit in that family and no longer does. Disgust is a book doing something _to_
+you — it has a pulse behind it, unlike boredom — so it lives under "It got under my skin" and is
+free to anchor an archetype. The Adrenaline Seeker is built on it.
 
 Old slugs still resolve. `chaos → confusion`, `wit → amusement`, `obsession → desire`. Historical
 rows get remapped forward on read rather than migrated, so nothing anyone logged in 2024 stops
@@ -48,13 +61,28 @@ counting.
 
 Rule-based, deterministic, ~500 lines, no ML. Given your entries it computes emotion frequency,
 average intensity, recency-weighted frequency, co-occurrence, and anti-emotion penalties, then
-lands you on one of eight archetypes: The Grief Romantic, The Control-Seeking Intellectual, The Soft
+lands you on one of ten archetypes: The Grief Romantic, The Control-Seeking Intellectual, The Soft
 Masochist, The Comfort Architect, The Midnight Arsonist, The Quiet Witness, The Obsessive Romantic,
-The Emotional Archaeologist.
+The Emotional Archaeologist, The World-Diver, The Adrenaline Seeker.
 
 I get asked why there's no model behind this. Because I want to be able to answer "why did it say
 that about me" with an actual number, and because a hallucinated sentence about someone's inner life
 is worse than no sentence. The scoring breakdown ships with the result.
+
+Two scripts exist to keep that promise honest, and both should be run after touching
+`PERSONALITY_TYPES`, `EMOTIONS`, `BASELINE_VECTOR`, or the scoring math:
+
+```
+python -m scripts.dna_bias_probe   # is the win-share distribution fair? sets the thresholds
+python -m scripts.dna_audit        # what is the engine SAYING, and is that sentence true?
+```
+
+The probe is a calibration instrument — `HEDGE_ARCHETYPE_GAP` and `DRIFT_SNAPSHOT_THRESHOLD` are
+both pinned to percentiles it measures. The audit is a diagnostic: which emotion leads to which
+archetype at what margin, whether every type can win on its own anchors, whether the readers who get
+a label actually read the thing it is named for, and what the gate does to a slow reader. It grades
+findings ERROR / WARN / INFO and exits non-zero on ERROR (`--strict` to fail on WARN too). Neither
+is optimistic by design — read the numbers, not just the exit code.
 
 On top of the engine, [dna_signals.py](app/services/dna_signals.py) computes two profiles side by
 side — **enduring** (all-time, unweighted) and **current** (exponentially recency-weighted, 120-day

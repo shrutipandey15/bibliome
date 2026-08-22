@@ -28,8 +28,8 @@ def _canonical_emotions(emotions) -> list[str]:
             out.append(canon)
     return out
 
-# Maps the engine's internal personality ids → the 8 canonical "bible" slugs.
-# The engine currently recognises 8 types; this mapping assigns each one a stable
+# Maps the engine's internal personality ids → the 10 canonical "bible" slugs.
+# The engine currently recognises 10 types; this mapping assigns each one a stable
 # bible slug. Some matches are judgment calls — update if the product team
 # clarifies the intent of a specific mapping.
 DNA_TYPE_SLUG_MAP: dict[str, str] = {
@@ -41,11 +41,16 @@ DNA_TYPE_SLUG_MAP: dict[str, str] = {
     "quiet_witness":           "tender_witness",
     "obsessive_romantic":      "two_am_scholar",
     "emotional_archaeologist": "awe_chaser",
+    # The two absorption-anchored types added with the 19th slug. No pre-existing
+    # bible noun fit either, so they map to themselves.
+    "world_diver":             "world_diver",
+    "adrenaline_seeker":       "adrenaline_seeker",
 }
 
 BIBLE_DNA_SLUGS = frozenset({
     "grief_romantic", "chaos_cartographer", "soft_masochist", "awe_chaser",
     "comfort_architect", "rage_archivist", "tender_witness", "two_am_scholar",
+    "world_diver", "adrenaline_seeker",
 })
 
 
@@ -55,23 +60,41 @@ def dna_type_slug_for(engine_id: str | None) -> str | None:
     return DNA_TYPE_SLUG_MAP.get(engine_id)
 
 
-# Personality "fingerprints" over the canonical 18-emotion vocabulary.
+# Personality "fingerprints" over the canonical 19-emotion vocabulary.
 #
 # INVARIANT: every slug in primary_emotions / anti_emotions MUST be a canonical
 # VALID_SLUGS value (see tests/test_dna_engine.py::test_personality_slugs_are_canonical).
-# Fingerprints were migrated to the 18-emotion vocabulary:
+# Fingerprints were migrated to the 19-emotion vocabulary:
 #   wit→amusement, chaos→confusion, two_am→longing (the old removed slugs).
 # Archetypes are anchored only on *experiential* emotions; the "It lost me" family
-# (boredom/revulsion/confusion/indifference) appears solely as anti_emotions —
-# they describe a book failing you, not a reading identity. Across the 8 types,
-# every experiential emotion is used as a primary at least once
-# (test_every_experiential_emotion_is_used_somewhere).
+# (boredom/confusion/indifference) appears solely as anti_emotions — they describe
+# a book failing you, not a reading identity. Note revulsion is NOT among them any
+# more: it moved to "It got under my skin" with the six-family rename, because
+# disgust is a book doing something to you, and it now anchors The Adrenaline
+# Seeker. Across the 10 types, every experiential emotion is used as a primary at
+# least once (test_every_experiential_emotion_is_used_somewhere).
 #
-# Two further invariants, both added after simulation found them violated (P1-5):
+# Two further invariants, both added after simulation found them violated (P1-5)
+# and enforced across all 10 types by
+# test_no_two_archetypes_share_more_than_one_primary:
 #   - No two types may share more than ONE primary. Sharing two makes a tie that
 #     list order silently resolves, which is not a decision anyone made.
 #   - Every type carries exactly TWO anti_emotions. A third is a permanent
 #     handicap that shows up as that type under-winning at population scale.
+#
+# And a third, added after `scripts/dna_audit.py` measured it (code FREE_ANTI):
+#   - Both anti_emotions must be emotions readers actually tag. Six of the ten
+#     types used to carry a second anti drawn from "It lost me" — indifference,
+#     boredom, confusion, all sitting at a 0.004 baseline. Under centering an anti
+#     contributes 0.5 * (population_rate - this reader's rate), so an anti at the
+#     floor is near-inert for everyone: those six types were measured on ONE
+#     dimension of avoidance while the other four were measured on two. That is
+#     the same asymmetry the "exactly two" rule exists to prevent, just written in
+#     a way the count could not see.
+#     Disengagement tags still tell against a reader, but through the vector
+#     rather than through a penalty term: frequency_vector normalises over the
+#     whole vocabulary, so tagging boredom dilutes the share of everything else
+#     and lowers every raw score. The anti term was double-counting it.
 PERSONALITY_TYPES = [
     {
         "id": "grief_romantic",
@@ -89,7 +112,10 @@ PERSONALITY_TYPES = [
         "name": "The Control-Seeking Intellectual",
         "description": "You read to master what unsettles you. Understanding is your armor, and every book is a new piece of territory mapped.",
         "primary_emotions": ["recognition", "dread", "awe"],
-        "anti_emotions": ["confusion", "catharsis"],  # they resist being lost, and being emotionally undone
+        # confusion -> devastation. Both antis now name something readers actually
+        # tag: they resist being emotionally undone (catharsis) and being wrecked
+        # outright (devastation). See the FREE ANTI note above.
+        "anti_emotions": ["devastation", "catharsis"],
         "blind_spots": ["You intellectualize emotions instead of feeling them", "You abandon books that make you vulnerable"],
         "comfort_tropes": ["Unreliable narrators", "Philosophical fiction", "Systems and structures"],
         "color": "#5A5A8A",
@@ -131,7 +157,10 @@ PERSONALITY_TYPES = [
         "name": "The Midnight Arsonist",
         "description": "You read like you're setting fire to your own beliefs. Comfort zones are for people who haven't found the right book yet.",
         "primary_emotions": ["amusement", "awe", "rage"],
-        "anti_emotions": ["comfort", "boredom"],
+        # boredom -> tenderness. "You dismiss gentle books as boring" was already
+        # the blind spot; tenderness is the register it names, and unlike boredom
+        # it is something readers tag.
+        "anti_emotions": ["comfort", "tenderness"],
         "blind_spots": ["You conflate discomfort with growth", "You dismiss gentle books as boring"],
         "comfort_tropes": ["Boundary-pushing fiction", "Experimental structure", "Provocative themes"],
         "color": "#C47A3A",
@@ -140,8 +169,23 @@ PERSONALITY_TYPES = [
     {
         "id": "quiet_witness",
         "name": "The Quiet Witness",
+        # Re-anchored: awe -> recognition. This type under-won from the start —
+        # 5.1% of simulated readers when there were eight archetypes, 4.2% at ten,
+        # under a 10% fair share — and the cause was structural rather than a
+        # calibration slip. Its three anchors were the two most contested slugs in
+        # the vocabulary (awe was a primary for FOUR types, tenderness for two)
+        # plus the rarest experiential one, so it owned nothing: every reader it
+        # should have claimed was claimed by somebody holding awe alongside a
+        # cheaper second anchor.
+        #
+        # Recognition is what this type was always describing anyway — "books are
+        # your confessional" is "how did it know that about me", not "I had to put
+        # it down and stare at a wall". It owns recognition jointly with only
+        # control_intellectual, which pairs it with dread and awe rather than with
+        # softness. 4.2% -> 9.6%, and it takes awe down from four holders to three,
+        # which loosened midnight_arsonist and world_diver too.
         "description": "You absorb everything and process in silence. Books are your confessional — the only place you don't perform.",
-        "primary_emotions": ["tenderness", "awe", "nostalgia"],
+        "primary_emotions": ["tenderness", "recognition", "nostalgia"],
         "anti_emotions": ["rage", "revulsion"],
         "blind_spots": ["You observe more than you feel", "You use reading to avoid confrontation"],
         "comfort_tropes": ["Introspective narrators", "Literary fiction", "Quiet revelations"],
@@ -151,9 +195,19 @@ PERSONALITY_TYPES = [
     {
         "id": "obsessive_romantic",
         "name": "The Obsessive Romantic",
+        # Re-anchored: comfort → absorption. On [desire, comfort, longing] this
+        # shared TWO primaries with The Comfort Architect (comfort + longing), so a
+        # reader tagging exactly those two scored an exact 1.0 tie resolved by
+        # declaration order — the last remaining violation of the shared-pair rule
+        # (it was carried as KNOWN_TWIN_OVERLAP in tests/test_dna_p0.py). Comfort
+        # was never the distinguishing feeling here anyway: falling into a book is
+        # absorption, not safety. The Comfort Architect keeps comfort.
         "description": "You don't read books — you fall into them. Every story is a love affair, and you don't do casual.",
-        "primary_emotions": ["desire", "comfort", "longing"],
-        "anti_emotions": ["dread", "indifference"],  # they cannot do casual or detached
+        "primary_emotions": ["desire", "absorption", "longing"],
+        # indifference -> amusement. They cannot do casual or detached, and the
+        # live register for detachment is the arch, ironic one — not the dead slug
+        # nobody tags.
+        "anti_emotions": ["dread", "amusement"],
         "blind_spots": ["You abandon books you can't fall in love with", "You chase the high of a new obsession"],
         "comfort_tropes": ["Consuming love stories", "Immersive worlds", "Characters you'd die for"],
         "color": "#C4553A",
@@ -164,11 +218,49 @@ PERSONALITY_TYPES = [
         "name": "The Emotional Archaeologist",
         "description": "You dig into stories looking for buried parts of yourself. Every book is an excavation site.",
         "primary_emotions": ["longing", "joy", "catharsis"],
-        "anti_emotions": ["amusement", "indifference"],
+        # indifference -> awe. This type digs inward; awe is the outward, scale-
+        # struck register, and making it an anti also relieved the four-way
+        # congestion on awe.
+        "anti_emotions": ["amusement", "awe"],
         "blind_spots": ["You over-analyze what you read", "You search for meaning even when there's none"],
         "comfort_tropes": ["Psychological depth", "Identity exploration", "Hidden truths"],
         "color": "#7A5A9B",
         "glyph": "◎",
+    },
+    {
+        "id": "world_diver",
+        "name": "The World-Diver",
+        "description": "You don't read to relate — you read to disappear. The bigger the world, the better; you'd trade being understood for being somewhere else entirely.",
+        "primary_emotions": ["awe", "absorption", "joy"],
+        # indifference -> dread: grief and dread are the two things this reader is
+        # escaping FROM, which is what "you mistake escape for depth" means.
+        #
+        # NOT `recognition`, which is the semantically perfect choice — "you'd
+        # trade being understood for being somewhere else" — and which measurement
+        # rejected. Under centering an anti scores 0.5 * (population_rate - this
+        # reader's rate), so an anti that a type's own readers tag LESS than average
+        # pays them a bonus. World-Diver readers barely tag recognition at all, so
+        # adding it took this type from 14.4% to 17.4%. Dread is the anti its
+        # readers might actually tag, and it is the sharp edge against The
+        # Adrenaline Seeker, the other type anchored on absorption.
+        "anti_emotions": ["grief", "dread"],
+        "blind_spots": ["You measure books by scale, not substance", "You mistake escape for depth"],
+        "comfort_tropes": ["Vast magic systems", "Found family in impossible places", "Worlds you don't want to leave"],
+        "color": "#2D6E8E",
+        "glyph": "◐",
+    },
+    {
+        "id": "adrenaline_seeker",
+        "name": "The Adrenaline Seeker",
+        "description": "You read with your pulse up. Not heartbreak — the thing lurking, the thing coming. You want the fear, not the grief after.",
+        "primary_emotions": ["dread", "revulsion", "absorption"],
+        # boredom -> grief. Straight from its own description: "you want the fear,
+        # not the grief after."
+        "anti_emotions": ["comfort", "grief"],
+        "blind_spots": ["You confuse being unsettled with being moved", "You lose patience with books that don't threaten you"],
+        "comfort_tropes": ["Slow-building dread", "Body horror", "The thing behind the door"],
+        "color": "#4A5D23",
+        "glyph": "◣",
     },
 ]
 

@@ -42,9 +42,49 @@ HALF_LIFE_DAYS = 120          # a book's emotional weight halves every ~4 months
 # tag-count spread), but the pick that restores the pre-patch rate sits at
 # 0.175-0.185 across every spread and seed tried. Re-run that probe before
 # changing this.
+#
+# Re-confirmed, unchanged, after the 19th slug and the two new archetypes: the
+# snapshot-shape picks still span 0.175-0.190 and 0.18 sits inside them. Unlike
+# HEDGE_ARCHETYPE_GAP this one gates a distance between two vectors, not a margin
+# between archetype scores, so adding archetypes does not move it — only changing
+# the vocabulary or the weighting does, and a 19th slug barely registers.
 DRIFT_SNAPSHOT_THRESHOLD = 0.18
 MONTHLY_CADENCE_DAYS = 30
 MIN_BOOKS_FOR_DNA = 5
+# A second, invisible condition on the same gate. MIN_BOOKS_FOR_DNA counts tagged
+# books; this one asks how many of them the *recency-weighted* vector is actually
+# listening to, since that vector — not the raw count — is what the archetype is
+# computed from. A reader with five tagged books, four of them decayed to nothing,
+# has a raw count of 5 and an effective sample closer to 1: the headline would be
+# one book's opinion wearing the authority of a shelf.
+#
+# Both conditions must hold, so the promise in the gate copy ("5 books") stays
+# literally true and no user-facing message changes; this only withholds the label
+# in the genuinely skewed case. Scoped to the archetype gate ALONE, not to GATES —
+# the other gates render enduring, unweighted history ("who you've been"), where an
+# old book legitimately counts in full. Staleness is only an integrity problem for
+# the one gate that produces a present-tense label.
+#
+# SET AT 1.5, NOT THE 3.0 THIS WAS FIRST SPECIFIED AT. 3.0 sounds like "at least
+# three books' worth of signal" but it is not the rare tiebreak it reads as — it
+# lands almost entirely on readers sitting exactly at the five-book minimum, which
+# is the worst possible population to silently withhold from. Measured over
+# simulated shelves (share of readers blocked by the ESS condition alone):
+#
+#   reader                    T=1.5   T=2.0   T=3.0
+#   5 tagged over 3 months       0%      0%      0%
+#   5 tagged over 1 year         0%      0%      1%
+#   5 tagged over 2 years        2%     11%     57%
+#   5 tagged over 4 years       30%     55%     92%
+#   12 tagged over 2 years       0%      0%      0%
+#   1 recent + 4 stale         100%    100%    100%   <- the case this exists for
+#
+# At 3.0 a perfectly ordinary slow reader — five tagged books across two years —
+# is blocked 57% of the time and told "at 5, the mirror starts to see you" while
+# holding 5. At 1.5 the pathological shelf is still caught every time and the slow
+# reader is not. The condition only ever bites near the minimum: past ~12 tagged
+# books no threshold in this range fires at all.
+MIN_EFFECTIVE_BOOKS_FOR_DNA = 1.5
 # Below this many books carrying a tag, its average intensity is one reader's mood
 # on a Tuesday, not a preference — stated_vs_revealed refuses to compare on it.
 MIN_BOOKS_PER_CLAIM = 3
@@ -138,6 +178,31 @@ def entry_sig(raw: dict) -> EntrySig:
 
 def recency_weight(age_days: float) -> float:
     return math.exp(-_LN2 * max(age_days, 0.0) / HALF_LIFE_DAYS)
+
+
+def effective_sample_size(sigs: list[EntrySig], now: datetime | None = None) -> float:
+    """Kish effective sample size over the entries' raw recency weights.
+
+        ESS = (Σw)² / Σw²
+
+    Counts only entries that carry a tag — an untagged book contributes nothing to
+    the vector, so it must not prop up the gate either.
+
+    This is scale-invariant in w: it falls when the weight is *unevenly spread*,
+    not because the books are old. Five books all finished two years ago decay to
+    the same tiny weight and still score ESS = 5.0; the failure case it catches is
+    one book finished last week beside four that have decayed to nothing, where
+    the raw count says 5 but the recency-weighted vector is effectively one book's
+    opinion — and the archetype is computed on that weighted vector.
+
+    Returns 0.0 for no tagged entries.
+    """
+    now = now or datetime.now(timezone.utc)
+    ws = [recency_weight((now - s.ts).days) for s in sigs if s.emotions]
+    total = sum(ws)
+    if total <= 0:
+        return 0.0
+    return (total * total) / sum(w * w for w in ws)
 
 
 def frequency_vector(sigs: list[EntrySig], *, weighted: bool, now: datetime | None = None) -> dict[str, float]:
@@ -533,12 +598,28 @@ _TYPES_BY_ID = {t["id"]: t for t in PERSONALITY_TYPES}
 # scripts/refresh_archetype_baseline.py). Until then this prior is a stand-in, and
 # a wrong baseline is still strictly better than none: centering on the wrong
 # numbers costs a few points of fairness, centering on nothing costs 10x.
+#
+# Two entries here are seeded judgment, not measurement, and are flagged so the
+# first real refresh overwrites them knowingly:
+#   absorption — seeded at awe's old rate (0.126 pre-normalisation). "I couldn't
+#     put it down" is a high-base-rate reaction across genres, far closer to awe
+#     than to a rare slug like comfort. It has zero historical tags, so nothing
+#     measured it.
+#   revulsion  — reseeded off the 0.005 disengagement floor to 0.020. It sat at the
+#     floor because it used to live in "It lost me" and no archetype was anchored
+#     on it; now it anchors The Adrenaline Seeker, and a near-zero baseline would
+#     hand that type a free offset on every reader who tags disgust even once. The
+#     0.004 it would have inherited was the single largest disagreement with the
+#     probe's correlated shelf model (which puts it at 0.020); every other slug
+#     already agreed to within 0.02.
+# All 19 are then renormalised to sum to exactly 1.0 (the previous 18 summed to
+# 0.999, a rounding drift carried since the vector was first written).
 BASELINE_VECTOR: dict[str, float] = {
-    "awe": 0.126, "longing": 0.099, "devastation": 0.094, "joy": 0.089,
-    "recognition": 0.081, "tenderness": 0.081, "dread": 0.077, "grief": 0.074,
-    "desire": 0.069, "rage": 0.052, "catharsis": 0.049, "amusement": 0.032,
-    "comfort": 0.032, "nostalgia": 0.024, "boredom": 0.005, "revulsion": 0.005,
-    "confusion": 0.005, "indifference": 0.005,
+    "awe": 0.111, "absorption": 0.110, "longing": 0.087, "devastation": 0.083,
+    "joy": 0.078, "recognition": 0.071, "tenderness": 0.071, "dread": 0.067,
+    "grief": 0.065, "desire": 0.060, "rage": 0.045, "catharsis": 0.043,
+    "amusement": 0.028, "comfort": 0.028, "nostalgia": 0.021, "revulsion": 0.020,
+    "boredom": 0.004, "confusion": 0.004, "indifference": 0.004,
 }
 
 # Below this gap the leader has not earned the noun outright, and the caller shows
@@ -553,12 +634,22 @@ BASELINE_VECTOR: dict[str, float] = {
 # readers. A hedge that fires on two readers in three is not a hedge; it is the
 # default state, and it stops carrying information precisely when it matters.
 #
-# 0.012 is the ~22nd percentile of the gap distribution on correlated readers
-# (p20 = 0.0105, p25 = 0.0133), measured with `python -m scripts.dna_bias_probe`.
-# Stable at 20-25% across seeds and tag-count spread. Re-run that probe before
-# changing this, and re-run it after ANY change to PERSONALITY_TYPES or
-# BASELINE_VECTOR — both move the gap distribution underneath this number.
-HEDGE_ARCHETYPE_GAP = 0.012
+# 0.010 is the ~22nd percentile of the gap distribution on correlated readers
+# (p20 = 0.0089, p25 = 0.0114), measured with `python -m scripts.dna_bias_probe`.
+# Stable at 22-29% across seeds and tag-count spread.
+#
+# Was 0.012, which was the 22nd percentile of the EIGHT-archetype distribution.
+# Going to ten compressed the gaps — there are two more scores competing for
+# second place, so the lead over the runner-up shrinks even for readers whose
+# identity did not change — and left 0.012 hedging 26.2% instead of ~22%. Drifting
+# a threshold by re-anchoring the distribution under it is exactly the failure the
+# original note warned about, so it is re-pinned to the percentile, not kept at the
+# familiar number.
+#
+# Re-run that probe before changing this, and re-run it after ANY change to
+# PERSONALITY_TYPES or BASELINE_VECTOR — both move the gap distribution underneath
+# this number.
+HEDGE_ARCHETYPE_GAP = 0.010
 
 # Emotions that anchor at least one archetype. A reader whose entire vector sits
 # outside this set (only "It lost me" tags) has told us what bored them and nothing
@@ -583,7 +674,7 @@ _BASELINE_OFFSET: dict[str, float] = {
 def score_archetype(
     current_freq: dict[str, float],
 ) -> tuple[str | None, dict[str, float], float]:
-    """Score the 8 archetypes against the CURRENT (recency-weighted) vector, so the
+    """Score the 10 archetypes against the CURRENT (recency-weighted) vector, so the
     headline can actually change as the reader changes.
 
     Scores are centered on ``BASELINE_VECTOR``: a score of 0.0 means "exactly what
@@ -609,15 +700,30 @@ def score_archetype(
     blank. The threshold is a percentile of the measured gap distribution, so it
     hedges roughly the closest fifth of readers rather than a majority of them.
     """
-    scores: dict[str, float] = {
-        t["id"]: round(_raw_archetype_score(current_freq, t) - _BASELINE_OFFSET[t["id"]], 4)
+    # Rank on the unrounded floats and round ONLY what is returned. Ranking the
+    # rounded values made 4dp collisions into ties that declaration order then
+    # resolved silently — two genuinely different readers' scores landing on the
+    # same rounded number is a display artefact, not a tie. Note this makes a
+    # returned `gap` of exactly 0.0 mean a true mathematical tie (a rational
+    # coincidence of small tag counts), which is what dna_bias_probe.tie_rate
+    # measures. "Close but not equal" is a different question, and it is owned by
+    # HEDGE_ARCHETYPE_GAP.
+    exact: dict[str, float] = {
+        t["id"]: _raw_archetype_score(current_freq, t) - _BASELINE_OFFSET[t["id"]]
         for t in PERSONALITY_TYPES
     }
+    ranked = sorted(exact.items(), key=lambda kv: -kv[1])
+    # The returned dict is ordered by TRUE rank, not by declaration order, so a
+    # caller that needs second place can take list(scores)[1] instead of
+    # re-sorting the rounded values. dna_insights builds `runner_up` that way; when
+    # it re-sorted this dict itself, two scores rounding to the same 4dp value
+    # could put a type that is not really second on the card. Measured at ~1 in
+    # 6000 simulated readers by `python -m scripts.dna_audit`.
+    scores: dict[str, float] = {k: round(v, 4) for k, v in ranked}
 
     if sum(current_freq.get(s, 0.0) for s in _ANCHOR_SLUGS) <= 0:
         return None, scores, 0.0
 
-    ranked = sorted(scores.items(), key=lambda kv: -kv[1])
     (best, top), (_, second) = ranked[0], ranked[1]
     return best, scores, round(top - second, 4)
 
