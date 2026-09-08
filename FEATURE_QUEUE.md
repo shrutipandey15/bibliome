@@ -7,7 +7,7 @@ sequencing.
 ## Rules of engagement
 - **One feature at a time.** Do not start the next until the current one's
   checklist is fully ticked.
-- **Agreed order:** 1 → 2 → 3 → 4 → 13 → 5 → 6 → **DNA1 → DNA2 → DNA3** → 7 → 8 → 9 → 10 → 11 → 12
+- **Agreed order:** 1 → 2 → 3 → 4 → 13 → 5 → 6 → **DNA1 → DNA2 → DNA3 → DNA4** → 7 → 8 → 9 → 10 → 11 → 12
   *(DNA1–3 inserted 2026-09-08: emotion vocabulary + archetype-scorer accuracy,
   ahead of #7 because #7's book-emotion pipeline should feed a scorer that works.)*
 - **Split before building.** Each feature declares what is backend and what is
@@ -361,6 +361,30 @@ Final table (primaries | antis):
       `backfill_dna_cache.py` already never notifies.
 - [ ] **9th archetype?** Deferred — decide against real data, not the synthetic
       probe. The 8-type table is coherent and passes now.
+
+### [x] DNA4 — Close the loop: intensity + self-correcting baseline
+**Split:** backend only.
+
+- [x] **Intensity in the archetype score.** `frequency_vector(..., intensity_weighted=True)`
+      scales each entry by `intensity / reader_mean_intensity` (a 9 pulls ~1.6x a
+      6, a 3 ~0.5x; per-reader mean so a uniform-high rater isn't inflated). Used
+      ONLY for `score_archetype` input (`build_dna`, `dna_service`,
+      `dna_real_audit`) — drift, entropy and the displayed `profiles.current`
+      stay on the plain vector, so nothing there needs recalibrating. Probe still
+      PASSES (it scores vectors directly, untouched). New test in
+      `test_dna_archetype_calibration.py`.
+- [x] **Baseline self-corrects.** `refresh_archetype_baseline` gate 30 → 15 (mean
+      of 15 real per-reader vectors is signal, not noise). Run it after each
+      deploy once the DB clears the gate, then `dna_bias_probe` + calibration
+      tests. Comment in the script says so.
+- [~] Seeding the baseline from the synthetic population was considered and
+      **rejected**: the probe tests fairness *given* the baseline, so deriving one
+      from the probe's own bundles is marking its own homework. The hand baseline
+      stays as the stand-in until real data replaces it via the step above.
+- [x] `scripts/dna_real_audit.py` — new read-only diagnostic: what the engine
+      says about the REAL readers (per-archetype share, avg gap, mean vector
+      driving each, never-assigned list). Run periodically; >2x fair share on
+      real readers is the "add an archetype" trigger.
 
 ### [ ] 7 — Book emotion vectors
 **Split:** backend only (LLM pipeline + `books` column).

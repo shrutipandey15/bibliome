@@ -638,6 +638,9 @@ def build_dna(
     enduring = sig.frequency_vector(vector_sigs, weighted=False)
     current = sig.frequency_vector(vector_sigs, weighted=True)
     drift_val = sig.drift(enduring, current)
+    # Archetype only: same recency-weighted vector, additionally scaled by how
+    # hard each book hit. drift/entropy/display stay on `current`.
+    archetype_vec = sig.frequency_vector(vector_sigs, weighted=True, intensity_weighted=True)
 
     # Book-share for the "rare" blind-spot variant. The denominator is TAGGED books,
     # not the shelf: only a tagged book could have carried the emotion, so dividing
@@ -696,7 +699,7 @@ def build_dna(
     }
 
     unlocked, locked, earned = generate_insights(ctx, limit=insight_limit)
-    archetype_id, scores, gap = sig.score_archetype(current)
+    archetype_id, scores, gap = sig.score_archetype(archetype_vec)
 
     return {
         "enough": True,

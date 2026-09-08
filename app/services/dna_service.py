@@ -209,7 +209,11 @@ async def maybe_snapshot_and_notify(db: AsyncSession, user: User) -> DNASnapshot
     vector_sigs = sigs + await _load_journal_sigs(db, user.id)
     current = sig.frequency_vector(vector_sigs, weighted=True)
     enduring = sig.frequency_vector(vector_sigs, weighted=False)
-    archetype_id, _, _ = sig.score_archetype(current)
+    # Archetype from the intensity-scaled vector, matching build_dna so the
+    # snapshot's label can't disagree with the one the mirror shows.
+    archetype_id, _, _ = sig.score_archetype(
+        sig.frequency_vector(vector_sigs, weighted=True, intensity_weighted=True)
+    )
     if archetype_id is None:
         # Nothing to name, so nothing has shifted. A snapshot here would record an
         # archetype the engine declined to give.

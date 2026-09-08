@@ -158,6 +158,21 @@ def test_baseline_covers_every_canonical_slug():
     assert abs(sum(S.BASELINE_VECTOR.values()) - 1.0) < 0.02
 
 
+def test_intensity_weighting_lets_a_hard_hitting_emotion_outweigh_a_frequent_one():
+    """4 books tagged `comfort` at intensity 3, 2 tagged `devastation` at 10.
+    Plain vector: comfort leads 4:2. Intensity-weighted: devastation wins."""
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
+    sigs = (
+        [S.EntrySig(emotions=["comfort"], intensity=3, ts=now, status="finished")] * 4
+        + [S.EntrySig(emotions=["devastation"], intensity=10, ts=now, status="finished")] * 2
+    )
+    plain = S.frequency_vector(sigs, weighted=True)
+    weighted = S.frequency_vector(sigs, weighted=True, intensity_weighted=True)
+    assert plain["comfort"] > plain["devastation"]
+    assert weighted["devastation"] > weighted["comfort"]
+
+
 def test_no_archetype_carries_a_free_anti():
     """Every anti_emotion must clear ANTI_FLOOR_RATE in BASELINE_VECTOR.
 

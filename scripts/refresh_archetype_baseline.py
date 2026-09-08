@@ -33,7 +33,10 @@ from app.models.book_entry import BookEntry
 from app.services.dna_signals import _ALL_SLUGS
 from app.utils.emotions import canonicalize
 
-MIN_READERS = 30          # below this the mean is one person's taste, not a baseline
+MIN_READERS = 15          # mean of 15 per-reader vectors is real signal (wide error
+                          # bars, not noise). Run this after each deploy once the DB
+                          # clears the gate — then `dna_bias_probe` + the calibration
+                          # tests — so the baseline self-corrects as readers arrive.
 MIN_BOOKS_PER_READER = 5  # same gate the mirror itself uses
 SMOOTHING = 0.002         # keeps never-tagged slugs off exactly zero
 

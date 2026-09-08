@@ -140,11 +140,22 @@ def recency_weight(age_days: float) -> float:
     return math.exp(-_LN2 * max(age_days, 0.0) / HALF_LIFE_DAYS)
 
 
-def frequency_vector(sigs: list[EntrySig], *, weighted: bool, now: datetime | None = None) -> dict[str, float]:
+def frequency_vector(
+    sigs: list[EntrySig], *, weighted: bool, intensity_weighted: bool = False,
+    now: datetime | None = None,
+) -> dict[str, float]:
     """An emotion vector over the full canonical vocabulary, normalized to sum 1.0 (all-zero if no tags).
 
     weighted=False → enduring (each tagged entry contributes 1, split across its tags).
     weighted=True  → current (that contribution scaled by exp-decay on the entry's age).
+
+    intensity_weighted=True additionally scales each entry by
+    ``intensity / mean_intensity`` — a 9-rated book pulls ~1.6x a 6-rated one, a
+    3-rated book ~0.5x. Per-reader mean, so a reader who rates everything 8 is not
+    inflated. Used ONLY for the archetype score (dna_insights.build_dna,
+    dna_service, dna_real_audit) — "which books hit you, not just which you read
+    most". drift, entropy and the displayed `profiles.current` stay on the plain
+    vector so their calibration is untouched.
 
     ONE ENTRY, ONE VOTE. Each entry's weight is divided by the number of tags it
     carries rather than repeated per tag. Without this a book tagged five emotions
@@ -155,11 +166,13 @@ def frequency_vector(sigs: list[EntrySig], *, weighted: bool, now: datetime | No
     to 0.9%.
     """
     now = now or datetime.now(timezone.utc)
+    tagged = [s for s in sigs if s.emotions]
+    mean_int = (sum(s.intensity for s in tagged) / len(tagged)) if tagged else 1.0
     vec = {s: 0.0 for s in _ALL_SLUGS}
-    for sig in sigs:
-        if not sig.emotions:
-            continue
+    for sig in tagged:
         w = recency_weight((now - sig.ts).days) if weighted else 1.0
+        if intensity_weighted and mean_int > 0:
+            w *= sig.intensity / mean_int
         w /= len(sig.emotions)
         for e in sig.emotions:
             vec[e] += w
