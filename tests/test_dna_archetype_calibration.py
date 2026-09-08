@@ -143,10 +143,10 @@ def test_exact_ties_are_vanishingly_rare():
 
 
 @pytest.mark.parametrize("tags,expected", [
-    (["comfort", "tenderness", "joy"], "comfort_architect"),
+    (["comfort", "joy", "nostalgia"], "comfort_architect"),
     (["grief", "devastation", "catharsis"], "grief_romantic"),
-    (["amusement", "joy", "recognition"], "midnight_arsonist"),
-    (["dread", "rage", "devastation"], "soft_masochist"),
+    (["amusement", "awe", "rage"], "midnight_arsonist"),
+    (["rage", "dread", "desire"], "soft_masochist"),
 ])
 def test_unambiguous_readers_still_get_the_obvious_label(tags, expected):
     """Calibration must not cost the engine its plain-language correctness."""
@@ -156,3 +156,26 @@ def test_unambiguous_readers_still_get_the_obvious_label(tags, expected):
 def test_baseline_covers_every_canonical_slug():
     assert set(S.BASELINE_VECTOR) == set(S._ALL_SLUGS)
     assert abs(sum(S.BASELINE_VECTOR.values()) - 1.0) < 0.02
+
+
+def test_no_archetype_carries_a_free_anti():
+    """Every anti_emotion must clear ANTI_FLOOR_RATE in BASELINE_VECTOR.
+
+    Under score centering an anti contributes 0.5*(pop_rate - reader_rate). An
+    anti at the disengagement floor (~0.005) makes that term ~0 for every reader,
+    so the type is measured on one axis of avoidance while a type with two live
+    antis is measured on two — the asymmetry the "exactly two antis" rule exists
+    to prevent, invisible to a count. See the memory
+    archetype-centering-anti-emotion-trap.
+    """
+    offenders = [
+        (t["id"], slug, S.BASELINE_VECTOR.get(slug, 0.0))
+        for t in PERSONALITY_TYPES
+        for slug in t["anti_emotions"]
+        if S.BASELINE_VECTOR.get(slug, 0.0) < S.ANTI_FLOOR_RATE
+    ]
+    assert not offenders, (
+        f"FREE_ANTI: {offenders} — anti-emotions below {S.ANTI_FLOOR_RATE} never "
+        "penalize anyone. Pick an emotion the type's own readers might plausibly "
+        "tag (the thing they read to get away from), not one nobody tags."
+    )

@@ -541,6 +541,14 @@ BASELINE_VECTOR: dict[str, float] = {
     "confusion": 0.005, "indifference": 0.005,
 }
 
+# NO FREE_ANTI (DNA2). Every archetype anti_emotion must sit at or above this rate
+# in BASELINE_VECTOR. Below it, the centered anti term 0.5*(pop_rate - reader_rate)
+# is ~0 for everyone and the slot is dead weight. 0.03 admits every experiential
+# emotion (amusement/comfort are the lowest live pair at 0.032) and excludes only
+# nostalgia (0.024) and the four "it lost me" disengagement tags (0.005).
+# Enforced by tests/test_dna_archetype_calibration.py::test_no_archetype_carries_a_free_anti.
+ANTI_FLOOR_RATE = 0.03
+
 # Below this gap the leader has not earned the noun outright, and the caller shows
 # the runner-up alongside it. This is a HEDGE, not an abstention: a reader who is
 # genuinely between two archetypes should be told which two, not handed a blank.

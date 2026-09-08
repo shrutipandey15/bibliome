@@ -70,14 +70,12 @@ async def test_public_card_hedges_when_the_in_app_mirror_hedges(client):
     of that decision, not a second opinion with more confidence than the first.
     """
     h = await _user(client, "hedged")
-    # grief_romantic and control_intellectual held to a gap of ~0.0006, well inside
-    # HEDGE_ARCHETYPE_GAP, so build_dna fills in a runner-up. Asserted rather than
-    # skipped-if-absent: a guard that quietly opts out when its own fixture drifts
-    # is not a guard.
-    for i in range(6):
-        await _add_book(client, h, f"Grief {i}", ["grief", "catharsis", "devastation"])
-    for i in range(8):
-        await _add_book(client, h, f"Control {i}", ["recognition", "dread", "awe"])
+    # An even recognition+awe+longing shelf sits emotional_archaeologist and
+    # control_intellectual at a gap of ~0.009, well inside HEDGE_ARCHETYPE_GAP, so
+    # build_dna fills in a runner-up. Asserted rather than skipped-if-absent: a
+    # guard that quietly opts out when its own fixture drifts is not a guard.
+    for i in range(10):
+        await _add_book(client, h, f"Dig {i}", ["recognition", "awe", "longing"])
 
     in_app = (await client.get("/api/dna/profile", headers=h)).json()
     assert in_app["runner_up"], (

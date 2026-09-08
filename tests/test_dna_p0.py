@@ -93,9 +93,11 @@ def test_partially_tagged_shelf_gates_on_the_tagged_books():
 
 
 def test_enough_payload_carries_margin_and_hedges_a_close_call():
-    res = build_dna([sig(["comfort", "tenderness"]) for _ in range(6)])
+    # An even grief+recognition shelf holds grief_romantic and quiet_witness to a
+    # gap of ~0.003 — inside HEDGE_ARCHETYPE_GAP, so a runner-up is named.
+    res = build_dna([sig(["grief", "recognition"]) for _ in range(6)])
     assert res["margin"] is not None and res["archetype"] is not None
-    if res["margin"] < 0.10:
+    if res["margin"] < S.HEDGE_ARCHETYPE_GAP:
         assert res["runner_up"]          # a coin-flip says so
     else:
         assert res["runner_up"] is None
@@ -371,7 +373,10 @@ def test_grief_romantic_and_soft_masochist_do_not_tie_on_grief_devastation():
 # obsessive_romantic is a voice decision, not a mechanical one, so it is recorded
 # here rather than hidden — the abstention work does at least make the card say
 # "closest to" and name the runner-up, since the margin comes back 0.0.
-KNOWN_TWIN_OVERLAP = {frozenset({"comfort_architect", "obsessive_romantic"})}
+# DNA3 closed the comfort_architect / obsessive_romantic pair (comfort+longing
+# shared) by re-anchoring both. Empty, and kept empty: a new overlap must fail
+# rather than blend in.
+KNOWN_TWIN_OVERLAP: set = set()
 
 
 def test_no_two_archetypes_share_more_than_one_primary():
@@ -397,7 +402,7 @@ def test_every_archetype_carries_exactly_two_anti_emotions():
 
 def test_comfort_architect_is_reachable_on_its_own_primaries():
     vec = {slug: 0.0 for slug in S._ALL_SLUGS}
-    vec["comfort"], vec["longing"], vec["tenderness"] = 0.4, 0.3, 0.3
+    vec["comfort"], vec["joy"], vec["nostalgia"] = 0.4, 0.3, 0.3
     best, _, _ = score_archetype(vec)
     assert best == "comfort_architect"
 

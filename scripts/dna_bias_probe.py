@@ -45,7 +45,7 @@ BOOK_BUNDLES: dict[str, list[str]] = {
     "romantasy_dark":   ["desire", "dread", "devastation", "rage", "awe"],
     "romantasy_soft":   ["desire", "longing", "joy", "awe"],
     "grief_litfic":     ["grief", "devastation", "catharsis", "tenderness"],
-    "cozy":             ["comfort", "tenderness", "joy"],
+    "cozy":             ["comfort", "tenderness", "joy", "nostalgia"],
     "thriller":         ["dread", "rage", "awe"],
     "quiet_litfic":     ["recognition", "tenderness", "longing", "awe"],
     "memoir":           ["recognition", "grief", "catharsis", "nostalgia"],

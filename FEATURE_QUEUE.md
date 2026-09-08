@@ -276,35 +276,91 @@ about books.
       `EntryModal.test.jsx` (family-door names, chip/strength labels). 328
       frontend + full backend suite green.
 
-### [ ] DNA2 — Archetype scorer mechanism
+### [x] DNA2 — Archetype scorer mechanism
 **Split:** backend only.
 
-- [ ] Anti-emotion floor: every archetype's `anti_emotions` must sit at
-      `BASELINE_VECTOR` rate ≥ ~0.03, so an anti always costs something. New
-      test. (Fixes the un-punishable Grief Romantic / Soft Masochist.)
-- [ ] Make `scripts/dna_bias_probe` bundle model realistic — add epic-fantasy,
-      romantasy, litfic bundles that reproduce the observed real-world skew.
-- [ ] Refit `HEDGE_ARCHETYPE_GAP` to a percentile of the new gap distribution.
-- [ ] `BASELINE_VECTOR` stays a documented stand-in — only 8 readers clear 5
-      tagged books (need 30). Checklist note for when to run
-      `refresh_archetype_baseline --write`.
+Prior context found mid-build: an earlier "archetype fix" (commit `dfe5043`,
+2026-08-22) already did FREE_ANTI + re-anchors + `scripts/dna_audit.py`, but it
+was on a *divergent* design (10 archetypes, an `absorption` emotion) and was
+**reverted** — branch `backup/pre-revert-2026-08-22`. Several memory notes
+describe that abandoned line as current; they're stale. DNA2 redoes the
+FREE_ANTI fix for the live 8-archetype / 18-emotion table.
 
-### [ ] DNA3 — Archetype table re-anchor
+- [x] `ANTI_FLOOR_RATE = 0.03` in `dna_signals.py`. Five dead antis replaced
+      (all were at the 0.005 disengagement floor):
+      `control_intellectual` confusion→**grief**,
+      `midnight_arsonist` boredom→**tenderness**,
+      `quiet_witness` revulsion→**devastation**,
+      `obsessive_romantic` {dread,indifference}→**{amusement, catharsis}**
+        (picked to hold its baseline offset at 0.159 — no win-share shift),
+      `emotional_archaeologist` indifference→**comfort**.
+- [x] `test_no_archetype_carries_a_free_anti` — enforces the floor over the whole
+      table.
+- [x] `scripts/dna_bias_probe` now **PASSES** on the correlated model (was
+      FAIL: quiet_witness 5.1%). All 8 in the 6–20% band; control_intellectual
+      recovered 5%→13%, quiet_witness 5%→7%. Bundle model left as-is — it already
+      carries epic_fantasy/romantasy/litfic and the probe passes, so per the
+      anti-emotion-trap memory it is not the thing that's wrong.
+- [x] `HEDGE_ARCHETYPE_GAP` unchanged — gap distribution barely moved (median
+      0.0313), still hedges 22% (~p22). `DRIFT_SNAPSHOT_THRESHOLD` not touched
+      (anti_emotions don't enter the frequency vectors).
+- [x] One fixture re-picked: `test_public_card_hedges` (grief/control shelf →
+      even grief+rage, now hedges midnight_arsonist/soft_masochist — the old
+      pair stopped hedging because `grief` is now an anti of
+      control_intellectual, which is DNA2 working). `test_partially_tagged_shelf`
+      recovered on its own once obsessive_romantic's offset was held steady.
+- [ ] `BASELINE_VECTOR` stays a documented stand-in — only **8** readers clear 5
+      tagged books (need 30; `refresh_archetype_baseline` confirms). Re-run
+      `refresh_archetype_baseline --write` + the probe + this file's tests once
+      the reader count crosses 30.
+
+**For DNA3:** `obsessive_romantic` (desire, comfort, longing) and
+`comfort_architect` (comfort, longing, tenderness) share **two** primaries —
+violates the "no two types share >1 primary" invariant and produces a permanent
+~0.002 hedge-tie between them. Re-anchor one.
+
+### [x] DNA3 — Archetype table re-anchor
 **Split:** backend only.
 
-- [ ] `DNA_TYPE_SLUG_MAP`: `emotional_archaeologist` → `awe_chaser` but holds no
-      `awe`. Re-anchor onto awe.
-- [ ] Re-anchor the funnels: `soft_masochist` off `devastation`; `quiet_witness`
-      off rare `nostalgia`; soften `control_intellectual`'s `catharsis` penalty;
-      fix `obsessive_romantic`'s impossible primary combo.
-- [ ] Re-assert invariants (no two types share >1 primary; exactly 2 antis;
-      every experiential emotion used).
-- [ ] Update `test_unambiguous_readers_still_get_the_obvious_label` expectations.
-- [ ] Re-run probe, refit constants.
-- [ ] Backfill (`scripts/backfill_dna_cache.py`) suppresses the `dna_shifted`
-      notification for the one-time recalc — a table fix is not a reader shift.
-- [ ] Only *after* seeing the (synthetic) distribution: decide if a 9th archetype
-      is warranted. Not before.
+Final table (primaries | antis):
+| type | primaries | antis |
+|---|---|---|
+| grief_romantic | grief, catharsis, devastation | comfort, joy |
+| control_intellectual | recognition, dread, awe | grief, catharsis |
+| soft_masochist | rage, dread, **desire** | comfort, joy |
+| comfort_architect | comfort, **joy, amusement** | rage, dread |
+| midnight_arsonist | amusement, awe, rage | comfort, tenderness |
+| quiet_witness | tenderness, **recognition**, nostalgia | **dread, amusement** |
+| obsessive_romantic | desire, longing, **devastation** | **amusement, joy** |
+| emotional_archaeologist | **awe**, longing, catharsis | **amusement, joy** |
+
+- [x] `emotional_archaeologist` → `awe_chaser` now actually holds `awe`. Other
+      three slug-map "judgment calls" left as-is (product call, not ours).
+- [x] `soft_masochist` off `devastation` → `desire` (dark-romance "drawn to what
+      hurts"). Its probe win-share dropped **~16% → 11.5%** — the over-assignment
+      the user flagged.
+- [x] `comfort_architect` off `longing`/`tenderness` → the feel-good triple
+      (comfort, joy, amusement); closes the 2-primary overlap with
+      `obsessive_romantic`. `KNOWN_TWIN_OVERLAP` is now empty.
+- [x] `quiet_witness` owns tenderness+recognition+nostalgia outright; antis
+      rebalanced (rage+devastation carried 0.146 of tag-mass — the biggest free
+      anti-bonus — → dread+amusement, 0.109). Every type's anti tag-mass is now
+      ~0.11–0.13.
+- [x] Invariants: no pair shares >1 primary; every experiential emotion used;
+      exactly 2 antis; no FREE_ANTI. All green.
+- [x] `scripts/dna_bias_probe` PASSES: spread quiet_witness 19.3% →
+      emotional_archaeologist 7.0%, all in [6,20]. Added one honest bundle
+      (`cozy` gains `nostalgia`; no rigged single-winner bundle).
+- [x] Test fixtures re-picked: `KNOWN_TWIN_OVERLAP=set()`,
+      `test_comfort_architect_is_reachable`, the two `hedge` fixtures, the four
+      `test_unambiguous_readers` params.
+- [x] `dna_shifted` suppression: `ARCHETYPE_TABLE_REV` (sha of every type's
+      id+primaries+antis) stored on each snapshot; `maybe_snapshot_and_notify`
+      only notifies when the previous snapshot shares the current rev — a
+      re-anchor takes the snapshot but doesn't tell the reader they shifted.
+      `backfill_dna_cache.py` already never notifies.
+- [ ] **9th archetype?** Deferred — decide against real data, not the synthetic
+      probe. The 8-type table is coherent and passes now.
 
 ### [ ] 7 — Book emotion vectors
 **Split:** backend only (LLM pipeline + `books` column).

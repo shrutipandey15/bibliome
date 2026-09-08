@@ -23,7 +23,7 @@ from app.models.dna_snapshot import DNASnapshot
 from app.models.notification import TIER_DIRECT
 from app.models.user import User
 from app.services import dna_signals as sig
-from app.services.dna_engine import calculate_personality, dna_type_slug_for
+from app.services.dna_engine import ARCHETYPE_TABLE_REV, calculate_personality, dna_type_slug_for
 from app.services.dna_insights import build_dna
 from app.services.journal_service import load_emotion_sources as load_journal_sources
 from app.services.notification_service import notify
@@ -180,6 +180,7 @@ async def manual_snapshot(db: AsyncSession, user: User, v2: dict) -> DNASnapshot
             "archetype_scores": v2["archetype_scores"],
             "margin": v2.get("margin"),
             "drift": sig.drift(prev_current, current) if prev_current else None,
+            "archetype_table_rev": ARCHETYPE_TABLE_REV,
         },
         book_count=v2["book_count"],
         year=now.year,
@@ -241,6 +242,7 @@ async def maybe_snapshot_and_notify(db: AsyncSession, user: User) -> DNASnapshot
             "current_vector": current,
             "archetype_id": archetype_id,
             "drift": snap_drift,
+            "archetype_table_rev": ARCHETYPE_TABLE_REV,
         },
         book_count=len(raw),
         year=now.year,
@@ -249,8 +251,13 @@ async def maybe_snapshot_and_notify(db: AsyncSession, user: User) -> DNASnapshot
     db.add(snapshot)
     await db.flush()
 
-    # The honest return hook: the archetype genuinely changed. Tier-1 (B7.4).
-    if ctx.last_archetype and ctx.last_archetype != archetype_name:
+    # The honest return hook: the archetype genuinely changed — AND it changed
+    # under the same archetype table. If the previous snapshot was written under a
+    # different rev (or before the field existed), a re-anchor is at least partly
+    # responsible, so we take the snapshot but don't tell the reader they shifted.
+    prev_rev = (ctx.prev_emotion_data or {}).get("archetype_table_rev")
+    same_table = prev_rev == ARCHETYPE_TABLE_REV
+    if same_table and ctx.last_archetype and ctx.last_archetype != archetype_name:
         await notify(
             db, user.id, TIER_DIRECT, "dna_shifted",
             payload={"old": ctx.last_archetype, "new": archetype_name},
