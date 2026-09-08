@@ -295,7 +295,7 @@ async def test_emotion_vocabulary_endpoint(client):
         assert e["slug"] and e["name"] and e["color"] and e["symbol"] and e["family"] and e["phrase"]
     # phrase is the first-person line the UI shows, distinct from the plain word.
     conf = next(e for e in body["emotions"] if e["slug"] == "confusion")
-    assert conf["name"] == "confusion" and conf["phrase"] == "I lost the plot"
+    assert conf["name"] == "confusion" and conf["phrase"] == "I have no idea what happened"
 
 
 # ── B2.2: TBR fast-add — one tap, no modal ──

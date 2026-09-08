@@ -7,7 +7,9 @@ sequencing.
 ## Rules of engagement
 - **One feature at a time.** Do not start the next until the current one's
   checklist is fully ticked.
-- **Agreed order:** 1 → 2 → 3 → 4 → 13 → 5 → 6 → 7 → 8 → 9 → 10 → 11 → 12
+- **Agreed order:** 1 → 2 → 3 → 4 → 13 → 5 → 6 → **DNA1 → DNA2 → DNA3** → 7 → 8 → 9 → 10 → 11 → 12
+  *(DNA1–3 inserted 2026-09-08: emotion vocabulary + archetype-scorer accuracy,
+  ahead of #7 because #7's book-emotion pipeline should feed a scorer that works.)*
 - **Split before building.** Each feature declares what is backend and what is
   frontend *before* work starts. Frontend lives in the `bibliome-frontend` repo.
 - **Add-ons don't float.** Anything discovered mid-build gets written into the
@@ -247,6 +249,62 @@ Frontend:
       room that throws while scrolling is worse than one that doesn't scroll.
 - [x] 8 component tests; fixed `CollectionsEditor.test.jsx` again for the new
       mount-time reads. 275 frontend passing.
+
+### [x] DNA1 — Emotion phrasing
+**Split:** backend (phrase strings, served via API) + frontend (verify it renders
+the served `phrase`, no hardcoded copy).
+
+The 18 `phrase` lines were written in a literary register ("it left a hole", "I
+needed that cry") that readers don't use. Rewritten to how people actually talk
+about books.
+
+- [x] All 18 `phrase` values rewritten in `app/utils/emotions.py`. Slugs, names,
+      families, symbols, colors, descriptions untouched — only the first-person
+      line changes.
+- [x] `test_entries_flow.py` phrase assertion updated (confusion).
+- [x] `app/routers/meta.py` docstring example refreshed. Full suite green.
+- [x] Family labels reworded: "it messed me up / it held me / the yearning /
+      it hit different / it lost me". `FAMILY_*` constants are the single source;
+      the test and probe now import `FAMILY_LOST` instead of hardcoding the
+      string, so a future rename can't silently break the experiential filter.
+- [x] All 18 `description` strings freshened to the same reader voice. Full
+      suite green (exit 0).
+- [x] Frontend (`bookDNA-frontend`): the `SEED` in `src/services/emotions.js` is
+      a mirror of the served vocab, hydrated from `GET /emotions` at boot. Updated
+      all 18 rows (family, phrase, description) + the `PRESENTATION` comments.
+      Tests updated: `emotions.test.js` (labels + family order),
+      `EntryModal.test.jsx` (family-door names, chip/strength labels). 328
+      frontend + full backend suite green.
+
+### [ ] DNA2 — Archetype scorer mechanism
+**Split:** backend only.
+
+- [ ] Anti-emotion floor: every archetype's `anti_emotions` must sit at
+      `BASELINE_VECTOR` rate ≥ ~0.03, so an anti always costs something. New
+      test. (Fixes the un-punishable Grief Romantic / Soft Masochist.)
+- [ ] Make `scripts/dna_bias_probe` bundle model realistic — add epic-fantasy,
+      romantasy, litfic bundles that reproduce the observed real-world skew.
+- [ ] Refit `HEDGE_ARCHETYPE_GAP` to a percentile of the new gap distribution.
+- [ ] `BASELINE_VECTOR` stays a documented stand-in — only 8 readers clear 5
+      tagged books (need 30). Checklist note for when to run
+      `refresh_archetype_baseline --write`.
+
+### [ ] DNA3 — Archetype table re-anchor
+**Split:** backend only.
+
+- [ ] `DNA_TYPE_SLUG_MAP`: `emotional_archaeologist` → `awe_chaser` but holds no
+      `awe`. Re-anchor onto awe.
+- [ ] Re-anchor the funnels: `soft_masochist` off `devastation`; `quiet_witness`
+      off rare `nostalgia`; soften `control_intellectual`'s `catharsis` penalty;
+      fix `obsessive_romantic`'s impossible primary combo.
+- [ ] Re-assert invariants (no two types share >1 primary; exactly 2 antis;
+      every experiential emotion used).
+- [ ] Update `test_unambiguous_readers_still_get_the_obvious_label` expectations.
+- [ ] Re-run probe, refit constants.
+- [ ] Backfill (`scripts/backfill_dna_cache.py`) suppresses the `dna_shifted`
+      notification for the one-time recalc — a table fix is not a reader shift.
+- [ ] Only *after* seeing the (synthetic) distribution: decide if a 9th archetype
+      is warranted. Not before.
 
 ### [ ] 7 — Book emotion vectors
 **Split:** backend only (LLM pipeline + `books` column).

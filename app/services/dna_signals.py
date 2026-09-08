@@ -519,7 +519,7 @@ _TYPES_BY_ID = {t["id"]: t for t in PERSONALITY_TYPES}
 # The population's mean emotion vector. Every archetype's score is measured as
 # DEVIATION from what this baseline would already give it, because the raw sum is
 # not comparable between archetypes: they hold emotions with wildly different base
-# rates, and two of them hold an anti-emotion from the "It lost me" family that
+# rates, and two of them hold an anti-emotion from the "it lost me" family that
 # nobody ever tags, so their penalty term is free.
 #
 # Uncentered, the leader was not the archetype that fit the reader — it was the
@@ -561,7 +561,7 @@ BASELINE_VECTOR: dict[str, float] = {
 HEDGE_ARCHETYPE_GAP = 0.012
 
 # Emotions that anchor at least one archetype. A reader whose entire vector sits
-# outside this set (only "It lost me" tags) has told us what bored them and nothing
+# outside this set (only "it lost me" tags) has told us what bored them and nothing
 # about who they are — that is an abstention, not a score of zero.
 _ANCHOR_SLUGS = frozenset(
     e for t in PERSONALITY_TYPES for e in t["primary_emotions"]

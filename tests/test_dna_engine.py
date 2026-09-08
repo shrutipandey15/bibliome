@@ -50,7 +50,7 @@ def test_personality_slugs_are_canonical():
 def test_every_experiential_emotion_is_used_somewhere():
     """Every *experiential* emotion anchors at least one archetype.
 
-    The "It lost me" family (boredom/revulsion/confusion/indifference) is excluded:
+    The "it lost me" family (boredom/revulsion/confusion/indifference) is excluded:
     those are registers of disengagement — a book failing you, not a reading
     identity — so they only ever appear as anti_emotions, never as a primary.
     """

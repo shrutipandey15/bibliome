@@ -30,7 +30,7 @@ from app.services.dna_signals import (
     recency_weight,
     score_archetype,
 )
-from app.utils.emotions import EMOTIONS
+from app.utils.emotions import EMOTIONS, FAMILY_LOST
 
 FAMILY = {e["slug"]: e["family"] for e in EMOTIONS}
 IDS = [t["id"] for t in PERSONALITY_TYPES]
@@ -53,7 +53,7 @@ BOOK_BUNDLES: dict[str, list[str]] = {
     "epic_fantasy":     ["awe", "dread", "devastation", "longing"],
     "sad_romance":      ["longing", "grief", "desire", "devastation"],
 }
-LOST_ME = [s for s in _ALL_SLUGS if FAMILY[s] == "It lost me"]
+LOST_ME = [s for s in _ALL_SLUGS if FAMILY[s] == FAMILY_LOST]
 
 
 def _norm(counts: Counter) -> dict[str, float]:
@@ -103,7 +103,7 @@ def tie_rate() -> None:
 
 def uniform_reader() -> None:
     """The most average reader possible. Should not be a 5-way tie."""
-    exp = [s for s in _ALL_SLUGS if FAMILY[s] != "It lost me"]
+    exp = [s for s in _ALL_SLUGS if FAMILY[s] != FAMILY_LOST]
     best, scores, margin = score_archetype(_norm(Counter(dict.fromkeys(exp, 1))))
     print("\nTHE PERFECTLY BALANCED READER (equal share of all 14 experiential tags)")
     print("-" * 70)
@@ -135,7 +135,7 @@ def leverage() -> None:
 def independent_population(n_readers: int = 20_000, seed: int = 21) -> dict[str, float]:
     """The model the P1-5 fix was validated against: tags drawn independently."""
     random.seed(seed)
-    exp = [s for s in _ALL_SLUGS if FAMILY[s] != "It lost me"]
+    exp = [s for s in _ALL_SLUGS if FAMILY[s] != FAMILY_LOST]
     wins: Counter = Counter()
     for _ in range(n_readers):
         weights = [random.gammavariate(4, 1) for _ in exp]

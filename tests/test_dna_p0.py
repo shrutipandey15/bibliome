@@ -43,7 +43,7 @@ def test_score_archetype_abstains_on_empty_tally():
 
 
 def test_score_archetype_abstains_when_only_lost_me_tags():
-    """"It lost me" tags are registers of disengagement, never a reading identity.
+    """"it lost me" tags are registers of disengagement, never a reading identity.
 
     They appear only as anti_emotions, so a reader who has tagged nothing else
     scores zero or negative everywhere — and gets no label.

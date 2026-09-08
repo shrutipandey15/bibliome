@@ -16,10 +16,10 @@ import pytest
 from app.services import dna_signals as S
 from app.services.dna_engine import PERSONALITY_TYPES
 from app.services.dna_signals import score_archetype
-from app.utils.emotions import EMOTIONS
+from app.utils.emotions import EMOTIONS, FAMILY_LOST
 
 FAMILY = {e["slug"]: e["family"] for e in EMOTIONS}
-EXPERIENTIAL = [s for s in S._ALL_SLUGS if FAMILY[s] != "It lost me"]
+EXPERIENTIAL = [s for s in S._ALL_SLUGS if FAMILY[s] != FAMILY_LOST]
 
 BOOK_BUNDLES = {
     "romantasy_dark": ["desire", "dread", "devastation", "rage", "awe"],

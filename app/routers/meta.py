@@ -14,9 +14,9 @@ settings = get_settings()
 
 class EmotionVocabItem(BaseModel):
     slug: str
-    family: str          # UI-only grouping ("It hurt", "It held me", …)
+    family: str          # UI-only grouping ("it messed me up", "it held me", …)
     name: str            # the plain word ("confusion")
-    phrase: str          # the first-person line the UI shows ("I lost the plot")
+    phrase: str          # the first-person line the UI shows ("I have no idea what happened")
     symbol: str
     color: str
     description: str

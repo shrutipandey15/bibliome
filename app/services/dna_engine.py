@@ -61,7 +61,7 @@ def dna_type_slug_for(engine_id: str | None) -> str | None:
 # VALID_SLUGS value (see tests/test_dna_engine.py::test_personality_slugs_are_canonical).
 # Fingerprints were migrated to the 18-emotion vocabulary:
 #   wit→amusement, chaos→confusion, two_am→longing (the old removed slugs).
-# Archetypes are anchored only on *experiential* emotions; the "It lost me" family
+# Archetypes are anchored only on *experiential* emotions; the "it lost me" family
 # (boredom/revulsion/confusion/indifference) appears solely as anti_emotions —
 # they describe a book failing you, not a reading identity. Across the 8 types,
 # every experiential emotion is used as a primary at least once
