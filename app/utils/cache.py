@@ -18,6 +18,8 @@ import logging
 import time
 from typing import Any
 
+_REDIS_RETRY_SECONDS = 60
+
 import redis.asyncio as redis
 from fastapi.encoders import jsonable_encoder
 
@@ -73,11 +75,22 @@ class RedisDNACache:
         self._ns = namespace
         self._fallback = TTLCache(ttl_seconds=ttl_seconds, max_size=100)
         self._client: redis.Redis | None = None
-        self._failed: bool = False
+        # Permanent opt-out (no REDIS_URL) vs a transient connection failure
+        # must not be conflated — see app.middleware.rate_limit.get_redis, which
+        # hit this exact bug: treating a connection failure as permanent left a
+        # multi-worker deploy stuck on private per-process fallback caches until
+        # restart. `_disabled` never clears; `_failed_at` retries after a window.
+        self._disabled: bool = False
+        self._failed_at: float | None = None
 
     async def _get_redis(self) -> "redis.Redis | None":
-        if self._failed:
+        if self._disabled:
             return None
+        if self._failed_at is not None:
+            if time.monotonic() - self._failed_at < _REDIS_RETRY_SECONDS:
+                return None
+            self._failed_at = None
+
         if self._client is not None:
             try:
                 await self._client.ping()
@@ -88,7 +101,7 @@ class RedisDNACache:
         from app.config import get_settings
         redis_url = getattr(get_settings(), "REDIS_URL", None)
         if not redis_url:
-            self._failed = True
+            self._disabled = True
             return None
 
         try:
@@ -99,11 +112,15 @@ class RedisDNACache:
                 socket_timeout=2,
             )
             await self._client.ping()
+            self._failed_at = None
             return self._client
         except Exception as e:
-            self._failed = True
+            self._failed_at = time.monotonic()
             self._client = None
-            logger.warning("Redis unavailable for DNA cache (%s) — using in-memory fallback", e)
+            logger.warning(
+                "Redis unavailable for DNA cache (%s) — in-memory fallback, retrying in %ds",
+                e, _REDIS_RETRY_SECONDS,
+            )
             return None
 
     def _redis_key(self, key: str) -> str:

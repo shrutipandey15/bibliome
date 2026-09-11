@@ -12,6 +12,7 @@ Two layers of defense:
 Covers legitimately come only from Google Books and Open Library.
 """
 
+import asyncio
 import ipaddress
 import logging
 import socket
@@ -82,7 +83,9 @@ async def fetch_cover_safely(url: str | None) -> bytes | None:
     host = urlparse(url).hostname
     # Reject if DNS resolves to any non-public address (DNS-rebinding guard).
     try:
-        infos = socket.getaddrinfo(host, None)
+        # getaddrinfo is a blocking syscall — off the event loop, or a slow/
+        # hung DNS lookup on the fetch path would stall every other request.
+        infos = await asyncio.to_thread(socket.getaddrinfo, host, None)
     except socket.gaierror:
         return None
     if not infos or any(not _is_public_ip(info[4][0]) for info in infos):
