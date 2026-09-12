@@ -41,6 +41,7 @@ from app.schemas.profile import (
     CollectionMessageList,
     CollectionMessageResponse,
     CollectionReorder,
+    CollectionReportRequest,
     CollectionResponse,
     CollectionUpdate,
     JoinedCollection,
@@ -598,6 +599,7 @@ async def delete_collection_message(
 )
 async def report_collection_conversation(
     collection_id: uuid.UUID,
+    data: CollectionReportRequest = CollectionReportRequest(),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -610,5 +612,6 @@ async def report_collection_conversation(
     remedy the reporter holds themselves.
     """
     c, _ = await _visible_or_404(db, collection_id, current_user.id)
-    await submit_report(db, current_user.id, "collection_conversation", c.id, "conversation")
+    # "collection_conversation" overflows the reports.target_type varchar(20).
+    await submit_report(db, current_user.id, "collection_chat", c.id, data.category)
     return {"status": "received"}

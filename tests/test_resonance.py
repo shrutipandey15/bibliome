@@ -356,6 +356,27 @@ async def test_free_text_messaging_both_ways(client):
     assert messages[-1]["is_mine"] is False
 
 
+async def test_after_poll_sees_new_messages_past_the_first_page(client):
+    # A poll must keep seeing new mail even once a thread is long — `after`
+    # reads forward from a cursor instead of re-fetching page one.
+    ha, hb, thread_id = await _connected_thread(client, names=("moss", "nia"))
+    r = await client.get(f"/api/threads/{thread_id}/messages", headers=ha)
+    cursor = r.json()["messages"][-1]["created_at"]
+
+    r = await client.post(
+        f"/api/threads/{thread_id}/messages", json={"body": "still here?"}, headers=hb,
+    )
+    assert r.status_code == 201
+
+    r = await client.get(
+        f"/api/threads/{thread_id}/messages", params={"after": cursor}, headers=ha,
+    )
+    assert r.status_code == 200
+    bodies = [m["body"] for m in r.json()["messages"]]
+    assert bodies == ["still here?"]
+    assert r.json()["next_before"] is None
+
+
 async def test_outsiders_cannot_read_or_write_a_thread(client):
     _, _, thread_id = await _connected_thread(client, names=("jem", "kit"))
     outsider = await _user(client, "lurker")

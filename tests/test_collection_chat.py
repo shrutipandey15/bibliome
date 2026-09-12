@@ -563,6 +563,29 @@ async def test_sparks_are_facts_or_questions_and_never_invented(client):
     assert any("3 books" in f for f in facts)
 
 
+async def test_report_files_the_chosen_category_without_hiding_the_room(client, db):
+    from sqlalchemy import select
+
+    from app.models.social import Report
+
+    owner = await _auth(client, "o@example.com", "owner")
+    guest = await _auth(client, "g@example.com", "guest")
+    cid, _book = await _room(client, owner, guest)
+    await _say(client, owner, cid, "hello")
+
+    r = await client.post(
+        f"/api/collections/{cid}/report", json={"category": "harassment"}, headers=guest,
+    )
+    assert r.status_code == 202, r.text
+
+    report = (await db.execute(select(Report).where(Report.target_id == uuid.UUID(cid)))).scalar_one()
+    assert report.category == "harassment"
+
+    # Reporting is a flag for moderation, not a self-hide: the room still reads
+    # for everyone, including the reporter.
+    assert (await _read(client, guest, cid)).json()["messages"]
+
+
 async def test_sparks_are_members_only(client):
     owner = await _auth(client, "o@example.com", "owner")
     stranger = await _auth(client, "s@example.com", "stranger")

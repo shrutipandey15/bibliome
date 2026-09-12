@@ -606,11 +606,20 @@ async def post_message(
 
 
 async def list_messages(
-    db: AsyncSession, thread: ResonanceThread, limit: int = 50, before: datetime | None = None
+    db: AsyncSession,
+    thread: ResonanceThread,
+    limit: int = 50,
+    before: datetime | None = None,
+    after: datetime | None = None,
 ) -> list[ResonanceMessage]:
     """A page of transcript, oldest-first within the page. `before` pages backward
-    through history."""
+    through history; `after` is the live poll — only what arrived since, so a
+    long-running thread doesn't have to re-fetch page one to check for new mail."""
     stmt = select(ResonanceMessage).where(ResonanceMessage.thread_id == thread.id)
+    if after is not None:
+        stmt = stmt.where(ResonanceMessage.created_at > after)
+        stmt = stmt.order_by(ResonanceMessage.created_at.asc(), ResonanceMessage.id.asc()).limit(limit)
+        return list((await db.execute(stmt)).scalars().all())
     if before is not None:
         stmt = stmt.where(ResonanceMessage.created_at < before)
     stmt = stmt.order_by(ResonanceMessage.created_at.desc(), ResonanceMessage.id).limit(limit)

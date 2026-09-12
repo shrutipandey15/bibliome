@@ -98,14 +98,16 @@ async def get_threads(
 async def get_messages(
     thread_id: uuid.UUID,
     before: datetime | None = Query(default=None, description="Page backward from this timestamp"),
+    after: datetime | None = Query(default=None, description="Only what arrived after this — the live poll"),
     limit: int = Query(default=MESSAGE_PAGE_DEFAULT, ge=1, le=MESSAGE_PAGE_MAX),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """A page of the transcript, oldest-first. Page backward with `before`."""
+    """A page of the transcript, oldest-first. Page backward with `before`;
+    `after` is the live poll — only what has arrived since."""
     thread, match = await _load(db, thread_id, current_user)
 
-    messages = await list_messages(db, thread, limit=limit, before=before)
+    messages = await list_messages(db, thread, limit=limit, before=before, after=after)
 
     handles = {
         current_user.id: current_user.handle,
@@ -126,9 +128,9 @@ async def get_messages(
             )
             for m in messages
         ],
-        # Only offered when the page came back full — otherwise this is the start
-        # of the conversation and there is nothing further back to fetch.
-        next_before=messages[0].created_at if len(messages) == limit else None,
+        # A backward page is only offered when it came back full; a poll never
+        # offers one, because it is reading the newest end.
+        next_before=messages[0].created_at if (after is None and len(messages) == limit) else None,
     )
 
 

@@ -112,6 +112,12 @@ class CollectionMessageCreate(BaseModel):
     book_id: uuid.UUID | None = None
 
 
+class CollectionReportRequest(BaseModel):
+    # Same categories as a thread report — a moderator triaging the queue
+    # shouldn't have to learn a second vocabulary for the same judgment call.
+    category: Literal["harassment", "hate", "csam", "spam", "self_harm", "pii", "other"] = "other"
+
+
 class CollectionMessageResponse(BaseModel):
     id: uuid.UUID
     book_id: uuid.UUID | None = None
