@@ -1,6 +1,12 @@
-# Held at 0.115.0 deliberately. Moving to 0.128.x pulls starlette 0.38 -> 0.52,
-# which clears 8 advisories but is a framework upgrade — it belongs in its own
-# change, not bundled with a security pass. Tracked as an open item.
+# Held deliberately. Bumping to fastapi 0.141.1/starlette 1.6.0 clears all 17
+# pip-audit CVEs but reproducibly deadlocks POST /api/entries under test: the
+# request's own DB session sits idle-in-transaction after fetching
+# entry_emotions while the _feed_catalog background task's `INSERT INTO books
+# ... ON CONFLICT` waits on the same row's lock. Something in the version jump
+# changed the ordering between request-session teardown and background-task
+# execution. Needs an app-level fix (commit/close the request session before
+# background tasks can touch the same rows) before this bump is safe — see
+# tests/test_book_aggregates.py::test_same_book_differently_cased_resolves_to_one_book_id.
 fastapi==0.115.0
 uvicorn[standard]==0.30.0
 sqlalchemy[asyncio]==2.0.35
@@ -16,5 +22,5 @@ email-validator==2.1.0
 python-multipart==0.0.31
 httpx>=0.27.0
 redis>=5.0.0
-aiosmtplib==3.0.2
+aiosmtplib==5.1.3
 pywebpush>=2.0.0

@@ -16,11 +16,13 @@ from app.models.dna_snapshot import DNASnapshot
 from app.models.user import User
 from app.schemas.dna import (
     BlindSpotsResponse,
+    DNAEvolutionPoint,
     DNAGenerateResponse,
-    DNAProfileResponse,
+    DNAProfileV2Response,
     DNASnapshotResponse,
     EmotionalCalendarResponse,
     HeatmapResponse,
+    PatternsResponse,
     PersonalityInfo,
     RecapResponse,
     StatsResponse,
@@ -76,7 +78,7 @@ async def _get_user_entries(db: AsyncSession, user_id) -> list[dict]:
     ]
 
 
-@router.get("/profile")
+@router.get("/profile", response_model=DNAProfileV2Response)
 async def get_dna_profile(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
@@ -214,7 +216,7 @@ async def get_stats(
     return result
 
 
-@router.get("/patterns")
+@router.get("/patterns", response_model=PatternsResponse)
 async def get_patterns(
     request: Request,
     user_id: uuid.UUID = Depends(get_current_user_id),
@@ -238,7 +240,7 @@ async def get_patterns(
     return {"stats": stats, "heatmap": heatmap}
 
 
-@router.get("/evolution")
+@router.get("/evolution", response_model=list[DNAEvolutionPoint])
 async def get_dna_evolution(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),

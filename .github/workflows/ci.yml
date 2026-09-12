@@ -44,3 +44,31 @@ jobs:
 
       - name: Run tests
         run: python -m pytest
+
+      - name: gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: false
+
+      - name: ruff (report only)
+        continue-on-error: true
+        run: ruff check .
+
+      - name: bandit (report only)
+        continue-on-error: true
+        run: bandit -r app
+
+      - name: pip-audit (report only)
+        continue-on-error: true
+        run: pip-audit -r requirements.txt
+
+      - name: Checkout frontend for contract check
+        uses: actions/checkout@v4
+        continue-on-error: true
+        with:
+          repository: shrutipandey15/bibliome-frontend
+          path: bibliome-frontend
+          token: ${{ secrets.FRONTEND_REPO_TOKEN || github.token }}
+
+      - name: DNA contract check (backend ↔ frontend)
+        run: python dna_contract_check.py bibliome-frontend

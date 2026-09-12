@@ -1,5 +1,6 @@
 import uuid
 from datetime import datetime
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -155,3 +156,57 @@ class RecapResponse(BaseModel):
     new_emotions: list[str]
     personality_shift: RecapShift
     books: list[RecapBook]
+
+class DNAProfileNotEnough(BaseModel):
+    enough: Literal[False]
+    book_count: int
+    tagged_count: int
+    needed: int
+    message: str
+    snapshot_count: int
+    has_two_snapshots: bool
+    journal_entry_count: int
+
+
+class DNAProfileReady(BaseModel):
+    enough: Literal[True]
+    book_count: int
+    tagged_count: int
+    insights: list[dict[str, Any]]
+    locked: list[dict[str, Any]]
+    earned: list[dict[str, Any]]
+    archetype: PersonalityInfo | None
+    archetype_scores: dict[str, float]
+    margin: float
+    runner_up: str | None
+    basis: dict[str, Any] | None
+    profiles: dict[str, dict[str, float]]
+    drift: float
+    reads_for: list[str]
+    snapshot_count: int
+    has_two_snapshots: bool
+    journal_entry_count: int
+    # Merged on top by the /profile route itself (population-wide, not cached
+    # per-reader) — not part of build_dna's own return. Whole percent, or None
+    # if too few readers share this archetype to say honestly (profile_service).
+    archetype_share: int | None = None
+
+
+DNAProfileV2Response = DNAProfileNotEnough | DNAProfileReady
+
+
+class PatternsResponse(BaseModel):
+    stats: StatsResponse
+    heatmap: HeatmapResponse
+
+
+class DNAEvolutionPoint(BaseModel):
+    id: str
+    date: datetime
+    archetype: str | None
+    dna_type_slug: str | None
+    book_count: int
+    # Legacy snapshots can carry a top_emotions row missing "emotion_id".
+    top_emotions: list[str | None]
+    drift_from_prev: float | None
+    trigger: str | None

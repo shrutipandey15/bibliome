@@ -13,8 +13,8 @@ like a teammate giving an honest status update — not a linter, not a formal au
 
 Assume the two repos are checked out as sibling directories:
 
-- `../bibliome` (backend)
-- `../bibliome-frontend` (frontend)
+- `../bookDNA` (backend)
+- `../bookDNA-frontend` (frontend)
 
 If they aren't there, ask where they are before doing anything else.
 
