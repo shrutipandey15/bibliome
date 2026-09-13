@@ -25,6 +25,7 @@ shelf. That changes four things, and each is handled explicitly below:
    the collection does not have would render as a label nobody can follow.
 """
 
+import re
 import uuid
 from datetime import datetime
 
@@ -40,6 +41,7 @@ from app.models.reaction_kinds import CHAT_REACTION_KINDS
 from app.models.user import User
 from app.services.moderation import VERDICT_CRISIS, VERDICT_HOLD, classify_text
 from app.services.social_service import hidden_author_ids
+from app.utils.attachments import delete_chat_attachment
 
 MAX_MESSAGE_CHARS = 2000
 MESSAGE_PAGE_DEFAULT = 50
@@ -159,6 +161,8 @@ async def post_message(
     body: str,
     book_id: uuid.UUID | None = None,
     reply_to_id: uuid.UUID | None = None,
+    attachment_path: str | None = None,
+    attachment_type: str | None = None,
 ) -> tuple[CollectionMessage, str]:
     """Say something about a book in this collection. Returns (message, verdict).
 
@@ -210,6 +214,8 @@ async def post_message(
         sender_id=sender_id,
         body=body,
         reply_to_id=reply_to_id,
+        attachment_path=attachment_path,
+        attachment_type=attachment_type,
     )
     db.add(message)
     await db.flush()
@@ -238,6 +244,7 @@ async def delete_message(
         return False
     if actor_id != collection.user_id and message.sender_id != actor_id:
         raise PermissionError("You can only delete your own messages")
+    delete_chat_attachment(message.attachment_path)
     await db.delete(message)
     await db.flush()
     return True
@@ -309,6 +316,62 @@ async def annotate_messages(
                 previews[m.id] = by_id[m.reply_to_id]
 
     return counts, mine, previews
+
+
+_MENTION_RE = re.compile(r"@([A-Za-z0-9_]{1,32})")
+
+
+def parse_mentions(body: str, members: list[CollectionMember]) -> set[uuid.UUID]:
+    """`@handle` tokens in a message, resolved to member user ids.
+
+    Matched only against people who are actually IN this room — a mention of
+    someone who isn't a member resolves to nobody rather than a notification
+    with no valid recipient. Case-insensitive, since a reader typing a
+    handle from memory shouldn't have to get the casing right for it to land.
+    """
+    if not body:
+        return set()
+    by_handle = {m.user.handle.lower(): m.user_id for m in members if getattr(m.user, "handle", None)}
+    if not by_handle:
+        return set()
+    found = {h.lower() for h in _MENTION_RE.findall(body)}
+    return {by_handle[h] for h in found if h in by_handle}
+
+
+async def set_pinned_message(
+    db: AsyncSession, collection: Collection, message_id: uuid.UUID | None, actor_id: uuid.UUID,
+) -> None:
+    """Pin one message (replacing whatever was pinned), or clear it with
+    `message_id=None`. Any member may — the same "anyone can add, only the
+    owner or the author can remove" line drawn elsewhere in this room would
+    make pinning a passage someone else's call, which is backwards for a
+    reading-together utility with no moderation weight of its own."""
+    if message_id is not None:
+        exists = (await db.execute(
+            select(CollectionMessage.id).where(
+                CollectionMessage.id == message_id,
+                CollectionMessage.collection_id == collection.id,
+            )
+        )).scalar_one_or_none()
+        if exists is None:
+            raise ChatError("That message isn't in this room")
+    collection.pinned_message_id = message_id
+    await db.flush()
+
+
+async def get_pinned_message(
+    db: AsyncSession, collection: Collection,
+) -> dict | None:
+    if collection.pinned_message_id is None:
+        return None
+    row = (await db.execute(
+        select(CollectionMessage.id, CollectionMessage.body, User.handle)
+        .join(User, User.id == CollectionMessage.sender_id)
+        .where(CollectionMessage.id == collection.pinned_message_id)
+    )).first()
+    if row is None:
+        return None
+    return {"id": row.id, "handle": row.handle, "body": row.body}
 
 
 async def notify_targets(

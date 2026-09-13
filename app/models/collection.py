@@ -43,6 +43,20 @@ class Collection(Base):
     visibility: Mapped[str] = mapped_column(String(20), nullable=False, server_default="private")
     position: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    # At most one at a time — pinning a second message replaces the first
+    # rather than stacking. See CollectionMessage for why SET NULL, not CASCADE.
+    # `use_alter`: collections -> collection_messages -> collections is a
+    # circular FK dependency (a message belongs to a collection; a collection
+    # may point back at one of its messages) that `create_all`/alembic can only
+    # resolve by adding this one as a deferred ALTER TABLE rather than inline.
+    pinned_message_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey(
+            "collection_messages.id", ondelete="SET NULL",
+            use_alter=True, name="fk_collections_pinned_message_id",
+        ),
+        nullable=True,
+    )
 
     items: Mapped[list["CollectionItem"]] = relationship(
         "CollectionItem", back_populates="collection", cascade="all, delete-orphan"
@@ -215,6 +229,10 @@ class CollectionMessage(Base):
     reply_to_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("collection_messages.id", ondelete="SET NULL"), nullable=True, index=True
     )
+    # A photo of a page. See ResonanceMessage.attachment_path for the same
+    # note on why this is never returned to the client as a raw path.
+    attachment_path: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    attachment_type: Mapped[str | None] = mapped_column(String(40), nullable=True)
 
 
 class CollectionMessageReaction(Base):

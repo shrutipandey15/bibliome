@@ -403,6 +403,44 @@ async def test_reacting_to_a_letter_is_idempotent_and_visible_to_both_readers(cl
     assert r.json() == {"my_reactions": [], "reaction_counts": {}}
 
 
+async def test_reacting_notifies_the_letters_author_but_not_on_removal(client):
+    from sqlalchemy import select
+    from app.models.notification import Notification
+    from app.models.resonance import ResonanceMessage
+    from app.database import async_session
+
+    ha, hb, thread_id = await _connected_thread(client, names=("piper", "quinn"))
+    mid = (await client.get(f"/api/threads/{thread_id}/messages", headers=ha)).json()["messages"][0]["id"]
+
+    react = lambda h, kind, on=True: client.post(
+        f"/api/threads/{thread_id}/messages/{mid}/react", json={"kind": kind, "on": on}, headers=h,
+    )
+
+    r = await react(hb, "chills")
+    assert r.status_code == 200, r.text
+
+    async with async_session() as s:
+        author_id = (await s.execute(
+            select(ResonanceMessage.sender_id).where(ResonanceMessage.id == uuid.UUID(mid))
+        )).scalar_one()
+        n = (await s.execute(
+            select(Notification).where(Notification.kind == "chat_reaction")
+        )).scalars().first()
+
+    assert n is not None
+    assert n.user_id == author_id
+    assert n.payload["message_id"] == mid
+    assert n.payload["kind"] == "chills"
+
+    # Un-reacting is not news — no second notification for the removal.
+    await react(hb, "chills", on=False)
+    async with async_session() as s:
+        count = len((await s.execute(
+            select(Notification).where(Notification.kind == "chat_reaction")
+        )).scalars().all())
+    assert count == 1
+
+
 async def test_reply_quotes_the_earlier_letter(client):
     ha, hb, thread_id = await _connected_thread(client, names=("wren", "otto"))
     original = (await client.get(f"/api/threads/{thread_id}/messages", headers=ha)).json()["messages"][0]
@@ -512,3 +550,71 @@ async def test_mutual_reach_connects_without_either_reading_the_other(client):
         for m in (await client.get(f"/api/threads/{thread_id}/messages", headers=ha)).json()["messages"]
     ]
     assert sorted(bodies) == ["from sol", "from tam"]
+
+
+# ── Image attachments ──
+
+_PNG = b"\x89PNG\r\n\x1a\n" + b"0" * 20  # magic bytes only — sniffing doesn't decode the image
+
+
+async def test_sending_an_image_message_and_fetching_it_back(client):
+    ha, hb, thread_id = await _connected_thread(client, names=("uma", "vic"))
+
+    r = await client.post(
+        f"/api/threads/{thread_id}/messages/image",
+        data={"body": "look at this page"},
+        files={"file": ("page.png", _PNG, "image/png")},
+        headers=ha,
+    )
+    assert r.status_code == 201, r.text
+    mid = r.json()["id"]
+    url = r.json()["attachment_url"]
+    assert url == f"/threads/{thread_id}/messages/{mid}/attachment"
+
+    fetched = await client.get(f"/api{url}", headers=hb)
+    assert fetched.status_code == 200
+    assert fetched.headers["content-type"] == "image/png"
+    assert fetched.content == _PNG
+
+    # The listing carries the same URL, so a page reload can still show it.
+    listed = (await client.get(f"/api/threads/{thread_id}/messages", headers=hb)).json()["messages"]
+    assert next(m for m in listed if m["id"] == mid)["attachment_url"] == url
+
+
+async def test_a_non_party_cannot_fetch_a_letters_attachment(client):
+    ha, hb, thread_id = await _connected_thread(client, names=("wade", "xia"))
+    r = await client.post(
+        f"/api/threads/{thread_id}/messages/image",
+        data={"body": "for us only"},
+        files={"file": ("p.png", _PNG, "image/png")},
+        headers=ha,
+    )
+    mid = r.json()["id"]
+
+    stranger = await _user(client, "yara")
+    r = await client.get(f"/api/threads/{thread_id}/messages/{mid}/attachment", headers=stranger)
+    assert r.status_code == 404
+
+
+async def test_a_non_image_upload_is_refused(client):
+    ha, hb, thread_id = await _connected_thread(client, names=("zeke", "aria"))
+    r = await client.post(
+        f"/api/threads/{thread_id}/messages/image",
+        data={"body": "not a real image"},
+        files={"file": ("notes.txt", b"just text", "text/plain")},
+        headers=ha,
+    )
+    assert r.status_code == 400
+
+
+async def test_an_oversized_image_is_refused(client):
+    from app.config import get_settings
+    ha, hb, thread_id = await _connected_thread(client, names=("bodie", "cleo"))
+    too_big = b"\x89PNG\r\n\x1a\n" + b"0" * (get_settings().CHAT_MAX_ATTACHMENT_BYTES + 1)
+    r = await client.post(
+        f"/api/threads/{thread_id}/messages/image",
+        data={"body": "huge"},
+        files={"file": ("big.png", too_big, "image/png")},
+        headers=ha,
+    )
+    assert r.status_code == 413

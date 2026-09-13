@@ -107,7 +107,9 @@ class JoinedCollection(BaseModel):
 
 # Same vocabulary as resonance threads (app/schemas/resonance.py) — one shared
 # set of non-emoji reaction marks across both chat surfaces, not one per room.
-ChatReactionKind = Literal["resonated", "noted", "reconsidered", "warm"]
+ChatReactionKind = Literal[
+    "resonated", "noted", "reconsidered", "warm", "underlined", "quotable", "chills",
+]
 
 
 class CollectionMessageCreate(BaseModel):
@@ -144,6 +146,16 @@ class ReplyPreview(BaseModel):
     body: str
 
 
+class PinRequest(BaseModel):
+    # None clears the pin. Setting a new one replaces whatever was pinned —
+    # there is only ever one.
+    message_id: uuid.UUID | None = None
+
+
+class PinnedMessageResponse(BaseModel):
+    pinned: ReplyPreview | None = None
+
+
 class CollectionMessageResponse(BaseModel):
     id: uuid.UUID
     book_id: uuid.UUID | None = None
@@ -162,6 +174,9 @@ class CollectionMessageResponse(BaseModel):
     reply_to: ReplyPreview | None = None
     reaction_counts: dict[str, int] = Field(default_factory=dict)
     my_reactions: list[str] = Field(default_factory=list)
+    # A same-origin, membership-checked URL — never the raw disk path (see
+    # app/routers/profile.py get_collection_message_attachment).
+    attachment_url: str | None = None
 
 
 class CollectionMessageList(BaseModel):

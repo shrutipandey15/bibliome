@@ -2,7 +2,8 @@ import re
 import uuid
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile, status
+from fastapi.responses import FileResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -21,13 +22,17 @@ from app.services.collection_chat_service import (
     annotate_messages,
     book_is_in_collection,
     conversation_sparks,
+    get_pinned_message,
     list_conversations,
     list_messages,
+    parse_mentions,
+    set_pinned_message,
 )
 from app.services.collection_chat_service import delete_message as delete_chat_message
 from app.services.collection_chat_service import notify_targets as chat_notify_targets
 from app.services.collection_chat_service import post_message as post_chat_message
 from app.services.collection_chat_service import set_reaction as set_chat_reaction
+from app.utils.attachments import save_chat_image
 from app.services.moderation import CRISIS_RESOURCES, VERDICT_CRISIS, submit_report
 from app.services.notification_service import notify
 from app.schemas.profile import (
@@ -50,6 +55,8 @@ from app.schemas.profile import (
     CollectionResponse,
     CollectionUpdate,
     JoinedCollection,
+    PinnedMessageResponse,
+    PinRequest,
     ProfileUpdate,
     ReplyPreview,
 )
@@ -507,6 +514,9 @@ async def get_collection_messages(
                 reply_to=ReplyPreview(**previews[m.id]) if m.id in previews else None,
                 reaction_counts=counts.get(m.id, {}),
                 my_reactions=mine.get(m.id, []),
+                attachment_url=(
+                    f"/collections/{collection_id}/messages/{m.id}/attachment" if m.attachment_path else None
+                ),
             )
             for m in messages
         ],
@@ -568,6 +578,20 @@ async def post_collection_message(
             actor_id=current_user.id,
         )
 
+    # A mention is a separate, stronger signal than "the room said something" —
+    # its own notification kind and its own per-recipient batch key, so a burst
+    # of mentions across several messages coalesces without merging into the
+    # generic room activity above.
+    mentioned = parse_mentions(message.body, await list_members(db, c.id))
+    mentioned.discard(current_user.id)
+    for uid in mentioned:
+        await notify(
+            db, uid, TIER_DIRECT, "chat_mention",
+            {"collection_id": str(c.id), "message_id": str(message.id), "actors": [current_user.handle], "count": 1},
+            batch_key=f"chat_mention:{c.id}:{uid}",
+            actor_id=current_user.id,
+        )
+
     return CollectionMessageResponse(
         id=message.id,
         book_id=message.book_id,
@@ -579,6 +603,109 @@ async def post_collection_message(
         crisis=dict(CRISIS_RESOURCES) if verdict == VERDICT_CRISIS else None,
         reply_to=reply_to,
     )
+
+
+@router.post(
+    "/collections/{collection_id}/messages/image",
+    response_model=CollectionMessageResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def post_collection_image_message(
+    collection_id: uuid.UUID,
+    request: Request,
+    body: str = Form(...),
+    book_id: uuid.UUID | None = Form(default=None),
+    reply_to_id: uuid.UUID | None = Form(default=None),
+    file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Say something with a photo attached — a page, a margin note, a shelf.
+    A separate multipart endpoint, same reasoning as the resonance one: it
+    doesn't change the JSON contract every existing caller of the plain
+    `/messages` endpoint already depends on."""
+    c, _ = await _visible_or_404(db, collection_id, current_user.id)
+    await chat_limiter.check_key(str(current_user.id))
+
+    path, content_type = await save_chat_image(file)
+    try:
+        message, verdict = await post_chat_message(
+            db, c, current_user.id, body, book_id=book_id, reply_to_id=reply_to_id,
+            attachment_path=path, attachment_type=content_type,
+        )
+    except ChatRefused as e:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e))
+    except ChatError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+    title = None
+    if message.book_id:
+        title = (await db.execute(
+            select(Book.title).where(Book.id == message.book_id)
+        )).scalar_one_or_none()
+
+    reply_to = None
+    if message.reply_to_id:
+        quoted = (await db.execute(
+            select(CollectionMessage.body, User.handle)
+            .join(User, User.id == CollectionMessage.sender_id)
+            .where(CollectionMessage.id == message.reply_to_id)
+        )).first()
+        if quoted:
+            reply_to = ReplyPreview(id=message.reply_to_id, handle=quoted.handle, body=quoted.body)
+
+    for uid in await chat_notify_targets(db, c.id, current_user.id):
+        await notify(
+            db, uid, TIER_DIRECT, "collection_message",
+            {"collection_id": str(c.id), "book_id": str(message.book_id) if message.book_id else None},
+            batch_key=f"collection_message:{c.id}",
+            actor_id=current_user.id,
+        )
+
+    mentioned = parse_mentions(message.body, await list_members(db, c.id))
+    mentioned.discard(current_user.id)
+    for uid in mentioned:
+        await notify(
+            db, uid, TIER_DIRECT, "chat_mention",
+            {"collection_id": str(c.id), "message_id": str(message.id), "actors": [current_user.handle], "count": 1},
+            batch_key=f"chat_mention:{c.id}:{uid}",
+            actor_id=current_user.id,
+        )
+
+    return CollectionMessageResponse(
+        id=message.id,
+        book_id=message.book_id,
+        book_title=title,
+        handle=current_user.handle,
+        is_mine=True,
+        body=message.body,
+        created_at=message.created_at,
+        crisis=dict(CRISIS_RESOURCES) if verdict == VERDICT_CRISIS else None,
+        reply_to=reply_to,
+        attachment_url=f"/collections/{collection_id}/messages/{message.id}/attachment",
+    )
+
+
+@router.get("/collections/{collection_id}/messages/{message_id}/attachment")
+async def get_collection_message_attachment(
+    collection_id: uuid.UUID,
+    message_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """The photo attached to one message. Members only, same 404-not-403 rule
+    as the rest of this room — the file itself never sits behind a public or
+    guessable static URL."""
+    await _visible_or_404(db, collection_id, current_user.id)
+    row = (await db.execute(
+        select(CollectionMessage.attachment_path, CollectionMessage.attachment_type).where(
+            CollectionMessage.id == message_id, CollectionMessage.collection_id == collection_id,
+        )
+    )).first()
+    path, content_type = row or (None, None)
+    if not path:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No attachment here")
+    return FileResponse(path, media_type=content_type or "application/octet-stream")
 
 
 @router.get("/collections/{collection_id}/sparks")
@@ -595,6 +722,42 @@ async def get_collection_sparks(
     """
     c, _ = await _visible_or_404(db, collection_id, current_user.id)
     return {"sparks": await conversation_sparks(db, c, current_user.id)}
+
+
+@router.get(
+    "/collections/{collection_id}/pinned",
+    response_model=PinnedMessageResponse,
+)
+async def get_collection_pinned(
+    collection_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """The one message currently pinned above the room, if any."""
+    c, _ = await _visible_or_404(db, collection_id, current_user.id)
+    pinned = await get_pinned_message(db, c)
+    return PinnedMessageResponse(pinned=ReplyPreview(**pinned) if pinned else None)
+
+
+@router.put(
+    "/collections/{collection_id}/pinned",
+    response_model=PinnedMessageResponse,
+)
+async def put_collection_pinned(
+    collection_id: uuid.UUID,
+    data: PinRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Pin a message (replacing whatever was pinned), or clear it with a null
+    `message_id`. Any member may — see the service docstring for why."""
+    c, _ = await _visible_or_404(db, collection_id, current_user.id)
+    try:
+        await set_pinned_message(db, c, data.message_id, current_user.id)
+    except ChatError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    pinned = await get_pinned_message(db, c)
+    return PinnedMessageResponse(pinned=ReplyPreview(**pinned) if pinned else None)
 
 
 @router.delete(
@@ -629,18 +792,28 @@ async def react_to_collection_message(
     """Set/unset a reaction. Public within the room — any member sees any
     member's reactions on any message, unlike Echo's author-only tally."""
     await _visible_or_404(db, collection_id, current_user.id)
-    exists = (await db.execute(
-        select(CollectionMessage.id).where(
+    sender_id = (await db.execute(
+        select(CollectionMessage.sender_id).where(
             CollectionMessage.id == message_id, CollectionMessage.collection_id == collection_id,
         )
     )).scalar_one_or_none()
-    if exists is None:
+    if sender_id is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Message not found")
 
     try:
         await set_chat_reaction(db, message_id, current_user.id, data.kind, data.on)
     except ChatError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+    # Only on adding a reaction, and only to the message's own author — a
+    # removal is not news, and notify() already drops the self-reaction case.
+    if data.on:
+        await notify(
+            db, sender_id, TIER_DIRECT, "chat_reaction",
+            {"collection_id": str(collection_id), "message_id": str(message_id), "kind": data.kind, "actors": [current_user.handle], "count": 1},
+            batch_key=f"chat_reaction:{message_id}",
+            actor_id=current_user.id,
+        )
 
     rows = (await db.execute(
         select(CollectionMessageReaction.kind, CollectionMessageReaction.user_id)

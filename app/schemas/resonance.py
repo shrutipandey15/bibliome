@@ -27,7 +27,9 @@ ReportCategory = Literal["harassment", "hate", "csam", "spam", "self_harm", "pii
 # above warns against: that's about hiding a stranger-facing popularity signal
 # (match counts, reach totals) before consent, not an interaction detail inside
 # a thread that already exists between two people who know each other.
-ChatReactionKind = Literal["resonated", "noted", "reconsidered", "warm"]
+ChatReactionKind = Literal[
+    "resonated", "noted", "reconsidered", "warm", "underlined", "quotable", "chills",
+]
 
 
 class SharedEmotionOut(BaseModel):
@@ -95,6 +97,9 @@ class MessageResponse(BaseModel):
     reply_to: ReplyPreview | None = None
     reaction_counts: dict[str, int] = Field(default_factory=dict)
     my_reactions: list[str] = Field(default_factory=list)
+    # A same-origin, party-checked URL — never the raw disk path (see
+    # app/routers/threads.py get_message_attachment).
+    attachment_url: str | None = None
 
 
 class MessageListResponse(BaseModel):

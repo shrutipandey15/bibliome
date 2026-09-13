@@ -39,3 +39,7 @@ docker-compose.override.yml
 # spreadsheet it reads never needs to live in the repo — and one did, publicly,
 # until it was removed.
 *.xlsx
+
+# Chat image attachments (app/utils/attachments.py) — local-disk storage,
+# never meant to live in the repo.
+uploads/

@@ -13,7 +13,8 @@ the other party anything — the conversation simply stops.
 import uuid
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
+from fastapi.responses import FileResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -48,6 +49,7 @@ from app.services.resonance_service import (
 )
 from app.services.resonance_service import set_reaction as set_thread_reaction
 from app.services.social_service import block_user
+from app.utils.attachments import save_chat_image
 
 router = APIRouter(prefix="/threads", tags=["resonance"])
 
@@ -136,6 +138,11 @@ async def get_messages(
                 reply_to=ReplyPreview(**previews[m.id]) if m.id in previews else None,
                 reaction_counts=counts.get(m.id, {}),
                 my_reactions=mine.get(m.id, []),
+                # No leading /api: the frontend's apiFetch adds that base itself
+                # (see src/services/api.js API_BASE) and this URL is fetched
+                # through it — as a Bearer-authenticated blob, not a plain <img
+                # src>, since this API has no auth cookie for ordinary requests.
+                attachment_url=f"/threads/{thread_id}/messages/{m.id}/attachment" if m.attachment_path else None,
             )
             for m in messages
         ],
@@ -197,6 +204,85 @@ async def send_message(
     )
 
 
+@router.post(
+    "/{thread_id}/messages/image", response_model=MessageResponse, status_code=status.HTTP_201_CREATED,
+)
+async def send_image_message(
+    thread_id: uuid.UUID,
+    body: str = Form(...),
+    reply_to_id: uuid.UUID | None = Form(default=None),
+    file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Send a letter with a photo attached — a page, a margin note, a cover.
+    A separate multipart endpoint rather than widening `send_message` to accept
+    either JSON or a file: that would change an existing contract every caller
+    already depends on. Same rate limit as a plain letter — an attachment isn't
+    a way around the per-hour cap."""
+    thread, match = await _load(db, thread_id, current_user)
+    await message_limiter.check_key(str(current_user.id))
+
+    path, content_type = await save_chat_image(file)
+    try:
+        message, verdict, _reason = await post_message(
+            db, thread, current_user.id, body, reply_to_id=reply_to_id,
+            attachment_path=path, attachment_type=content_type,
+        )
+    except ResonanceError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+    reply_to = None
+    if message.reply_to_id:
+        quoted = (await db.execute(
+            select(ResonanceMessage.body, User.handle)
+            .join(User, User.id == ResonanceMessage.sender_id)
+            .where(ResonanceMessage.id == message.reply_to_id)
+        )).first()
+        if quoted:
+            reply_to = ReplyPreview(id=message.reply_to_id, handle=quoted.handle, body=quoted.body)
+
+    await notify(
+        db, match.other_id(current_user.id), TIER_DIRECT, "resonance_message",
+        {"thread_id": str(thread.id)},
+        batch_key=f"resonance_message:{thread.id}",
+        actor_id=current_user.id,
+    )
+
+    return MessageResponse(
+        id=message.id,
+        thread_id=message.thread_id,
+        handle=current_user.handle,
+        is_mine=True,
+        body=message.body,
+        created_at=message.created_at,
+        crisis=CrisisInterstitial(**CRISIS_RESOURCES) if verdict == VERDICT_CRISIS else None,
+        reply_to=reply_to,
+        attachment_url=f"/threads/{thread_id}/messages/{message.id}/attachment",
+    )
+
+
+@router.get("/{thread_id}/messages/{message_id}/attachment")
+async def get_message_attachment(
+    thread_id: uuid.UUID,
+    message_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """The photo attached to one letter. Party-only, same 404-not-403 rule as
+    the rest of this router — the file itself never sits behind a public or
+    guessable static URL."""
+    thread, _match = await _load(db, thread_id, current_user)
+    path, content_type = (await db.execute(
+        select(ResonanceMessage.attachment_path, ResonanceMessage.attachment_type).where(
+            ResonanceMessage.id == message_id, ResonanceMessage.thread_id == thread.id,
+        )
+    )).first() or (None, None)
+    if not path:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No attachment here")
+    return FileResponse(path, media_type=content_type or "application/octet-stream")
+
+
 @router.post("/{thread_id}/messages/{message_id}/react", response_model=ChatReactionResponse)
 async def react_to_thread_message(
     thread_id: uuid.UUID,
@@ -208,18 +294,28 @@ async def react_to_thread_message(
     """Set/unset a reaction. Public within the thread — both readers already
     know who's who once a thread exists, unlike Echo's stranger-facing feed."""
     thread, _match = await _load(db, thread_id, current_user)
-    exists = (await db.execute(
-        select(ResonanceMessage.id).where(
+    sender_id = (await db.execute(
+        select(ResonanceMessage.sender_id).where(
             ResonanceMessage.id == message_id, ResonanceMessage.thread_id == thread.id,
         )
     )).scalar_one_or_none()
-    if exists is None:
+    if sender_id is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Message not found")
 
     try:
         await set_thread_reaction(db, message_id, current_user.id, data.kind, data.on)
     except ResonanceError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+    # Only on adding a reaction, and only to the letter's own author — a removal
+    # is not news, and notify() already drops the self-reaction case.
+    if data.on:
+        await notify(
+            db, sender_id, TIER_DIRECT, "chat_reaction",
+            {"thread_id": str(thread.id), "message_id": str(message_id), "kind": data.kind, "actors": [current_user.handle], "count": 1},
+            batch_key=f"chat_reaction:{message_id}",
+            actor_id=current_user.id,
+        )
 
     rows = (await db.execute(
         select(ResonanceMessageReaction.kind, ResonanceMessageReaction.user_id)

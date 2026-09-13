@@ -376,6 +376,183 @@ async def test_an_invalid_reaction_kind_is_refused(client):
     assert r.status_code == 422  # pydantic Literal rejects it before the service even runs
 
 
+async def test_the_newer_literary_reaction_kinds_work_the_same_way(client):
+    # underlined / quotable / chills — added alongside the original four.
+    owner = await _auth(client, "o@example.com", "owner")
+    friend = await _auth(client, "f@example.com", "friend")
+    cid, _book = await _room(client, owner, friend)
+    mid = (await _say(client, owner, cid, "a line worth keeping")).json()["id"]
+
+    r = await client.post(
+        f"/api/collections/{cid}/messages/{mid}/react", json={"kind": "quotable"}, headers=friend,
+    )
+    assert r.status_code == 200, r.text
+    assert r.json() == {"my_reactions": ["quotable"], "reaction_counts": {"quotable": 1}}
+
+
+async def test_reacting_notifies_the_authors_but_not_on_removal(client):
+    from sqlalchemy import select
+    from app.models.notification import Notification
+    from app.database import async_session
+
+    owner = await _auth(client, "o@example.com", "owner")
+    friend = await _auth(client, "f@example.com", "friend")
+    owner_id = await _me(client, owner)
+    cid, _book = await _room(client, owner, friend)
+    mid = (await _say(client, owner, cid, "hello")).json()["id"]
+
+    r = await client.post(
+        f"/api/collections/{cid}/messages/{mid}/react", json={"kind": "underlined"}, headers=friend,
+    )
+    assert r.status_code == 200, r.text
+
+    async with async_session() as s:
+        n = (await s.execute(
+            select(Notification).where(Notification.kind == "chat_reaction")
+        )).scalars().first()
+    assert n is not None
+    assert str(n.user_id) == owner_id
+    assert n.payload["message_id"] == mid
+    assert n.payload["kind"] == "underlined"
+
+    # The message's own author reacting to it is a self-reaction — no notification.
+    await client.post(
+        f"/api/collections/{cid}/messages/{mid}/react", json={"kind": "noted"}, headers=owner,
+    )
+    async with async_session() as s:
+        count = len((await s.execute(
+            select(Notification).where(Notification.kind == "chat_reaction")
+        )).scalars().all())
+    assert count == 1  # still just friend's, not owner's own
+
+
+# ── Mentions ──
+
+async def test_mentioning_a_member_notifies_them_with_their_own_kind(client):
+    from sqlalchemy import select
+    from app.models.notification import Notification
+    from app.database import async_session
+
+    owner = await _auth(client, "o@example.com", "owner")
+    friend = await _auth(client, "f@example.com", "friend")
+    friend_id = await _me(client, friend)
+    cid, _book = await _room(client, owner, friend)
+
+    r = await _say(client, owner, cid, "hey @friend, look at this")
+    assert r.status_code == 201, r.text
+
+    async with async_session() as s:
+        mention = (await s.execute(
+            select(Notification).where(Notification.kind == "chat_mention")
+        )).scalars().first()
+        # A mention is on top of, not instead of, the room's own activity ping.
+        room_ping = (await s.execute(
+            select(Notification).where(Notification.kind == "collection_message")
+        )).scalars().first()
+
+    assert mention is not None
+    assert str(mention.user_id) == friend_id
+    assert mention.payload["collection_id"] == cid
+    assert room_ping is not None
+
+
+async def test_mentioning_someone_not_in_the_room_notifies_nobody(client):
+    from sqlalchemy import select
+    from app.models.notification import Notification
+    from app.database import async_session
+
+    owner = await _auth(client, "o@example.com", "owner")
+    cid, _book = await _room(client, owner)
+
+    r = await _say(client, owner, cid, "hey @nobody_here, anyone?")
+    assert r.status_code == 201, r.text
+
+    async with async_session() as s:
+        mention = (await s.execute(
+            select(Notification).where(Notification.kind == "chat_mention")
+        )).scalars().first()
+    assert mention is None
+
+
+async def test_mentioning_yourself_does_not_notify_yourself(client):
+    from sqlalchemy import select
+    from app.models.notification import Notification
+    from app.database import async_session
+
+    owner = await _auth(client, "o@example.com", "owner")
+    cid, _book = await _room(client, owner)
+
+    await _say(client, owner, cid, "note to self, @owner")
+
+    async with async_session() as s:
+        mention = (await s.execute(
+            select(Notification).where(Notification.kind == "chat_mention")
+        )).scalars().first()
+    assert mention is None
+
+
+# ── Pinned message ──
+
+async def test_pinning_and_clearing_a_message(client):
+    owner = await _auth(client, "o@example.com", "owner")
+    friend = await _auth(client, "f@example.com", "friend")
+    cid, _book = await _room(client, owner, friend)
+    mid = (await _say(client, owner, cid, "the schedule: chapter 4 by Friday")).json()["id"]
+
+    r = await client.get(f"/api/collections/{cid}/pinned", headers=friend)
+    assert r.status_code == 200
+    assert r.json() == {"pinned": None}
+
+    # Any member may pin, not just the owner.
+    r = await client.put(
+        f"/api/collections/{cid}/pinned", json={"message_id": mid}, headers=friend,
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["pinned"]["id"] == mid
+    assert r.json()["pinned"]["body"] == "the schedule: chapter 4 by Friday"
+
+    r = await client.get(f"/api/collections/{cid}/pinned", headers=owner)
+    assert r.json()["pinned"]["id"] == mid
+
+    # Pinning a second message replaces the first — never stacks.
+    mid2 = (await _say(client, owner, cid, "actually, chapter 5")).json()["id"]
+    r = await client.put(
+        f"/api/collections/{cid}/pinned", json={"message_id": mid2}, headers=owner,
+    )
+    assert r.json()["pinned"]["id"] == mid2
+
+    r = await client.put(
+        f"/api/collections/{cid}/pinned", json={"message_id": None}, headers=owner,
+    )
+    assert r.json() == {"pinned": None}
+
+
+async def test_cannot_pin_a_message_from_a_different_room(client):
+    owner = await _auth(client, "o@example.com", "owner")
+    cid_a, _ = await _room(client, owner, title="Room A")
+    other = await _auth(client, "x@example.com", "other")
+    cid_b, _ = await _room(client, other, title="Room B")
+    foreign_mid = (await _say(client, other, cid_b, "not yours to pin")).json()["id"]
+
+    r = await client.put(
+        f"/api/collections/{cid_a}/pinned", json={"message_id": foreign_mid}, headers=owner,
+    )
+    assert r.status_code == 400
+
+
+async def test_deleting_the_pinned_message_clears_the_pin(client):
+    owner = await _auth(client, "o@example.com", "owner")
+    cid, _book = await _room(client, owner)
+    mid = (await _say(client, owner, cid, "temporary")).json()["id"]
+    await client.put(f"/api/collections/{cid}/pinned", json={"message_id": mid}, headers=owner)
+
+    r = await client.delete(f"/api/collections/{cid}/messages/{mid}", headers=owner)
+    assert r.status_code == 204
+
+    r = await client.get(f"/api/collections/{cid}/pinned", headers=owner)
+    assert r.json() == {"pinned": None}
+
+
 async def test_reply_shows_the_quoted_message_and_survives_its_deletion(client):
     owner = await _auth(client, "o@example.com", "owner")
     friend = await _auth(client, "f@example.com", "friend")
@@ -693,3 +870,87 @@ async def test_sparks_are_members_only(client):
     cid, _seeded = await _room(client, owner)
 
     assert (await client.get(f"/api/collections/{cid}/sparks", headers=stranger)).status_code == 404
+
+
+# ── Image attachments ──
+
+_PNG = b"\x89PNG\r\n\x1a\n" + b"0" * 20  # magic bytes only — sniffing doesn't decode the image
+
+
+async def test_sending_an_image_message_and_fetching_it_back(client):
+    owner = await _auth(client, "o@example.com", "owner")
+    friend = await _auth(client, "f@example.com", "friend")
+    cid, _book = await _room(client, owner, friend)
+
+    r = await client.post(
+        f"/api/collections/{cid}/messages/image",
+        data={"body": "the annotated page"},
+        files={"file": ("page.png", _PNG, "image/png")},
+        headers=owner,
+    )
+    assert r.status_code == 201, r.text
+    mid = r.json()["id"]
+    url = r.json()["attachment_url"]
+    assert url == f"/collections/{cid}/messages/{mid}/attachment"
+
+    fetched = await client.get(f"/api{url}", headers=friend)
+    assert fetched.status_code == 200
+    assert fetched.headers["content-type"] == "image/png"
+    assert fetched.content == _PNG
+
+    listed = (await _read(client, friend, cid)).json()["messages"]
+    assert next(m for m in listed if m["id"] == mid)["attachment_url"] == url
+
+
+async def test_a_non_member_cannot_fetch_a_rooms_attachment(client):
+    owner = await _auth(client, "o@example.com", "owner")
+    cid, _book = await _room(client, owner)
+    r = await client.post(
+        f"/api/collections/{cid}/messages/image",
+        data={"body": "members only"},
+        files={"file": ("p.png", _PNG, "image/png")},
+        headers=owner,
+    )
+    mid = r.json()["id"]
+
+    stranger = await _auth(client, "s@example.com", "stranger")
+    r = await client.get(f"/api/collections/{cid}/messages/{mid}/attachment", headers=stranger)
+    assert r.status_code == 404
+
+
+async def test_deleting_an_image_message_removes_the_file_from_disk(client):
+    import os
+    owner = await _auth(client, "o@example.com", "owner")
+    cid, _book = await _room(client, owner)
+    r = await client.post(
+        f"/api/collections/{cid}/messages/image",
+        data={"body": "temporary"},
+        files={"file": ("p.png", _PNG, "image/png")},
+        headers=owner,
+    )
+    mid = r.json()["id"]
+
+    from app.database import async_session
+    from app.models.collection import CollectionMessage
+    from sqlalchemy import select
+    async with async_session() as s:
+        path = (await s.execute(
+            select(CollectionMessage.attachment_path).where(CollectionMessage.id == uuid.UUID(mid))
+        )).scalar_one()
+    assert os.path.exists(path)
+
+    r = await client.delete(f"/api/collections/{cid}/messages/{mid}", headers=owner)
+    assert r.status_code == 204
+    assert not os.path.exists(path)
+
+
+async def test_a_non_image_upload_is_refused(client):
+    owner = await _auth(client, "o@example.com", "owner")
+    cid, _book = await _room(client, owner)
+    r = await client.post(
+        f"/api/collections/{cid}/messages/image",
+        data={"body": "not a real image"},
+        files={"file": ("notes.txt", b"just text", "text/plain")},
+        headers=owner,
+    )
+    assert r.status_code == 400

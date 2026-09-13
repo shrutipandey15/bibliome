@@ -79,6 +79,14 @@ class Settings(BaseSettings):
     # Tied to the `confirmed` tier for the same reason it exists.
     DEVIATION_MIN_READERS: int = 5
 
+    # Chat image attachments (Resonance letters + collection rooms). Stored on
+    # local disk under a directory that is NEVER a static mount — every read
+    # goes through an authenticated, party/membership-checked endpoint (see
+    # app/utils/attachments.py), so a leaked file path alone can't expose a
+    # private photo the way a public /uploads/ URL would.
+    CHAT_UPLOAD_DIR: str = "uploads/chat"
+    CHAT_MAX_ATTACHMENT_BYTES: int = 8 * 1024 * 1024  # 8MB — a phone photo, not a scan dump
+
     # Email (SMTP)
     SMTP_HOST: str | None = None
     SMTP_PORT: int = 587

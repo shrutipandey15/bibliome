@@ -151,6 +151,13 @@ class ResonanceMessage(Base):
     reply_to_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("resonance_messages.id", ondelete="SET NULL"), nullable=True, index=True
     )
+    # A photo of a page, never a video/voice clip (not yet built). The path is
+    # a server-local disk location, NEVER returned to the client directly —
+    # only as an authenticated, party-checked URL (see app/routers/threads.py
+    # get_message_attachment). content_type is the sniffed value from upload
+    # (app/utils/attachments.py), not the client's claimed one.
+    attachment_path: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    attachment_type: Mapped[str | None] = mapped_column(String(40), nullable=True)
 
 
 class ResonanceMessageReaction(Base):

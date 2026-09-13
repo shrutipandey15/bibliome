@@ -570,6 +570,7 @@ async def list_threads(db: AsyncSession, user_id: uuid.UUID) -> list[ResonanceTh
 async def post_message(
     db: AsyncSession, thread: ResonanceThread, sender_id: uuid.UUID, body: str,
     reply_to_id: uuid.UUID | None = None,
+    attachment_path: str | None = None, attachment_type: str | None = None,
 ) -> tuple[ResonanceMessage, str, str | None]:
     """Send a message. Free text: no topic anchor, no emotion tag, no prompt.
 
@@ -612,6 +613,7 @@ async def post_message(
 
     message = ResonanceMessage(
         thread_id=thread.id, sender_id=sender_id, body=body, reply_to_id=reply_to_id,
+        attachment_path=attachment_path, attachment_type=attachment_type,
     )
     db.add(message)
     await db.flush()
