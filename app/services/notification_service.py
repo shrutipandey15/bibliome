@@ -66,14 +66,29 @@ def _quiet_until(now_utc: datetime, prefs: NotificationPrefs) -> datetime | None
 
 
 def _merge_batch(existing: dict, incoming: dict) -> dict:
-    """Collapse a repeat tier-1 event into an existing unread notification."""
+    """Collapse a repeat tier-1 event into an existing unread notification.
+
+    `count` tracks distinct actors, not raw events — a reactor switching from
+    one reaction kind to another fires two calls to `notify()` for the same
+    message (set the new kind; the unset of the old one is silent), and
+    blindly incrementing here would turn "1 reader reconsidered" into "2
+    readers reacted". Only a genuinely new actor moves the count.
+    """
     p = dict(existing)
-    p["count"] = int(p.get("count", 1)) + 1
     actors = list(p.get("actors", []))
-    for actor in incoming.get("actors", []):
-        if actor and actor not in actors:
-            actors.append(actor)
-    p["actors"] = actors[:5]
+    new_actors = [a for a in incoming.get("actors", []) if a and a not in actors]
+    if new_actors:
+        p["count"] = int(p.get("count", 1)) + len(new_actors)
+        actors.extend(new_actors)
+        p["actors"] = actors[:5]
+    # Any other scalar field (e.g. chat_reaction's `kind`) reflects the most
+    # recent event even when the actor was already counted — a reader who
+    # switches reactions changes what's true NOW, not just how many times
+    # something happened.
+    for key, value in incoming.items():
+        if key in ("actors", "count"):
+            continue
+        p[key] = value
     return p
 
 

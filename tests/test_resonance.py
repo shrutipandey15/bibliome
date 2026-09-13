@@ -441,6 +441,36 @@ async def test_reacting_notifies_the_letters_author_but_not_on_removal(client):
     assert count == 1
 
 
+async def test_switching_ones_own_reaction_updates_the_kind_without_inflating_the_count(client):
+    """One reader changing their mind about which reaction to leave is still
+    ONE reader — `count` must not read as if a second person reacted, and the
+    payload's `kind` must reflect the reaction that's actually live now, not
+    whichever one happened to be first."""
+    from sqlalchemy import select
+    from app.models.notification import Notification
+    from app.database import async_session
+
+    ha, hb, thread_id = await _connected_thread(client, names=("robin", "sasha"))
+    mid = (await client.get(f"/api/threads/{thread_id}/messages", headers=ha)).json()["messages"][0]["id"]
+
+    react = lambda h, kind, on=True: client.post(
+        f"/api/threads/{thread_id}/messages/{mid}/react", json={"kind": kind, "on": on}, headers=h,
+    )
+
+    await react(hb, "underlined")
+    await react(hb, "underlined", on=False)  # the frontend's own "switch" sequence
+    await react(hb, "chills")
+
+    async with async_session() as s:
+        n = (await s.execute(
+            select(Notification).where(Notification.kind == "chat_reaction")
+        )).scalars().first()
+
+    assert n.payload["count"] == 1
+    assert n.payload["kind"] == "chills"
+    assert n.payload["actors"] == ["sasha"]
+
+
 async def test_reply_quotes_the_earlier_letter(client):
     ha, hb, thread_id = await _connected_thread(client, names=("wren", "otto"))
     original = (await client.get(f"/api/threads/{thread_id}/messages", headers=ha)).json()["messages"][0]
