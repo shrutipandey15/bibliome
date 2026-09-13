@@ -22,11 +22,15 @@ from app.middleware.auth import get_current_user
 from app.middleware.rate_limit import RateLimiter
 from app.models.book import Book
 from app.models.notification import TIER_DIRECT
+from app.models.resonance import ResonanceMessage, ResonanceMessageReaction
 from app.models.user import User
 from app.schemas.resonance import (
+    ChatReactionResponse,
+    ChatReactionUpdate,
     MessageCreate,
     MessageListResponse,
     MessageResponse,
+    ReplyPreview,
     ThreadReportRequest,
     ThreadResponse,
 )
@@ -35,12 +39,14 @@ from app.services.moderation import CRISIS_RESOURCES, VERDICT_CRISIS, submit_rep
 from app.services.notification_service import notify
 from app.services.resonance_service import (
     ResonanceError,
+    annotate_messages,
     close_thread,
     get_thread_for_user,
     list_messages,
     list_threads,
     post_message,
 )
+from app.services.resonance_service import set_reaction as set_thread_reaction
 from app.services.social_service import block_user
 
 router = APIRouter(prefix="/threads", tags=["resonance"])
@@ -116,6 +122,8 @@ async def get_messages(
         ).scalar_one_or_none() or "",
     }
 
+    counts, mine, previews = await annotate_messages(db, messages, current_user.id)
+
     return MessageListResponse(
         messages=[
             MessageResponse(
@@ -125,6 +133,9 @@ async def get_messages(
                 is_mine=m.sender_id == current_user.id,
                 body=m.body,
                 created_at=m.created_at,
+                reply_to=ReplyPreview(**previews[m.id]) if m.id in previews else None,
+                reaction_counts=counts.get(m.id, {}),
+                my_reactions=mine.get(m.id, []),
             )
             for m in messages
         ],
@@ -146,9 +157,21 @@ async def send_message(
     await message_limiter.check_key(str(current_user.id))
 
     try:
-        message, verdict, _reason = await post_message(db, thread, current_user.id, data.body)
+        message, verdict, _reason = await post_message(
+            db, thread, current_user.id, data.body, reply_to_id=data.reply_to_id,
+        )
     except ResonanceError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+    reply_to = None
+    if message.reply_to_id:
+        quoted = (await db.execute(
+            select(ResonanceMessage.body, User.handle)
+            .join(User, User.id == ResonanceMessage.sender_id)
+            .where(ResonanceMessage.id == message.reply_to_id)
+        )).first()
+        if quoted:
+            reply_to = ReplyPreview(id=message.reply_to_id, handle=quoted.handle, body=quoted.body)
 
     await notify(
         db,
@@ -170,7 +193,46 @@ async def send_message(
         body=message.body,
         created_at=message.created_at,
         crisis=CrisisInterstitial(**CRISIS_RESOURCES) if verdict == VERDICT_CRISIS else None,
+        reply_to=reply_to,
     )
+
+
+@router.post("/{thread_id}/messages/{message_id}/react", response_model=ChatReactionResponse)
+async def react_to_thread_message(
+    thread_id: uuid.UUID,
+    message_id: uuid.UUID,
+    data: ChatReactionUpdate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Set/unset a reaction. Public within the thread — both readers already
+    know who's who once a thread exists, unlike Echo's stranger-facing feed."""
+    thread, _match = await _load(db, thread_id, current_user)
+    exists = (await db.execute(
+        select(ResonanceMessage.id).where(
+            ResonanceMessage.id == message_id, ResonanceMessage.thread_id == thread.id,
+        )
+    )).scalar_one_or_none()
+    if exists is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Message not found")
+
+    try:
+        await set_thread_reaction(db, message_id, current_user.id, data.kind, data.on)
+    except ResonanceError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+    rows = (await db.execute(
+        select(ResonanceMessageReaction.kind, ResonanceMessageReaction.user_id)
+        .where(ResonanceMessageReaction.message_id == message_id)
+    )).all()
+    counts: dict[str, int] = {}
+    my_kinds: list[str] = []
+    for kind, uid in rows:
+        counts[kind] = counts.get(kind, 0) + 1
+        if uid == current_user.id:
+            my_kinds.append(kind)
+
+    return ChatReactionResponse(my_reactions=my_kinds, reaction_counts=counts)
 
 
 @router.post("/{thread_id}/block", status_code=status.HTTP_204_NO_CONTENT)

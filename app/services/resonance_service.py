@@ -28,11 +28,13 @@ from sqlalchemy.orm import aliased, selectinload
 
 from app.models.book import Book
 from app.models.book_entry import BookEntry, EntryEmotion
+from app.models.reaction_kinds import CHAT_REACTION_KINDS
 from app.models.resonance import (
     STRENGTH_LIGHT,
     STRENGTH_STRONG,
     ResonanceMatch,
     ResonanceMessage,
+    ResonanceMessageReaction,
     ResonanceThread,
 )
 from app.models.user import User
@@ -566,7 +568,8 @@ async def list_threads(db: AsyncSession, user_id: uuid.UUID) -> list[ResonanceTh
 
 
 async def post_message(
-    db: AsyncSession, thread: ResonanceThread, sender_id: uuid.UUID, body: str
+    db: AsyncSession, thread: ResonanceThread, sender_id: uuid.UUID, body: str,
+    reply_to_id: uuid.UUID | None = None,
 ) -> tuple[ResonanceMessage, str, str | None]:
     """Send a message. Free text: no topic anchor, no emotion tag, no prompt.
 
@@ -594,12 +597,22 @@ async def post_message(
         raise ResonanceError("This conversation is closed")
     if await is_blocked_between(db, sender_id, thread.match.other_id(sender_id)):
         raise ResonanceError("This conversation is closed")
+    if reply_to_id is not None:
+        quoted = (await db.execute(
+            select(ResonanceMessage.id).where(
+                ResonanceMessage.id == reply_to_id, ResonanceMessage.thread_id == thread.id,
+            )
+        )).scalar_one_or_none()
+        if quoted is None:
+            raise ResonanceError("That letter isn't in this thread")
 
     verdict, reason = classify_text(body)
     if verdict == VERDICT_HOLD and reason == "threat":
         raise ResonanceError("This message can't be sent.")
 
-    message = ResonanceMessage(thread_id=thread.id, sender_id=sender_id, body=body)
+    message = ResonanceMessage(
+        thread_id=thread.id, sender_id=sender_id, body=body, reply_to_id=reply_to_id,
+    )
     db.add(message)
     await db.flush()
     return message, verdict, reason
@@ -626,6 +639,69 @@ async def list_messages(
     rows = list((await db.execute(stmt)).scalars().all())
     rows.reverse()
     return rows
+
+
+async def set_reaction(
+    db: AsyncSession, message_id: uuid.UUID, user_id: uuid.UUID, kind: str, on: bool
+) -> None:
+    """Toggle one reaction. Public within the thread — both readers already know
+    who's who once a thread exists, unlike Echo's stranger-facing public feed."""
+    if kind not in CHAT_REACTION_KINDS:
+        raise ResonanceError(f"Invalid reaction: {kind}")
+    if on:
+        stmt = pg_insert(ResonanceMessageReaction).values(
+            message_id=message_id, user_id=user_id, kind=kind,
+        ).on_conflict_do_nothing(constraint="uq_resonance_msg_reaction")
+        await db.execute(stmt)
+    else:
+        row = (await db.execute(
+            select(ResonanceMessageReaction).where(
+                ResonanceMessageReaction.message_id == message_id,
+                ResonanceMessageReaction.user_id == user_id,
+                ResonanceMessageReaction.kind == kind,
+            )
+        )).scalar_one_or_none()
+        if row:
+            await db.delete(row)
+    await db.flush()
+
+
+async def annotate_messages(
+    db: AsyncSession, messages: list[ResonanceMessage], viewer_id: uuid.UUID,
+) -> tuple[dict[uuid.UUID, dict[str, int]], dict[uuid.UUID, list[str]], dict[uuid.UUID, dict]]:
+    """Batch-load reaction counts + the viewer's own reactions + reply-to previews
+    for a page of messages. See `collection_chat_service.annotate_messages` — same
+    shape, same reasoning (public reactions, no denormalized quote snapshot)."""
+    ids = [m.id for m in messages]
+    if not ids:
+        return {}, {}, {}
+
+    counts: dict[uuid.UUID, dict[str, int]] = {}
+    mine: dict[uuid.UUID, list[str]] = {}
+    rows = (await db.execute(
+        select(ResonanceMessageReaction.message_id, ResonanceMessageReaction.kind, ResonanceMessageReaction.user_id)
+        .where(ResonanceMessageReaction.message_id.in_(ids))
+    )).all()
+    for mid, kind, uid in rows:
+        counts.setdefault(mid, {}).setdefault(kind, 0)
+        counts[mid][kind] += 1
+        if uid == viewer_id:
+            mine.setdefault(mid, []).append(kind)
+
+    reply_ids = [m.reply_to_id for m in messages if m.reply_to_id is not None]
+    previews: dict[uuid.UUID, dict] = {}
+    if reply_ids:
+        quoted = (await db.execute(
+            select(ResonanceMessage.id, ResonanceMessage.body, User.handle)
+            .join(User, User.id == ResonanceMessage.sender_id)
+            .where(ResonanceMessage.id.in_(reply_ids))
+        )).all()
+        by_id = {qid: {"id": qid, "handle": handle, "body": body} for qid, body, handle in quoted}
+        for m in messages:
+            if m.reply_to_id is not None and m.reply_to_id in by_id:
+                previews[m.id] = by_id[m.reply_to_id]
+
+    return counts, mine, previews
 
 
 async def close_thread(

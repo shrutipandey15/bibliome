@@ -22,6 +22,12 @@ MatchStrength = Literal["strong", "light"]
 # viewer is on without naming the other person.
 MatchDirection = Literal["none", "you_reached", "they_reached"]
 ReportCategory = Literal["harassment", "hate", "csam", "spam", "self_harm", "pii", "other"]
+# Same vocabulary as collection chat (app/schemas/profile.py) — one shared set
+# of non-emoji reaction marks. A count here is not the kind the module docstring
+# above warns against: that's about hiding a stranger-facing popularity signal
+# (match counts, reach totals) before consent, not an interaction detail inside
+# a thread that already exists between two people who know each other.
+ChatReactionKind = Literal["resonated", "noted", "reconsidered", "warm"]
 
 
 class SharedEmotionOut(BaseModel):
@@ -68,6 +74,12 @@ class RespondRequest(BaseModel):
     note: str | None = Field(default=None, max_length=500)
 
 
+class ReplyPreview(BaseModel):
+    id: uuid.UUID
+    handle: str | None
+    body: str
+
+
 class MessageResponse(BaseModel):
     id: uuid.UUID
     thread_id: uuid.UUID
@@ -78,6 +90,11 @@ class MessageResponse(BaseModel):
     # Present only on send, and only when the classifier heard the *sender*
     # sounding at risk. Same supportive interstitial Echo shows; never a block.
     crisis: CrisisInterstitial | None = None
+    # None when this isn't a reply, or (in principle — resonance messages aren't
+    # deletable today) the quoted letter no longer exists.
+    reply_to: ReplyPreview | None = None
+    reaction_counts: dict[str, int] = Field(default_factory=dict)
+    my_reactions: list[str] = Field(default_factory=list)
 
 
 class MessageListResponse(BaseModel):
@@ -88,6 +105,17 @@ class MessageListResponse(BaseModel):
 
 class MessageCreate(BaseModel):
     body: str = Field(min_length=1, max_length=2000)
+    reply_to_id: uuid.UUID | None = None
+
+
+class ChatReactionUpdate(BaseModel):
+    kind: ChatReactionKind
+    on: bool = True
+
+
+class ChatReactionResponse(BaseModel):
+    my_reactions: list[str]
+    reaction_counts: dict[str, int]
 
 
 class ThreadResponse(BaseModel):

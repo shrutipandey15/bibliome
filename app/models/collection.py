@@ -209,3 +209,30 @@ class CollectionMessage(Base):
     )
     body: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    # No denormalized snapshot of the quoted body/handle — resolved at read time
+    # via a join. If the quoted message is later deleted, this goes NULL and the
+    # quote just disappears, rather than the room having to explain a ghost.
+    reply_to_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("collection_messages.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+
+
+class CollectionMessageReaction(Base):
+    """Public within the room — unlike Echo's author-only reactions, everyone in
+    a collection already sees everyone else's name on every message, so hiding
+    who reacted would read as broken, not private."""
+
+    __tablename__ = "collection_message_reactions"
+    __table_args__ = (
+        UniqueConstraint("message_id", "user_id", "kind", name="uq_collection_msg_reaction"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    message_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("collection_messages.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    kind: Mapped[str] = mapped_column(String(20), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

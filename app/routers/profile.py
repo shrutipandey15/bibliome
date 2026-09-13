@@ -11,12 +11,14 @@ from app.middleware.auth import get_current_user
 from app.middleware.rate_limit import RateLimiter
 from app.models.notification import TIER_DIRECT
 from app.models.book import Book
+from app.models.collection import CollectionMessage, CollectionMessageReaction
 from app.models.user import User
 from app.services.collection_chat_service import (
     MESSAGE_PAGE_DEFAULT,
     MESSAGE_PAGE_MAX,
     ChatError,
     ChatRefused,
+    annotate_messages,
     book_is_in_collection,
     conversation_sparks,
     list_conversations,
@@ -25,9 +27,12 @@ from app.services.collection_chat_service import (
 from app.services.collection_chat_service import delete_message as delete_chat_message
 from app.services.collection_chat_service import notify_targets as chat_notify_targets
 from app.services.collection_chat_service import post_message as post_chat_message
+from app.services.collection_chat_service import set_reaction as set_chat_reaction
 from app.services.moderation import CRISIS_RESOURCES, VERDICT_CRISIS, submit_report
 from app.services.notification_service import notify
 from app.schemas.profile import (
+    ChatReactionResponse,
+    ChatReactionUpdate,
     CollectionBookAdd,
     CollectionConversation,
     CollectionCreate,
@@ -46,6 +51,7 @@ from app.schemas.profile import (
     CollectionUpdate,
     JoinedCollection,
     ProfileUpdate,
+    ReplyPreview,
 )
 from app.services.collection_service import (
     CollectionError,
@@ -486,6 +492,8 @@ async def get_collection_messages(
         select(Book.id, Book.title).where(Book.id.in_(book_ids))
     )).all()) if book_ids else {}
 
+    counts, mine, previews = await annotate_messages(db, messages, current_user.id)
+
     return CollectionMessageList(
         messages=[
             CollectionMessageResponse(
@@ -496,6 +504,9 @@ async def get_collection_messages(
                 is_mine=m.sender_id == current_user.id,
                 body=m.body,
                 created_at=m.created_at,
+                reply_to=ReplyPreview(**previews[m.id]) if m.id in previews else None,
+                reaction_counts=counts.get(m.id, {}),
+                my_reactions=mine.get(m.id, []),
             )
             for m in messages
         ],
@@ -524,7 +535,7 @@ async def post_collection_message(
 
     try:
         message, verdict = await post_chat_message(
-            db, c, current_user.id, data.body, book_id=data.book_id,
+            db, c, current_user.id, data.body, book_id=data.book_id, reply_to_id=data.reply_to_id,
         )
     except ChatRefused as e:
         # 422, not 400: the request was well-formed, the content is what was
@@ -538,6 +549,16 @@ async def post_collection_message(
         title = (await db.execute(
             select(Book.title).where(Book.id == message.book_id)
         )).scalar_one_or_none()
+
+    reply_to = None
+    if message.reply_to_id:
+        quoted = (await db.execute(
+            select(CollectionMessage.body, User.handle)
+            .join(User, User.id == CollectionMessage.sender_id)
+            .where(CollectionMessage.id == message.reply_to_id)
+        )).first()
+        if quoted:
+            reply_to = ReplyPreview(id=message.reply_to_id, handle=quoted.handle, body=quoted.body)
 
     for uid in await chat_notify_targets(db, c.id, current_user.id):
         await notify(
@@ -556,6 +577,7 @@ async def post_collection_message(
         body=message.body,
         created_at=message.created_at,
         crisis=dict(CRISIS_RESOURCES) if verdict == VERDICT_CRISIS else None,
+        reply_to=reply_to,
     )
 
 
@@ -591,6 +613,47 @@ async def delete_collection_message(
         await delete_chat_message(db, c, message_id, current_user.id)
     except PermissionError as e:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e))
+
+
+@router.post(
+    "/collections/{collection_id}/messages/{message_id}/react",
+    response_model=ChatReactionResponse,
+)
+async def react_to_collection_message(
+    collection_id: uuid.UUID,
+    message_id: uuid.UUID,
+    data: ChatReactionUpdate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Set/unset a reaction. Public within the room — any member sees any
+    member's reactions on any message, unlike Echo's author-only tally."""
+    await _visible_or_404(db, collection_id, current_user.id)
+    exists = (await db.execute(
+        select(CollectionMessage.id).where(
+            CollectionMessage.id == message_id, CollectionMessage.collection_id == collection_id,
+        )
+    )).scalar_one_or_none()
+    if exists is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Message not found")
+
+    try:
+        await set_chat_reaction(db, message_id, current_user.id, data.kind, data.on)
+    except ChatError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+    rows = (await db.execute(
+        select(CollectionMessageReaction.kind, CollectionMessageReaction.user_id)
+        .where(CollectionMessageReaction.message_id == message_id)
+    )).all()
+    counts: dict[str, int] = {}
+    my_kinds: list[str] = []
+    for kind, uid in rows:
+        counts[kind] = counts.get(kind, 0) + 1
+        if uid == current_user.id:
+            my_kinds.append(kind)
+
+    return ChatReactionResponse(my_reactions=my_kinds, reaction_counts=counts)
 
 
 @router.post(

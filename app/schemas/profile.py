@@ -105,17 +105,43 @@ class JoinedCollection(BaseModel):
 
 # ── Collection chat (#6) ──
 
+# Same vocabulary as resonance threads (app/schemas/resonance.py) — one shared
+# set of non-emoji reaction marks across both chat surfaces, not one per room.
+ChatReactionKind = Literal["resonated", "noted", "reconsidered", "warm"]
+
+
 class CollectionMessageCreate(BaseModel):
     body: str = Field(min_length=1, max_length=2000)
     # Optional: a message may point at one of the collection's books. A label on
     # a message in the one room — never a separate room.
     book_id: uuid.UUID | None = None
+    # Optional: quoting an earlier message in this same room.
+    reply_to_id: uuid.UUID | None = None
 
 
 class CollectionReportRequest(BaseModel):
     # Same categories as a thread report — a moderator triaging the queue
     # shouldn't have to learn a second vocabulary for the same judgment call.
     category: Literal["harassment", "hate", "csam", "spam", "self_harm", "pii", "other"] = "other"
+
+
+class ChatReactionUpdate(BaseModel):
+    kind: ChatReactionKind
+    on: bool = True
+
+
+class ChatReactionResponse(BaseModel):
+    """State echoed back after /react so the UI never has to guess. Unlike
+    Echo's author-only private tally, this is the room's real public count —
+    every participant gets the same `reaction_counts`."""
+    my_reactions: list[str]
+    reaction_counts: dict[str, int]
+
+
+class ReplyPreview(BaseModel):
+    id: uuid.UUID
+    handle: str | None
+    body: str
 
 
 class CollectionMessageResponse(BaseModel):
@@ -131,6 +157,11 @@ class CollectionMessageResponse(BaseModel):
     # Present only when the sender's own words tripped the self-harm classifier.
     # Returned TO THE SENDER with the message, never to the room.
     crisis: dict | None = None
+    # None when this isn't a reply, or when it was but the quoted message has
+    # since been deleted (reply_to_id goes NULL — see the migration docstring).
+    reply_to: ReplyPreview | None = None
+    reaction_counts: dict[str, int] = Field(default_factory=dict)
+    my_reactions: list[str] = Field(default_factory=list)
 
 
 class CollectionMessageList(BaseModel):

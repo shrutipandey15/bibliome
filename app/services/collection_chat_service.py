@@ -29,10 +29,14 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import Select, and_, func, or_, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.book import Book
-from app.models.collection import Collection, CollectionItem, CollectionMessage, CollectionMember
+from app.models.collection import (
+    Collection, CollectionItem, CollectionMember, CollectionMessage, CollectionMessageReaction,
+)
+from app.models.reaction_kinds import CHAT_REACTION_KINDS
 from app.models.user import User
 from app.services.moderation import VERDICT_CRISIS, VERDICT_HOLD, classify_text
 from app.services.social_service import hidden_author_ids
@@ -154,6 +158,7 @@ async def post_message(
     sender_id: uuid.UUID,
     body: str,
     book_id: uuid.UUID | None = None,
+    reply_to_id: uuid.UUID | None = None,
 ) -> tuple[CollectionMessage, str]:
     """Say something about a book in this collection. Returns (message, verdict).
 
@@ -163,6 +168,8 @@ async def post_message(
     - IF a book is attached, that it is still in the collection — an attachment
       pointing at a book the collection does not hold would render as a label
       nobody else can click;
+    - IF quoting an earlier message, that it belongs to THIS collection — don't
+      let someone quote a message from a room they merely know the id of;
     - moderation, with a group's stance on each verdict:
         * **crisis** — sends, and the sender gets the resources back. Care, not
           punishment; the same stance Echo and resonance take.
@@ -177,6 +184,15 @@ async def post_message(
         raise ChatError(f"Message must be {MAX_MESSAGE_CHARS} characters or fewer")
     if book_id is not None and not await book_is_in_collection(db, collection.id, book_id):
         raise ChatError("That book isn't in this collection")
+    if reply_to_id is not None:
+        quoted = (await db.execute(
+            select(CollectionMessage.id).where(
+                CollectionMessage.id == reply_to_id,
+                CollectionMessage.collection_id == collection.id,
+            )
+        )).scalar_one_or_none()
+        if quoted is None:
+            raise ChatError("That message isn't in this room")
 
     # The VERDICT is not enough to decide here: `classify_text` returns HOLD for
     # BOTH a threat and contact details, and this surface treats those opposite
@@ -193,6 +209,7 @@ async def post_message(
         book_id=book_id,
         sender_id=sender_id,
         body=body,
+        reply_to_id=reply_to_id,
     )
     db.add(message)
     await db.flush()
@@ -224,6 +241,74 @@ async def delete_message(
     await db.delete(message)
     await db.flush()
     return True
+
+
+async def set_reaction(
+    db: AsyncSession, message_id: uuid.UUID, user_id: uuid.UUID, kind: str, on: bool
+) -> None:
+    """Toggle one reaction. Public within the room — see the model docstring on
+    `CollectionMessageReaction` for why this differs from Echo's author-only
+    tally. Same upsert/delete-if-present shape as `echo_service.set_reaction`."""
+    if kind not in CHAT_REACTION_KINDS:
+        raise ChatError(f"Invalid reaction: {kind}")
+    if on:
+        stmt = pg_insert(CollectionMessageReaction).values(
+            message_id=message_id, user_id=user_id, kind=kind,
+        ).on_conflict_do_nothing(constraint="uq_collection_msg_reaction")
+        await db.execute(stmt)
+    else:
+        row = (await db.execute(
+            select(CollectionMessageReaction).where(
+                CollectionMessageReaction.message_id == message_id,
+                CollectionMessageReaction.user_id == user_id,
+                CollectionMessageReaction.kind == kind,
+            )
+        )).scalar_one_or_none()
+        if row:
+            await db.delete(row)
+    await db.flush()
+
+
+async def annotate_messages(
+    db: AsyncSession, messages: list[CollectionMessage], viewer_id: uuid.UUID,
+) -> tuple[dict[uuid.UUID, dict[str, int]], dict[uuid.UUID, list[str]], dict[uuid.UUID, dict]]:
+    """Batch-load reaction counts + the viewer's own reactions + reply-to previews
+    for a page of messages — one query each, regardless of page size (same
+    N+1-avoidance as `echo_service.annotate_feed`). Reactions are public here, so
+    unlike Echo there's no separate author-gated count query.
+
+    Returns (counts_by_message_id, my_kinds_by_message_id, reply_preview_by_message_id).
+    """
+    ids = [m.id for m in messages]
+    if not ids:
+        return {}, {}, {}
+
+    counts: dict[uuid.UUID, dict[str, int]] = {}
+    mine: dict[uuid.UUID, list[str]] = {}
+    rows = (await db.execute(
+        select(CollectionMessageReaction.message_id, CollectionMessageReaction.kind, CollectionMessageReaction.user_id)
+        .where(CollectionMessageReaction.message_id.in_(ids))
+    )).all()
+    for mid, kind, uid in rows:
+        counts.setdefault(mid, {}).setdefault(kind, 0)
+        counts[mid][kind] += 1
+        if uid == viewer_id:
+            mine.setdefault(mid, []).append(kind)
+
+    reply_ids = [m.reply_to_id for m in messages if m.reply_to_id is not None]
+    previews: dict[uuid.UUID, dict] = {}
+    if reply_ids:
+        quoted = (await db.execute(
+            select(CollectionMessage.id, CollectionMessage.body, User.handle)
+            .join(User, User.id == CollectionMessage.sender_id)
+            .where(CollectionMessage.id.in_(reply_ids))
+        )).all()
+        by_id = {qid: {"id": qid, "handle": handle, "body": body} for qid, body, handle in quoted}
+        for m in messages:
+            if m.reply_to_id is not None and m.reply_to_id in by_id:
+                previews[m.id] = by_id[m.reply_to_id]
+
+    return counts, mine, previews
 
 
 async def notify_targets(

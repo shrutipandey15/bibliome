@@ -145,3 +145,30 @@ class ResonanceMessage(Base):
     )
     body: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    # No denormalized snapshot — resolved at read time via a join. Resonance
+    # messages aren't deletable today, so unlike Collection this can't go stale,
+    # but the column is nullable/SET NULL regardless for symmetry if that changes.
+    reply_to_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("resonance_messages.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+
+
+class ResonanceMessageReaction(Base):
+    """Public within the thread — both readers already know who's who once a
+    thread exists (identity is revealed at `connected`), so there's no privacy
+    reason to hide who reacted, unlike Echo's stranger-facing public feed."""
+
+    __tablename__ = "resonance_message_reactions"
+    __table_args__ = (
+        UniqueConstraint("message_id", "user_id", "kind", name="uq_resonance_msg_reaction"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    message_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("resonance_messages.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    kind: Mapped[str] = mapped_column(String(20), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

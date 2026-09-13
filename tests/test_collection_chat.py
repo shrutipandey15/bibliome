@@ -319,6 +319,107 @@ async def test_authors_delete_their_own_and_the_owner_deletes_any(client):
     assert (await _read(client, owner, cid)).json()["messages"] == []
 
 
+# ── Reply + reactions ──
+
+async def test_reacting_is_idempotent_both_ways(client):
+    owner = await _auth(client, "o@example.com", "owner")
+    friend = await _auth(client, "f@example.com", "friend")
+    cid, _book = await _room(client, owner, friend)
+    mid = (await _say(client, owner, cid, "hello")).json()["id"]
+
+    react = lambda h, kind, on: client.post(
+        f"/api/collections/{cid}/messages/{mid}/react", json={"kind": kind, "on": on}, headers=h,
+    )
+
+    r = await react(friend, "resonated", True)
+    assert r.status_code == 200, r.text
+    assert r.json() == {"my_reactions": ["resonated"], "reaction_counts": {"resonated": 1}}
+
+    # Reacting again with the same kind does not double-count.
+    r = await react(friend, "resonated", True)
+    assert r.json()["reaction_counts"] == {"resonated": 1}
+
+    r = await react(friend, "resonated", False)
+    assert r.json() == {"my_reactions": [], "reaction_counts": {}}
+
+    # Unreacting when there's nothing to remove is a no-op, not an error.
+    r = await react(friend, "resonated", False)
+    assert r.status_code == 200
+
+
+async def test_a_reaction_is_visible_to_every_member_not_just_the_reactor(client):
+    # Unlike Echo's author-only tally, chat reactions are public to the room.
+    owner = await _auth(client, "o@example.com", "owner")
+    friend = await _auth(client, "f@example.com", "friend")
+    cid, _book = await _room(client, owner, friend)
+    mid = (await _say(client, owner, cid, "hello")).json()["id"]
+
+    await client.post(
+        f"/api/collections/{cid}/messages/{mid}/react", json={"kind": "noted"}, headers=friend,
+    )
+
+    messages = (await _read(client, owner, cid)).json()["messages"]
+    reacted = next(m for m in messages if m["id"] == mid)
+    assert reacted["reaction_counts"] == {"noted": 1}
+    # The message author didn't react — my_reactions is from THEIR point of view.
+    assert reacted["my_reactions"] == []
+
+
+async def test_an_invalid_reaction_kind_is_refused(client):
+    owner = await _auth(client, "o@example.com", "owner")
+    cid, _book = await _room(client, owner)
+    mid = (await _say(client, owner, cid, "hello")).json()["id"]
+
+    r = await client.post(
+        f"/api/collections/{cid}/messages/{mid}/react", json={"kind": "not_a_real_kind"}, headers=owner,
+    )
+    assert r.status_code == 422  # pydantic Literal rejects it before the service even runs
+
+
+async def test_reply_shows_the_quoted_message_and_survives_its_deletion(client):
+    owner = await _auth(client, "o@example.com", "owner")
+    friend = await _auth(client, "f@example.com", "friend")
+    cid, _book = await _room(client, owner, friend)
+    original = (await _say(client, owner, cid, "the ending wrecked me")).json()
+
+    r = await client.post(
+        f"/api/collections/{cid}/messages",
+        json={"body": "same, honestly", "reply_to_id": original["id"]},
+        headers=friend,
+    )
+    assert r.status_code == 201, r.text
+    reply = r.json()
+    assert reply["reply_to"] == {"id": original["id"], "handle": "owner", "body": "the ending wrecked me"}
+
+    # Fetching the room shows the same quote.
+    messages = (await _read(client, owner, cid)).json()["messages"]
+    fetched = next(m for m in messages if m["id"] == reply["id"])
+    assert fetched["reply_to"]["body"] == "the ending wrecked me"
+
+    # Deleting the quoted message doesn't error the reply out of existence — the
+    # quote just disappears (reply_to_id -> NULL via ON DELETE SET NULL).
+    assert (await client.delete(
+        f"/api/collections/{cid}/messages/{original['id']}", headers=owner,
+    )).status_code == 204
+    messages = (await _read(client, owner, cid)).json()["messages"]
+    fetched = next(m for m in messages if m["id"] == reply["id"])
+    assert fetched["reply_to"] is None
+
+
+async def test_cannot_reply_to_a_message_in_a_different_room(client):
+    owner = await _auth(client, "o@example.com", "owner")
+    cid_a, _ = await _room(client, owner, title="Room A")
+    cid_b, _ = await _room(client, owner, title="Room B")
+    other_room_msg = (await _say(client, owner, cid_b, "not yours to quote")).json()["id"]
+
+    r = await client.post(
+        f"/api/collections/{cid_a}/messages",
+        json={"body": "quoting across rooms", "reply_to_id": other_room_msg},
+        headers=owner,
+    )
+    assert r.status_code == 400
+
+
 # ── Paging ──
 
 async def test_paging_does_not_skip_or_repeat_messages_sharing_a_timestamp(client, db):

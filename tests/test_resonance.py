@@ -377,6 +377,71 @@ async def test_after_poll_sees_new_messages_past_the_first_page(client):
     assert r.json()["next_before"] is None
 
 
+# ── Reply + reactions ──
+
+async def test_reacting_to_a_letter_is_idempotent_and_visible_to_both_readers(client):
+    ha, hb, thread_id = await _connected_thread(client, names=("wren", "otto"))
+    mid = (await client.get(f"/api/threads/{thread_id}/messages", headers=ha)).json()["messages"][0]["id"]
+
+    react = lambda h, kind, on=True: client.post(
+        f"/api/threads/{thread_id}/messages/{mid}/react", json={"kind": kind, "on": on}, headers=h,
+    )
+
+    r = await react(hb, "warm")
+    assert r.status_code == 200, r.text
+    assert r.json() == {"my_reactions": ["warm"], "reaction_counts": {"warm": 1}}
+
+    # Reacting again doesn't double-count; unlike Echo this isn't author-only —
+    # the sender (ha) sees it too.
+    await react(hb, "warm")
+    messages = (await client.get(f"/api/threads/{thread_id}/messages", headers=ha)).json()["messages"]
+    reacted = next(m for m in messages if m["id"] == mid)
+    assert reacted["reaction_counts"] == {"warm": 1}
+    assert reacted["my_reactions"] == []  # ha didn't react; this is ha's own state
+
+    r = await react(hb, "warm", on=False)
+    assert r.json() == {"my_reactions": [], "reaction_counts": {}}
+
+
+async def test_reply_quotes_the_earlier_letter(client):
+    ha, hb, thread_id = await _connected_thread(client, names=("wren", "otto"))
+    original = (await client.get(f"/api/threads/{thread_id}/messages", headers=ha)).json()["messages"][0]
+
+    r = await client.post(
+        f"/api/threads/{thread_id}/messages",
+        json={"body": "yes, exactly that", "reply_to_id": original["id"]},
+        headers=hb,
+    )
+    assert r.status_code == 201, r.text
+    assert r.json()["reply_to"] == {"id": original["id"], "handle": "wren", "body": "opening note"}
+
+
+async def _connected_thread_on(client, names, title):
+    """Like `_connected_thread`, but on a book of its own — needed whenever a
+    test opens two threads at once, so the second pair's match isn't found
+    against the first pair's book (`_connected_thread`'s default "Piranesi")."""
+    ha, hb = await _pair(client, names=names, title=title)
+    match_id = (await client.get("/api/resonance/matches", headers=ha)).json()["matches"][0]["match_id"]
+    await client.post(f"/api/resonance/{match_id}/reach", json={"note": "opening note"}, headers=ha)
+    r = await client.post(f"/api/resonance/{match_id}/respond", json={"accept": True}, headers=hb)
+    return ha, hb, r.json()["thread_id"]
+
+
+async def test_cannot_reply_to_a_letter_in_someone_elses_thread(client):
+    ha, hb, thread_id_1 = await _connected_thread(client, names=("wren", "otto"))
+    _hc, _hd, thread_id_2 = await _connected_thread_on(client, ("iris", "jace"), "The Employees")
+    other_thread_msg = (await client.get(
+        f"/api/threads/{thread_id_2}/messages", headers=_hc,
+    )).json()["messages"][0]["id"]
+
+    r = await client.post(
+        f"/api/threads/{thread_id_1}/messages",
+        json={"body": "quoting the wrong thread", "reply_to_id": other_thread_msg},
+        headers=ha,
+    )
+    assert r.status_code == 400
+
+
 async def test_outsiders_cannot_read_or_write_a_thread(client):
     _, _, thread_id = await _connected_thread(client, names=("jem", "kit"))
     outsider = await _user(client, "lurker")
