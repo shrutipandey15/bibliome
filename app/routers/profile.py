@@ -35,6 +35,7 @@ from app.services.collection_chat_service import set_reaction as set_chat_reacti
 from app.utils.attachments import save_chat_image
 from app.services.moderation import CRISIS_RESOURCES, VERDICT_CRISIS, submit_report
 from app.services.notification_service import notify
+from app.services.realtime_service import publish_scope
 from app.schemas.profile import (
     ChatReactionResponse,
     ChatReactionUpdate,
@@ -197,7 +198,17 @@ async def delete_collection_endpoint(
     current_user: User = Depends(get_current_user),
 ):
     c = await _owned_or_404(db, collection_id, current_user.id)
+    # Read who's in it BEFORE deleting — the membership rows cascade away with
+    # the collection, and every other member is about to lose this room and
+    # its whole history with no warning otherwise.
+    other_members = [m.user_id for m in await list_members(db, c.id) if m.user_id != current_user.id]
+    title = c.title
     await delete_collection(db, c)
+    for uid in other_members:
+        await notify(
+            db, uid, TIER_DIRECT, "collection_deleted",
+            {"title": title}, actor_id=current_user.id,
+        )
 
 
 @router.post("/collections/{collection_id}/items", status_code=status.HTTP_204_NO_CONTENT)
@@ -350,6 +361,23 @@ async def join_collection(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="This invite has expired or been revoked",
         )
+
+    if joined:
+        # Only a genuine new join — clicking an already-redeemed link again
+        # must stay silent, or reopening the invite link would re-notify the
+        # whole room every time. `chat_notify_targets` already computes
+        # "current members minus the actor minus anyone blocked", the same
+        # fan-out a new message uses, and the join has already been
+        # committed by `redeem_invite` so the new member is correctly
+        # excluded rather than notifying themselves.
+        for uid in await chat_notify_targets(db, c.id, current_user.id):
+            await notify(
+                db, uid, TIER_DIRECT, "collection_joined",
+                {"collection_id": str(c.id), "actors": [current_user.handle], "count": 1},
+                batch_key=f"collection_joined:{c.id}:{uid}",
+                actor_id=current_user.id,
+            )
+
     return CollectionJoinResponse(collection_id=c.id, title=c.title, joined=joined)
 
 
@@ -757,6 +785,19 @@ async def put_collection_pinned(
     except ChatError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     pinned = await get_pinned_message(db, c)
+    # A live nudge, not a notification — pinning is a quiet utility with no
+    # business ringing anyone's bell, so this rides the same scope channel as
+    # presence/typing (publish_scope) rather than notify(), which always
+    # persists a Notification row. Without this, another open tab only picks
+    # up a pin change on its next poll (~20s) or a reload.
+    #
+    # The "scope" field is load-bearing, not decoration: app/routers/realtime.py
+    # only forwards a pattern-subscribed rt:scope:* message to sockets that have
+    # actually entered that scope IF the event carries one — an event with no
+    # "scope" key skips that check entirely and reaches every connected socket.
+    # presence/typing already set it for the same reason; this must too.
+    scope = f"collection:{collection_id}"
+    await publish_scope(scope, {"type": "notify", "kind": "collection_pinned", "scope": scope})
     return PinnedMessageResponse(pinned=ReplyPreview(**pinned) if pinned else None)
 
 

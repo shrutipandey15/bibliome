@@ -527,6 +527,47 @@ async def test_pinning_and_clearing_a_message(client):
     assert r.json() == {"pinned": None}
 
 
+async def test_pinning_publishes_a_scoped_realtime_nudge_not_a_notification(client, monkeypatch):
+    """Pinning is a quiet utility — it must reach an open tab live (so another
+    member doesn't wait ~20s for the poll or need to reload) WITHOUT ever
+    writing a Notification row. And the published event must carry a "scope"
+    field: app/routers/realtime.py only forwards a pattern-subscribed
+    rt:scope:* message to sockets that entered that exact scope IF the event
+    carries one — omitting it (an easy mistake, since publish_scope's own
+    signature doesn't require it) would broadcast to every connected socket
+    instead of just this room's members."""
+    from sqlalchemy import select
+    from app.models.notification import Notification
+    from app.database import async_session
+    from app.routers import profile as profile_router
+
+    calls = []
+
+    async def _capture(scope, event):
+        calls.append((scope, event))
+
+    monkeypatch.setattr(profile_router, "publish_scope", _capture)
+
+    owner = await _auth(client, "o@example.com", "owner")
+    cid, _book = await _room(client, owner)
+    mid = (await _say(client, owner, cid, "the schedule")).json()["id"]
+
+    r = await client.put(f"/api/collections/{cid}/pinned", json={"message_id": mid}, headers=owner)
+    assert r.status_code == 200, r.text
+
+    assert len(calls) == 1
+    scope, event = calls[0]
+    assert scope == f"collection:{cid}"
+    assert event["scope"] == scope
+    assert event["kind"] == "collection_pinned"
+
+    async with async_session() as s:
+        n = (await s.execute(
+            select(Notification).where(Notification.kind == "collection_pinned")
+        )).scalars().first()
+    assert n is None
+
+
 async def test_cannot_pin_a_message_from_a_different_room(client):
     owner = await _auth(client, "o@example.com", "owner")
     cid_a, _ = await _room(client, owner, title="Room A")

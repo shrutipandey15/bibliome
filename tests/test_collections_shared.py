@@ -69,6 +69,38 @@ async def test_join_by_link_makes_a_member(client):
     assert {m["role"] for m in members} == {"owner", "member"}
 
 
+async def test_joining_notifies_the_existing_members_but_not_a_re_click(client):
+    from sqlalchemy import select
+    from app.models.notification import Notification
+    from app.database import async_session
+
+    owner = await _auth(client, "o@example.com", "owner")
+    friend = await _auth(client, "f@example.com", "friend")
+    cid = await _collection(client, owner)
+    token = await _invite(client, owner, cid)
+    owner_id = (await client.get("/api/auth/me", headers=owner)).json()["id"]
+    friend_handle = (await client.get("/api/me/profile", headers=friend)).json().get("handle")
+
+    await client.post(f"/api/collections/invites/{token}/join", headers=friend)
+
+    async with async_session() as s:
+        n = (await s.execute(
+            select(Notification).where(Notification.kind == "collection_joined")
+        )).scalars().first()
+    assert n is not None
+    assert str(n.user_id) == owner_id
+    assert n.payload["collection_id"] == cid
+    assert n.payload["actors"] == [friend_handle]
+
+    # Re-clicking the same link is not a second join — no second notification.
+    await client.post(f"/api/collections/invites/{token}/join", headers=friend)
+    async with async_session() as s:
+        count = len((await s.execute(
+            select(Notification).where(Notification.kind == "collection_joined")
+        )).scalars().all())
+    assert count == 1
+
+
 async def test_clicking_the_link_twice_is_not_an_error(client):
     """People re-click links. The second one must not error, duplicate the
     membership, or burn a use."""
@@ -331,3 +363,36 @@ async def test_the_owner_cannot_leave_their_own_collection(client):
 
     r = await client.delete(f"/api/collections/{cid}/members/{owner_uid}", headers=owner)
     assert r.status_code == 403
+
+
+# ── Deleting a shared collection ──
+
+async def test_deleting_a_shared_collection_notifies_the_other_members(client):
+    from sqlalchemy import select
+    from app.models.notification import Notification
+    from app.database import async_session
+
+    owner = await _auth(client, "o@example.com", "owner")
+    friend = await _auth(client, "f@example.com", "friend")
+    cid = await _collection(client, owner, title="Doomed Room")
+    token = await _invite(client, owner, cid)
+    await client.post(f"/api/collections/invites/{token}/join", headers=friend)
+    friend_id = (await client.get("/api/auth/me", headers=friend)).json()["id"]
+
+    r = await client.delete(f"/api/collections/{cid}", headers=owner)
+    assert r.status_code == 204
+
+    async with async_session() as s:
+        n = (await s.execute(
+            select(Notification).where(Notification.kind == "collection_deleted")
+        )).scalars().first()
+    assert n is not None
+    assert str(n.user_id) == friend_id
+    assert n.payload["title"] == "Doomed Room"
+
+    # The owner isn't their own notification target.
+    async with async_session() as s:
+        count = len((await s.execute(
+            select(Notification).where(Notification.kind == "collection_deleted")
+        )).scalars().all())
+    assert count == 1
