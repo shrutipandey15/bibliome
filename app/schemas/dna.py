@@ -172,6 +172,17 @@ class DNAProfileReady(BaseModel):
     enough: Literal[True]
     book_count: int
     tagged_count: int
+    # Books per register, from the same opened-only tally `book_count`/`basis`
+    # read — so the shareable card's fingerprint can't disagree with the rest of
+    # this same payload the way sourcing it from the separately-cached
+    # `/dna/stats` endpoint could.
+    #
+    # REQUIRED, deliberately. This field was declared here with a `= {}` default
+    # while `build_dna` never actually returned it, so every response validated
+    # cleanly and shipped an empty tally — the card fell back to a share vector
+    # and printed it as a book count. A default turns "the engine forgot" into
+    # "the reader has no feelings"; no default turns it into a 500 in CI.
+    emotion_counts: dict[str, int]
     insights: list[dict[str, Any]]
     locked: list[dict[str, Any]]
     earned: list[dict[str, Any]]

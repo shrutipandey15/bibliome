@@ -226,16 +226,55 @@ async def test_margins_never_reach_another_reader(client):
     assert "something I only wrote for me" not in str(them)
 
 
-async def test_emotion_counts_are_this_readers_own_tally(client):
+async def test_card_fingerprint_is_the_same_tally_the_dna_tab_counts(client):
+    """One number, counted once. The profile card and the DNA tab draw the same
+    fingerprint from the same payload — the profile endpoint used to ship a
+    SECOND tally of its own, which the card then rendered over the top of its own
+    basis line.
+    """
     h = await _user(client, "fingerprint")
-    await _log(client, h, "One", emotion="grief")
-    await _log(client, h, "Two", emotion="grief")
-    await _log(client, h, "Three", emotion="awe")
+    for i in range(5):
+        await _log(client, h, f"Grief {i}", emotion="grief")
+    await _log(client, h, "Awe One", emotion="awe")
 
-    counts = (await client.get("/api/me/profile", headers=h)).json()["emotion_counts"]
-    assert counts["grief"] == 2 and counts["awe"] == 1
+    profile = (await client.get("/api/me/profile", headers=h)).json()
+    # The tally rides the card, not the profile root.
+    assert "emotion_counts" not in profile
+    counts = profile["signature"]["emotion_counts"]
+    assert counts["grief"] == 5 and counts["awe"] == 1
     # Registers never reached are simply absent — the client draws them as blanks.
     assert "rage" not in counts
+
+    dna = (await client.get("/api/dna/profile", headers=h)).json()
+    assert dna["emotion_counts"] == counts
+    # And the card's own basis line counts from that same tally.
+    for row in (profile["signature"]["basis"] or {}).get("counts", []):
+        assert row["books"] == counts[row["emotion"]]
+
+
+async def test_card_fingerprint_survives_a_cache_from_before_the_field_existed(client, db):
+    """A shape-stale cache must be recomputed for the owner, not served bare.
+
+    `dna_dirty` cannot see this: nothing changed about the reader, only about what
+    we serve. Without the `is_fresh` gate the DNA tab recomputed and the profile
+    card served the old shape — the same reader, two different cards.
+    """
+    h = await _user(client, "stalecache")
+    for i in range(6):
+        await _log(client, h, f"B{i}", emotion="grief")
+    await client.get("/api/me/profile", headers=h)  # warm the cache
+
+    from sqlalchemy import select
+    from app.models.user import User
+    u = (await db.execute(select(User).where(User.username == "stalecache"))).scalar_one()
+    cache = dict(u.cached_dna_v2)
+    cache.pop("emotion_counts")          # a payload written before the fix
+    u.cached_dna_v2 = cache
+    u.dna_dirty = False                  # and nothing about the reader changed
+    await db.commit()
+
+    counts = (await client.get("/api/me/profile", headers=h)).json()["signature"]["emotion_counts"]
+    assert counts["grief"] == 6
 
 
 async def test_archetype_share_is_withheld_until_it_would_mean_something(client):

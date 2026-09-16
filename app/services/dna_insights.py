@@ -666,12 +666,26 @@ def build_dna(
         sum(1 for v in prev_enduring.values() if v > 0) if prev_enduring else None
     )
 
+    # Books per register, counted once per book — the shareable card's fingerprint.
+    # Built from the same opened-only `sigs` everything else in this function reads,
+    # so it can't drift from `book_count`/`basis` the way a second, separately
+    # cached endpoint (`/dna/stats`) could: that one is Redis-cached and only
+    # invalidated on the write paths that go through the entries API, so any other
+    # way a shelf changes (an import, a fixture, a direct write) can leave it stale
+    # for up to its TTL while this payload — recomputed by the same call that
+    # builds the rest of the card — never can.
+    emotion_counts: dict[str, int] = {}
+    for s in sigs:
+        for slug in s.emotions:
+            emotion_counts[slug] = emotion_counts.get(slug, 0) + 1
+
     ctx = {
         # Both, and they mean different things. `tagged_count` is what every gate
         # and every "based on N books" reads; `book_count` is only for copy that is
         # genuinely about the size of the shelf.
         "book_count": book_count,
         "tagged_count": len(tagged),
+        "emotion_counts": emotion_counts,
         # arc reads the Finish-Flow columns, not emotions, so it carries its own
         # denominator (see GATE_POPULATION). Books tagged with a feeling and books
         # logged with an arc are different populations that happen to overlap.
@@ -705,6 +719,11 @@ def build_dna(
         "enough": True,
         "book_count": book_count,
         "tagged_count": len(tagged),
+        # Books per register. Computed for `ctx` above and returned here too:
+        # leaving it out of the payload was silently costing every card its
+        # fingerprint — the client fell back to `profiles.current` and drew a
+        # recency-weighted SHARE under a "books per register" label.
+        "emotion_counts": emotion_counts,
         "insights": unlocked,
         "locked": locked,
         # The gates the reader has passed — the Register's positive column. See

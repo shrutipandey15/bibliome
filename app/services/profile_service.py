@@ -16,7 +16,7 @@ from app.models.book import Book
 from app.models.book_entry import BookEntry
 from app.models.collection import Collection
 from app.models.user import User
-from app.services.dna_service import card_payload
+from app.services.dna_service import card_payload, compute_and_cache, is_fresh
 from app.services.social_service import hidden_author_ids, is_blocked_between
 from app.services.visibility import VIEWER_ANON, VIEWER_MEMBER, VIEWER_OWNER, can_view_profile
 from app.utils.emotions import VALID_SLUGS, canonicalize
@@ -275,22 +275,6 @@ def _figures(entries: list[BookEntry]) -> dict:
     }
 
 
-def _emotion_counts(entries: list[BookEntry]) -> dict[str, int]:
-    """Books per emotional register, counted once per book.
-
-    This is the fingerprint the signature card draws. It is a real tally over the
-    reader's own shelf — every register in the vocabulary is answerable from it,
-    including the ones that come back zero, which is the half of the picture that
-    actually says something.
-    """
-    counts: dict[str, int] = {}
-    for e in entries:
-        for slug in {canonicalize(em.emotion_id) for em in e.emotions}:
-            if slug:
-                counts[slug] = counts.get(slug, 0) + 1
-    return counts
-
-
 # Below this many readers with a settled archetype, a share is noise dressed as a
 # statistic — "one of eight" out of nine readers means nothing. The card omits the
 # line entirely rather than printing a number that will swing wildly next week.
@@ -373,6 +357,22 @@ async def compose_profile(db: AsyncSession, viewer_id: uuid.UUID | None, owner: 
     # now-reading rail carries it.
     now_reading = [_entry_card(e, with_checkin=is_self) for e in entries if e.status == "reading"]
 
+    # `card_payload` below is a cache read, never a recompute — a STRANGER's
+    # request must never trigger someone else's DNA math (P2-3, and the cost of
+    # it). But that only keeps this card equal to the DNA tab's when the cache is
+    # actually current, and `dna_dirty` is otherwise consulted nowhere but the
+    # DNA tab's own endpoint — so a reader who logs a book and comes straight to
+    # their profile, without ever opening the DNA tab, was shown last time's
+    # book_count/archetype/basis while the tab itself would have recomputed and
+    # shown this time's. Only the OWNER's own view is allowed to pay for the
+    # recompute; a stranger or member viewer still reads whatever is cached.
+    # `is_fresh` is the DNA tab's own staleness rule. Without it the tab would
+    # recompute a cache written before a field existed while this card served the
+    # old shape — same reader, two cards, which is the bug this whole path exists
+    # to prevent.
+    if is_self and (owner.dna_dirty or not is_fresh(owner.cached_dna_v2)):
+        await compute_and_cache(db, owner)
+
     profile = {
         "restricted": False,
         **_identity_strip(owner),
@@ -387,8 +387,12 @@ async def compose_profile(db: AsyncSession, viewer_id: uuid.UUID | None, owner: 
         "milestones": compute_milestones(entries),
         "book_count": len(entries),
         **_figures(entries),
-        # The signature card's fingerprint, drawn from this reader's own shelf.
-        "emotion_counts": _emotion_counts(entries),
+        # NO `emotion_counts` here. The card's fingerprint rides `signature`,
+        # counted once by the DNA engine — this used to be a SECOND tally over the
+        # same shelf, filtered by a deny-list (`!= want_to_read`) where the engine
+        # uses an allow-list of opened statuses. They agree today only because a
+        # DB check constraint pins the status vocabulary to exactly six values;
+        # the seventh status anyone adds would have split them silently.
         "archetype_share": await archetype_share(db, owner.personality_type),
         "recent": [_entry_card(e) for e in entries[:12]],
         # Kept lines are written alongside the private notes — owner only. [F2.8]

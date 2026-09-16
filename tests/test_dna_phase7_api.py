@@ -192,3 +192,23 @@ async def test_a_cached_profile_predating_snapshot_count_is_recomputed(client, d
 
     body = (await client.get("/api/dna/profile", headers=h)).json()
     assert "snapshot_count" in body
+
+
+async def test_profile_returns_emotion_counts_agreeing_with_basis(client):
+    """The card's fingerprint travels on the same payload as its basis line.
+
+    It once didn't: `emotion_counts` was computed for the insight context and
+    dropped from the return, so every card fell back to the recency-weighted
+    share vector and printed it under "books per register".
+    """
+    h = await _user(client, "dnafinger")
+    for i in range(6):
+        await _add_book(client, h, f"D{i}", ["dread"])
+    for i in range(4):
+        await _add_book(client, h, f"L{i}", ["longing"])
+    body = (await client.get("/api/dna/profile", headers=h)).json()
+    assert body["emotion_counts"]["dread"] == 6
+    assert body["emotion_counts"]["longing"] == 4
+    # Same tally the basis line counts from — one shelf, one number.
+    for row in body["basis"]["counts"]:
+        assert row["books"] == body["emotion_counts"][row["emotion"]]

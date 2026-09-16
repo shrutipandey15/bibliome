@@ -28,7 +28,7 @@ from app.schemas.dna import (
     StatsResponse,
 )
 from app.services.blind_spots_service import get_blind_spots
-from app.services.dna_service import compute_and_cache, manual_snapshot
+from app.services.dna_service import compute_and_cache, is_fresh, manual_snapshot
 from app.services.profile_service import archetype_share
 from app.services.calendar_service import get_emotional_calendar
 from app.services.dna_engine import (
@@ -89,23 +89,12 @@ async def get_dna_profile(
     Below 5 books it returns an honest "not enough yet". Served from cache while
     `dna_dirty` is false; recomputed once per change, not per request (Part 4).
     """
+    # Shape-staleness (a cache from before a field existed) is decided by
+    # `dna_service.is_fresh`, which the profile card's own cache read consults
+    # too — one predicate, so the two surfaces can't recompute on different days.
     cached = current_user.cached_dna_v2
-    # A payload cached before a shape change is stale in a way `dna_dirty` can't
-    # know about: nothing changed about the reader, only about what we serve.
-    # Recompute once rather than serve a response the client can't render right.
-    #   - `snapshot_count`: added as a top-level field the client depends on.
-    #   - locked rows without `need`: cached before the "Not yet" copy started
-    #     naming each gate's real population and the reader's count against it, so
-    #     an old cache still says a bare "waits on 5 books".
-    #   - no `earned` key: cached before the Register's positive column existed.
-    def _fresh(c: dict) -> bool:
-        if "snapshot_count" not in c:
-            return False
-        if c.get("enough") and "earned" not in c:
-            return False
-        return all("need" in row for row in (c.get("locked") or []))
 
-    if not current_user.dna_dirty and cached and _fresh(cached):
+    if not current_user.dna_dirty and is_fresh(cached):
         payload = cached
     else:
         payload = await compute_and_cache(db, current_user)

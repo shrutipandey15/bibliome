@@ -86,6 +86,33 @@ async def _snapshot_context(db: AsyncSession, user_id: uuid.UUID) -> _SnapContex
     return _SnapContext(latest.emotion_data, count, latest.generated_at, latest.personality_type)
 
 
+def is_fresh(cache: dict | None) -> bool:
+    """Whether a `cached_dna_v2` payload is the SHAPE we serve today.
+
+    A payload cached before a shape change is stale in a way `dna_dirty` can't
+    know about: nothing changed about the reader, only about what we serve. Lives
+    here rather than in the DNA router because the profile card reads the same
+    cache and has to make the same call — when they disagreed, the DNA tab
+    recomputed and the profile served last month's shape, which is precisely how
+    the same reader ends up looking at two different cards.
+
+      - `snapshot_count`: added as a top-level field the client depends on.
+      - locked rows without `need`: cached before the "Not yet" copy started
+        naming each gate's real population and the reader's count against it.
+      - no `earned` key: cached before the Register's positive column existed.
+      - no `emotion_counts`: cached before the tally the card's fingerprint is
+        drawn from was returned at all, so the card falls back to a share vector
+        and mislabels it as a book count.
+    """
+    if not cache:
+        return False
+    if "snapshot_count" not in cache:
+        return False
+    if cache.get("enough") and ("earned" not in cache or "emotion_counts" not in cache):
+        return False
+    return all("need" in row for row in (cache.get("locked") or []))
+
+
 def card_payload(user: User) -> dict | None:
     """The one shape every public surface renders.
 
@@ -110,6 +137,11 @@ def card_payload(user: User) -> dict | None:
         "runner_up": v2.get("runner_up"),
         "basis": v2.get("basis"),
         "book_count": v2["book_count"],
+        # Books per register, from the same opened-only tally `book_count` and
+        # `basis` are drawn from — so this card's fingerprint can never disagree
+        # with its own basis line, or with the DNA tab's, the way reading it off
+        # the separately-cached `/dna/stats` endpoint could.
+        "emotion_counts": v2.get("emotion_counts") or None,
         # Books only, deliberately: `profiles.current` spans the journal, and a
         # stranger must not be able to read emotion frequencies out of someone's
         # private life even in aggregate. A cache written before `current_books`
