@@ -28,6 +28,44 @@ from app.services.social_service import is_blocked_between
 
 logger = logging.getLogger("bibliome.notifications")
 
+# How long a thread stays quiet after one knock. A burst of messages is one
+# buzz; a conversation still going twenty minutes later earns another, because
+# the alternative — what this used to do — was silence until the reader next
+# opened the app, however long that took.
+REPUSH_AFTER = timedelta(minutes=15)
+
+# How far back the deferred sweep looks. Bounded so a first run, or a restart
+# after downtime, cannot re-ring a backlog of old quiet-hours deferrals.
+SWEEP_WINDOW = timedelta(hours=1)
+
+
+def _pushed_recently(payload: dict, now: datetime) -> bool:
+    stamp = payload.get("_pushed_at")
+    if not stamp:
+        return False
+    try:
+        return now - datetime.fromisoformat(stamp) < REPUSH_AFTER
+    except (TypeError, ValueError):
+        return False
+
+
+async def _push(db: AsyncSession, n: Notification, now: datetime) -> None:
+    """Knock, and record when — so the next batched event onto the same
+    notification can tell a fresh knock from a repeat.
+
+    The stamp lives in the payload rather than a column: no migration, and it
+    travels with the row the batching already rewrites. Best effort throughout —
+    a failed push must never fail the write that caused it.
+    """
+    try:
+        await push_to_user(db, n.user_id, n.kind, n.payload)
+    except Exception:  # noqa: BLE001 - a courtesy layer cannot break the caller
+        logger.exception("push failed for notification %s", n.id)
+        return
+    # Reassigned, not mutated: JSONB changes in place are invisible to SQLAlchemy.
+    n.payload = {**n.payload, "_pushed_at": now.isoformat()}
+    await db.flush()
+
 
 async def get_or_create_prefs(db: AsyncSession, user_id: uuid.UUID) -> NotificationPrefs:
     prefs = (await db.execute(
@@ -140,13 +178,16 @@ async def notify(
             if deliver_after < existing.deliver_after.replace(tzinfo=timezone.utc):
                 existing.deliver_after = deliver_after
             await db.flush()
-            # No push: this event coalesced into a notification the reader has
-            # not read yet, so they have already been knocked on for it. Pushing
-            # again is how a five-message burst becomes five buzzes.
-            #
-            # Realtime IS still sent: it is a data-sync nudge, not a buzz — an
-            # open thread should refresh on message #2, not just message #1.
             if deliver_after <= now:
+                # One knock per REPUSH_AFTER rather than one per event: a burst
+                # still collapses into a single buzz, but a conversation that is
+                # still going later gets knocked on again. Suppressing every
+                # repeat for as long as the notification stays unread is how a
+                # closed app goes permanently silent on an active thread.
+                if not _pushed_recently(existing.payload, now):
+                    await _push(db, existing, now)
+                # Realtime is a data-sync nudge, not a buzz — an open thread
+                # should refresh on message #2 regardless of the push cooldown.
                 await realtime_publish(user_id, {"type": "notify", "kind": kind})
             return existing
 
@@ -164,15 +205,46 @@ async def notify(
     # staying silent. Best effort: a failed push must never fail the write that
     # caused it.
     if deliver_after <= now:
-        try:
-            await push_to_user(db, user_id, kind, payload)
-        except Exception:  # noqa: BLE001 — a courtesy layer cannot break the caller
-            logger.exception("push failed for notification %s", n.id)
+        await _push(db, n, now)
         # Instant in-app delivery for any tab this user has open. Best-effort and
         # already swallows its own errors.
         await realtime_publish(user_id, {"type": "notify", "kind": kind})
 
     return n
+
+
+async def sweep_deferred_pushes(db: AsyncSession) -> int:
+    """Knock for notifications whose quiet-hours deferral has just elapsed.
+
+    ``notify()`` cannot push these: when they were written the phone was meant
+    to stay silent. Nothing revisited them afterwards, so the deferral was not
+    "quiet until 7am" but "silent forever" — the reader found out by opening the
+    app. This is the other half of quiet hours.
+
+    Only genuine deferrals (``deliver_after > created_at``) that matured inside
+    SWEEP_WINDOW and were never pushed are eligible, so a restart re-rings
+    nothing.
+    """
+    now = datetime.now(timezone.utc)
+    rows = (await db.execute(
+        select(Notification)
+        .where(
+            Notification.read_at.is_(None),
+            Notification.deliver_after <= now,
+            Notification.deliver_after > now - SWEEP_WINDOW,
+            Notification.deliver_after > Notification.created_at,
+            Notification.payload["_pushed_at"].astext.is_(None),
+        )
+        .order_by(Notification.deliver_after)
+        # ponytail: unindexed scan capped at 500 a sweep. Add a partial index on
+        # (deliver_after) where read_at is null if the table ever gets big.
+        .limit(500)
+    )).scalars().all()
+
+    for n in rows:
+        await _push(db, n, now)
+        await realtime_publish(n.user_id, {"type": "notify", "kind": n.kind})
+    return len(rows)
 
 
 async def list_notifications(db: AsyncSession, user_id: uuid.UUID, limit: int = 30) -> list[Notification]:

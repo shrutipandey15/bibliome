@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 
@@ -24,7 +25,14 @@ async def lifespan(app: FastAPI):
         await conn.execute(text("SELECT 1"))
     logger.info("Starting %s API (%s) — DB connection verified", settings.APP_NAME, settings.ENVIRONMENT)
 
+    # Quiet hours end while the app is closed and nothing else re-checks them,
+    # so a deferred notification would never reach the phone at all.
+    from app.services.background import sweep_deferred_pushes_forever
+    sweeper = asyncio.create_task(sweep_deferred_pushes_forever())
+
     yield
+
+    sweeper.cancel()
 
     # Release DB pool cleanly on shutdown
     await engine.dispose()

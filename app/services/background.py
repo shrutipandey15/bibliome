@@ -8,6 +8,7 @@ state — it can no longer cache a profile that excludes the entry that triggere
 it. Cache invalidation goes through the single ``invalidate_dna`` helper (B1.3).
 """
 
+import asyncio
 import logging
 import uuid
 
@@ -88,3 +89,26 @@ async def recompute_resonance(user_id: uuid.UUID) -> None:
         logger.error("Resonance refresh failed for user %s: %s", user_id, e)
     finally:
         _resonance_running.discard(user_id)
+
+async def sweep_deferred_pushes_forever(interval: int = 300) -> None:
+    """Re-check quiet-hours deferrals forever, so they ring when they mature.
+
+    ponytail: a plain in-process loop, so every uvicorn worker runs one (the
+    unit file starts 2). Harmless — the rows are stamped as pushed, so the
+    second worker finds nothing — but move it to the cron/admin-job pattern
+    the weekly digest uses if the API is ever scaled past one box.
+    """
+    from app.services.notification_service import sweep_deferred_pushes
+
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            async with async_session() as db:
+                async with db.begin():
+                    sent = await sweep_deferred_pushes(db)
+            if sent:
+                logger.info("Pushed %d notification(s) held by quiet hours", sent)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.error("Deferred push sweep failed: %s", e)

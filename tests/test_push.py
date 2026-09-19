@@ -226,3 +226,119 @@ async def test_a_batched_message_does_not_push_again(client, monkeypatch):
                           json={"body": f"message {i}"}, headers=owner)
 
     assert calls.count("collection_message") == 1
+
+
+async def test_a_still_live_conversation_knocks_again_after_the_cooldown(client, monkeypatch):
+    """The other half of batching. Collapsing a burst is right; collapsing
+    forever is how a closed app goes silent on a thread that is still going —
+    every later message folded into one unread notification and pushed nothing.
+    Once the cooldown has passed, the next message knocks again."""
+    import app.services.notification_service as ns
+    from datetime import datetime, timedelta, timezone
+    from sqlalchemy import select
+    from app.database import async_session
+    from app.models.notification import Notification
+
+    _enable(monkeypatch)
+    calls = []
+
+    async def _count(db, user_id, kind, payload):
+        calls.append(kind)
+        return 1
+    monkeypatch.setattr(ns, "push_to_user", _count)
+
+    owner = await _auth(client, "o@example.com", "owner")
+    friend = await _auth(client, "f@example.com", "friend")
+    cid = (await client.post("/api/collections", json={"title": "Group"},
+                             headers=owner)).json()["id"]
+    book = (await client.post("/api/entries", json={"title": "Piranesi", "intensity": 7,
+                                                    "emotions": []},
+                              headers=owner)).json()["book_id"]
+    await client.post(f"/api/collections/{cid}/books", json={"book_id": book}, headers=owner)
+    token = (await client.post(f"/api/collections/{cid}/invites", json={},
+                               headers=owner)).json()["token"]
+    await client.post(f"/api/collections/invites/{token}/join", headers=friend)
+
+    await client.post(f"/api/collections/{cid}/messages",
+                      json={"body": "first"}, headers=owner)
+    assert calls.count("collection_message") == 1
+
+    # Rewind the knock past the cooldown — the thread has been quiet a while and
+    # the reader still has not opened it.
+    stale = (datetime.now(timezone.utc) - ns.REPUSH_AFTER - timedelta(minutes=1)).isoformat()
+    async with async_session() as s:
+        async with s.begin():
+            n = (await s.execute(
+                select(Notification).where(Notification.kind == "collection_message")
+            )).scalars().first()
+            n.payload = {**n.payload, "_pushed_at": stale}
+
+    await client.post(f"/api/collections/{cid}/messages",
+                      json={"body": "second"}, headers=owner)
+    assert calls.count("collection_message") == 2
+
+    # Still one notification in the app: the shade collapses, the buzz repeats.
+    items = (await client.get("/api/notifications", headers=friend)).json()["notifications"]
+    assert sum(i["kind"] == "collection_message" for i in items) == 1
+
+
+async def test_quiet_hours_knock_once_they_end(client, monkeypatch):
+    """Quiet hours must mean "not yet", not "never". The notification is written
+    silently, and the sweep rings it once the window closes — otherwise the only
+    way to learn about it is to open the app, which is the bug."""
+    import app.services.notification_service as ns
+    from datetime import datetime, timedelta, timezone
+    from sqlalchemy import select
+    from app.database import async_session
+    from app.models.notification import Notification
+
+    _enable(monkeypatch)
+    calls = []
+
+    async def _count(db, user_id, kind, payload):
+        calls.append(kind)
+        return 1
+    monkeypatch.setattr(ns, "push_to_user", _count)
+
+    friend = await _auth(client, "q@example.com", "quiet")
+    from app.models.user import User
+    async with async_session() as s:
+        me_id = (await s.execute(
+            select(User).where(User.username == "quiet")
+        )).scalar_one().id
+
+    # Quiet right now, in every timezone: a window covering the whole day.
+    await client.patch("/api/notifications/preferences",
+                       json={"quiet_hours_start": 0, "quiet_hours_end": 23,
+                             "timezone": "UTC"}, headers=friend)
+
+    now = datetime.now(timezone.utc)
+    async with async_session() as s:
+        async with s.begin():
+            n = await ns.notify(s, me_id, 1, "echo_reply",
+                                {"echo_id": str(uuid.uuid4())})
+            assert n is not None
+            assert n.deliver_after > now, "should have been deferred"
+    assert calls == [], "a deferred notification must not knock yet"
+
+    # The window closes.
+    async with async_session() as s:
+        async with s.begin():
+            row = (await s.execute(
+                select(Notification).where(Notification.id == n.id)
+            )).scalar_one()
+            # Written ten minutes ago, due a minute ago — a deferral that has
+            # just matured, which is exactly what the sweep looks for.
+            row.created_at = now - timedelta(minutes=10)
+            row.deliver_after = now - timedelta(minutes=1)
+
+    async with async_session() as s:
+        async with s.begin():
+            assert await ns.sweep_deferred_pushes(s) == 1
+    assert calls == ["echo_reply"]
+
+    # And exactly once — a second sweep finds it already knocked.
+    async with async_session() as s:
+        async with s.begin():
+            assert await ns.sweep_deferred_pushes(s) == 0
+    assert calls == ["echo_reply"]
