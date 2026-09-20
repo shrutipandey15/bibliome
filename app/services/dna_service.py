@@ -113,6 +113,41 @@ def is_fresh(cache: dict | None) -> bool:
     return all("need" in row for row in (cache.get("locked") or []))
 
 
+async def _shelf_stamp(db: AsyncSession, user_id: uuid.UUID) -> dict:
+    """A cheap fingerprint of the shelf a payload was computed from.
+
+    One indexed aggregate — deliberately not a hash of the contents. It has to be
+    cheaper than the recompute it guards, and count + last-touched catches every
+    add, delete and edit, because every write path bumps `updated_at`.
+    """
+    n, last = (await db.execute(
+        select(func.count(BookEntry.id), func.max(BookEntry.updated_at))
+        .where(BookEntry.user_id == user_id)
+    )).one()
+    return {"n": n or 0, "last": last.isoformat() if last else None}
+
+
+async def cache_is_current(db: AsyncSession, user: User) -> bool:
+    """Whether the cached payload still matches the shelf as it stands NOW.
+
+    `dna_dirty` is the fast path and stays the primary mechanism. This is the net
+    under it, because that flag is a promise made by whoever cleared it: a recalc
+    that was dropped, crashed, or raced another worker clears it over a payload
+    computed from a shelf that has since moved, and from then on every read
+    trusts the flag and serves the stale card — forever, since nothing ever
+    re-examines a cache marked clean. That failure used to need a human with a
+    backfill script to notice and undo. Now the next read undoes it.
+
+    A payload cached before this stamp existed has no `shelf_stamp` at all, so it
+    fails the comparison and gets recomputed once, which is exactly the repair the
+    backfill was for.
+    """
+    cache = user.cached_dna_v2
+    if not is_fresh(cache):
+        return False
+    return cache.get("shelf_stamp") == await _shelf_stamp(db, user.id)
+
+
 def card_payload(user: User) -> dict | None:
     """The one shape every public surface renders.
 
@@ -174,6 +209,11 @@ async def compute_and_cache(db: AsyncSession, user: User) -> dict:
     # in aggregate. The private mirror (v2, above) is where life and reading meet.
     legacy = calculate_personality(raw)
     legacy["book_count"] = len(raw)
+
+    # Stamp the shelf this payload was computed from, so a later read can catch a
+    # `dna_dirty` that was cleared over stale math. Written INSIDE the same
+    # transaction as the flag it backs up.
+    v2["shelf_stamp"] = await _shelf_stamp(db, user.id)
 
     user.cached_dna_v2 = v2
     user.cached_dna_profile = legacy

@@ -16,7 +16,7 @@ from app.models.book import Book
 from app.models.book_entry import BookEntry
 from app.models.collection import Collection
 from app.models.user import User
-from app.services.dna_service import card_payload, compute_and_cache, is_fresh
+from app.services.dna_service import cache_is_current, card_payload, compute_and_cache
 from app.services.social_service import hidden_author_ids, is_blocked_between
 from app.services.visibility import VIEWER_ANON, VIEWER_MEMBER, VIEWER_OWNER, can_view_profile
 from app.utils.emotions import VALID_SLUGS, canonicalize
@@ -366,11 +366,12 @@ async def compose_profile(db: AsyncSession, viewer_id: uuid.UUID | None, owner: 
     # book_count/archetype/basis while the tab itself would have recomputed and
     # shown this time's. Only the OWNER's own view is allowed to pay for the
     # recompute; a stranger or member viewer still reads whatever is cached.
-    # `is_fresh` is the DNA tab's own staleness rule. Without it the tab would
-    # recompute a cache written before a field existed while this card served the
-    # old shape — same reader, two cards, which is the bug this whole path exists
-    # to prevent.
-    if is_self and (owner.dna_dirty or not is_fresh(owner.cached_dna_v2)):
+    # `cache_is_current` is the DNA tab's own staleness rule (shape + shelf).
+    # Without it the tab would recompute a cache written before a field existed,
+    # or one left behind by a dropped recalc, while this card served the old
+    # shape — same reader, two cards, which is the bug this whole path exists to
+    # prevent.
+    if is_self and (owner.dna_dirty or not await cache_is_current(db, owner)):
         await compute_and_cache(db, owner)
 
     profile = {

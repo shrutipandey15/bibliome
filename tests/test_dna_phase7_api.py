@@ -204,6 +204,47 @@ async def test_archetype_change_snapshots_even_below_the_drift_threshold(client,
     assert await maybe_snapshot_and_notify(db, user) is None
 
 
+async def test_stale_cache_repairs_itself_when_dna_dirty_lies(client, db):
+    """A clean flag over a stale payload must not survive the next read.
+
+    This is the state a dropped or raced recalc leaves behind: the cache was
+    computed from a shorter shelf, but `dna_dirty` says it is current, so every
+    read serves it and nothing ever re-examines it. It used to take a human
+    running a backfill script to undo. Simulated here by writing the books
+    straight to the DB and clearing the flag by hand — exactly what the reader's
+    row looked like.
+    """
+    from app.models.user import User
+    from app.models.book_entry import BookEntry, EntryEmotion
+
+    h = await _user(client, "dnastale")
+    for i in range(6):
+        await _add_book(client, h, f"old-{i}", ["comfort", "tenderness"], intensity=6)
+
+    r = await client.get("/api/dna/profile", headers=h)
+    before = r.json()["book_count"]
+    assert before == 6
+
+    user = (await db.execute(select(User).where(User.username == "dnastale"))).scalar_one()
+
+    # Books land, and the recalc that should have followed them never runs.
+    made = []
+    for i in range(5):
+        e = BookEntry(user_id=user.id, title=f"new-{i}", intensity=9, status="finished",
+                      finished_at=date.today() - timedelta(days=i))
+        db.add(e)
+        made.append(e)
+    await db.flush()
+    for e in made:
+        for slug in ("devastation", "grief"):
+            db.add(EntryEmotion(entry_id=e.id, emotion_id=slug, strength=9))
+    user.dna_dirty = False          # the lie a dropped recalc leaves behind
+    await db.commit()
+
+    r = await client.get("/api/dna/profile", headers=h)
+    assert r.json()["book_count"] == 11, "the read trusted a flag that was wrong"
+
+
 # ── snapshot_count on /dna/profile ──
 
 async def test_profile_carries_snapshot_count_on_both_branches(client):
