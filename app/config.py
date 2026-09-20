@@ -32,6 +32,10 @@ class Settings(BaseSettings):
     # under real traffic (P4-5). Optional; search still works (rate-limited) without it.
     GOOGLE_BOOKS_API_KEY: str | None = None
 
+    # Where deploy.sh builds the SPA. app/routers/og.py reads index.html from
+    # here to inject per-card OG tags into a /s/:token page before React runs.
+    FRONTEND_DIR: str = "/srv/bibliome/frontend"
+
     # Number of trusted reverse proxies in front of the app (e.g. 1 for a single
     # nginx). Controls how X-Forwarded-For is interpreted for rate limiting: only
     # this many rightmost hops are trusted, so a client cannot spoof its IP by

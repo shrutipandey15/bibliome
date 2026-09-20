@@ -8,7 +8,7 @@ from sqlalchemy import text
 
 from app.config import get_settings
 from app.middleware.error_handlers import register_error_handlers, setup_logging
-from app.routers import auth, entries, dna, public, user, books, admin, mirror, meta, echo, social, notifications, profile, prompts, journal, resonance, threads, push, realtime
+from app.routers import auth, entries, dna, public, user, books, admin, mirror, meta, echo, social, notifications, profile, prompts, journal, resonance, threads, push, realtime, og
 
 settings = get_settings()
 setup_logging(settings.ENVIRONMENT)
@@ -89,6 +89,11 @@ app.include_router(resonance.router, prefix=settings.API_V1_PREFIX)
 app.include_router(threads.router, prefix=settings.API_V1_PREFIX)
 app.include_router(push.router, prefix=settings.API_V1_PREFIX)
 app.include_router(realtime.router, prefix=settings.API_V1_PREFIX)
+
+# NO prefix: this serves the real /s/:token page, not an API endpoint. nginx
+# routes /s/ here (location ^~ /s/) so a shared DNA card previews as a card
+# instead of the landing page. Everything else under / stays static.
+app.include_router(og.router)
 
 
 @app.get("/health")
