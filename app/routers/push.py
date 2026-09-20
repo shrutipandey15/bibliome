@@ -9,11 +9,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.database import get_db
 from app.middleware.auth import get_current_user
+from app.middleware.rate_limit import RateLimiter
 from app.models.user import User
-from app.services.push_service import delete_subscription, save_subscription
+from app.services.push_service import delete_subscription, push_to_user, save_subscription
 
 router = APIRouter(prefix="/push", tags=["push"])
 logger = logging.getLogger("bibliome.push")
+
+# Keyed per user, not per IP: this rings the caller's own devices, so the only
+# thing to cap is someone leaning on the button and hammering the push service.
+test_limiter = RateLimiter(max_requests=5, window_seconds=300, prefix="push_test")
 
 
 class PushKeys(BaseModel):
@@ -79,3 +84,33 @@ async def unsubscribe(
     holding it.
     """
     await delete_subscription(db, data.endpoint)
+
+
+@router.post("/test")
+async def send_test(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Ring this reader's own devices, right now.
+
+    The one thing no test can check: whether the VAPID pair is actually accepted
+    by Google's and Mozilla's push services, and whether the worker on this
+    phone shows what arrives. Everything else about notifications is verified
+    in CI against a stub — this is the end of the wire.
+
+    Only ever targets the caller. There is no user parameter to abuse.
+    """
+    settings = get_settings()
+    if not settings.push_enabled:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Push isn't configured on this server",
+        )
+
+    await test_limiter.check_key(str(current_user.id))
+
+    sent = await push_to_user(db, current_user.id, "push_test", {})
+    # `sent` counts devices the push service accepted it for — which is the
+    # honest answer. Zero means nothing is subscribed (or every subscription is
+    # dead), and saying so beats a cheerful "sent!" that rings nothing.
+    return {"sent": sent}

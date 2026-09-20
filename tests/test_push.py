@@ -342,3 +342,174 @@ async def test_quiet_hours_knock_once_they_end(client, monkeypatch):
         async with s.begin():
             assert await ns.sweep_deferred_pushes(s) == 0
     assert calls == ["echo_reply"]
+
+
+def test_every_notification_kind_lands_where_the_in_app_click_lands():
+    """The push url mirrors notificationTarget() in the frontend. Kinds this
+    did not know fell through to "/", so a tapped notification dropped you on
+    the home page and left you to find the thing yourself.
+
+    Pairs with src/components/notifications/target.test.js in the frontend — if
+    a route moves, both have to move.
+    """
+    from app.services.push_service import _payload
+
+    def url(kind, payload=None):
+        return _payload(kind, payload or {})["url"]
+
+    assert url("password_reset") == "/settings?section=security"
+    assert url("password_changed") == "/settings?section=security"
+    assert url("echo_reply", {"echo_id": "e1"}) == "/echoes?echo=e1"
+    assert url("echo_reply") == "/echoes"
+    assert url("resonance_reach", {"match_id": "m1"}) == "/resonance"
+    assert url("resonance_connected", {"thread_id": "t1"}) == "/resonance"
+    assert url("resonance_message", {"thread_id": "t1"}) == "/resonance"
+    assert url("chat_reaction", {"thread_id": "t1"}) == "/resonance"
+    assert url("chat_reaction", {"collection_id": "c1"}) == "/collections/c1/discussion"
+    assert url("chat_mention", {"collection_id": "c1"}) == "/collections/c1/discussion"
+    assert url("collection_joined", {"collection_id": "c1"}) == "/collections/c1/discussion"
+    assert url("dna_shifted", {"old": 1, "new": 2}) == "/?view=dna"
+
+    # Genuinely nowhere to go: the room is gone, and the digest is about the
+    # shelf itself.
+    assert url("collection_deleted", {"title": "Group"}) == "/"
+    assert url("weekly_digest", {"period": "w"}) == "/"
+
+    # A kind with its id missing must not build "/collections/None/discussion".
+    assert url("chat_mention") == "/"
+    assert url("collection_message") == "/"
+
+
+def test_a_push_is_held_for_a_day_rather_than_dropped(monkeypatch):
+    """pywebpush defaults to ttl=0, which means "deliver only if the device is
+    connected this second, else discard". A sleeping phone got nothing — the
+    exact symptom of "the app was closed so I never heard". Ask for a day."""
+    from app.services import push_service
+
+    _enable(monkeypatch)
+    sent = {}
+
+    def _fake_webpush(**kwargs):
+        sent.update(kwargs)
+
+    import sys, types
+    stub = types.ModuleType("pywebpush")
+    stub.webpush = _fake_webpush
+    stub.WebPushException = Exception
+    monkeypatch.setitem(sys.modules, "pywebpush", stub)
+
+    status = push_service._send_one_sync(
+        {"endpoint": "https://push.example.com/x", "p256dh": "k", "auth": "a"},
+        '{"title": "Bibliome"}',
+    )
+    assert status is None, "a clean send reports no status to act on"
+    assert sent["ttl"] == push_service.PUSH_TTL == 86400
+
+
+async def test_a_push_that_failed_is_retried_rather_than_lost(client, monkeypatch):
+    """A push service having a bad minute used to cost the reader the whole
+    notification: one inline attempt, error swallowed, never revisited. The
+    sweep picks up anything due that was never successfully sent."""
+    import app.services.notification_service as ns
+    from datetime import datetime, timezone
+    from sqlalchemy import select
+    from app.database import async_session
+    from app.models.user import User
+
+    _enable(monkeypatch)
+    attempts = []
+
+    async def _on_fire(db, user_id, kind, payload):
+        attempts.append(kind)
+        raise RuntimeError("push service on fire")
+    monkeypatch.setattr(ns, "push_to_user", _on_fire)
+
+    await _auth(client, "r@example.com", "retry")
+    async with async_session() as s:
+        uid = (await s.execute(select(User).where(User.username == "retry"))).scalar_one().id
+
+    async with async_session() as s:
+        async with s.begin():
+            n = await ns.notify(s, uid, 1, "echo_reply", {"echo_id": str(uuid.uuid4())})
+    assert attempts == ["echo_reply"], "the inline attempt still happens first"
+    assert n.deliver_after <= datetime.now(timezone.utc), "not deferred — it simply failed"
+
+    # The service comes back.
+    async def _works(db, user_id, kind, payload):
+        attempts.append(kind)
+        return 1
+    monkeypatch.setattr(ns, "push_to_user", _works)
+
+    async with async_session() as s:
+        async with s.begin():
+            assert await ns.sweep_deferred_pushes(s) == 1
+    assert attempts == ["echo_reply", "echo_reply"]
+
+    # And it is not sent a third time.
+    async with async_session() as s:
+        async with s.begin():
+            assert await ns.sweep_deferred_pushes(s) == 0
+
+
+# ── The test button ──
+
+async def test_test_push_rings_only_the_caller(client, monkeypatch):
+    """There is no user parameter, and there must never be one: this endpoint
+    exists to let a reader prove their OWN phone works, not to ring anyone."""
+    import app.routers.push as push_router
+
+    _enable(monkeypatch)
+    rung = []
+
+    async def _capture(db, user_id, kind, payload):
+        rung.append((user_id, kind))
+        return 2
+    monkeypatch.setattr(push_router, "push_to_user", _capture)
+
+    me = await _auth(client, "t@example.com", "tester")
+    r = await client.post("/api/push/test", headers=me)
+
+    assert r.status_code == 200, r.text
+    assert r.json() == {"sent": 2}
+    assert len(rung) == 1 and rung[0][1] == "push_test"
+
+
+async def test_test_push_reports_zero_rather_than_pretending(client, monkeypatch):
+    """No devices registered is the single most likely reason notifications are
+    silent. Saying "sent!" there would hide the actual answer."""
+    import app.routers.push as push_router
+
+    _enable(monkeypatch)
+
+    async def _none(db, user_id, kind, payload):
+        return 0
+    monkeypatch.setattr(push_router, "push_to_user", _none)
+
+    me = await _auth(client, "z@example.com", "zero")
+    r = await client.post("/api/push/test", headers=me)
+    assert r.json() == {"sent": 0}
+
+
+async def test_test_push_needs_a_login(client):
+    r = await client.post("/api/push/test")
+    assert r.status_code in (401, 403)
+
+
+async def test_test_push_says_so_when_push_is_not_configured(client, monkeypatch):
+    from app.config import get_settings
+
+    s = get_settings()
+    monkeypatch.setattr(s, "VAPID_PUBLIC_KEY", None, raising=False)
+    monkeypatch.setattr(s, "VAPID_PRIVATE_KEY", None, raising=False)
+
+    me = await _auth(client, "n@example.com", "nokeys")
+    r = await client.post("/api/push/test", headers=me)
+    assert r.status_code == 503
+
+
+def test_test_push_copy_names_itself_and_lands_on_settings():
+    from app.services.push_service import _payload
+
+    body = _payload("push_test", {})
+    assert body["body"] == "Notifications are working."
+    assert body["url"] == "/settings?section=notifications"

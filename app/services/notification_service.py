@@ -214,16 +214,18 @@ async def notify(
 
 
 async def sweep_deferred_pushes(db: AsyncSession) -> int:
-    """Knock for notifications whose quiet-hours deferral has just elapsed.
+    """Knock for anything due that has never been successfully knocked for.
 
-    ``notify()`` cannot push these: when they were written the phone was meant
-    to stay silent. Nothing revisited them afterwards, so the deferral was not
-    "quiet until 7am" but "silent forever" — the reader found out by opening the
-    app. This is the other half of quiet hours.
+    Two things land here. Quiet-hours deferrals, which ``notify()`` cannot push
+    because at the time they were written the phone was meant to stay silent —
+    and nothing revisited them, so the deferral was not "quiet until 7am" but
+    "silent forever". And sends that simply failed: a push service having a bad
+    minute used to cost the reader the notification entirely, since the only
+    attempt was made inline and the error was swallowed.
 
-    Only genuine deferrals (``deliver_after > created_at``) that matured inside
-    SWEEP_WINDOW and were never pushed are eligible, so a restart re-rings
-    nothing.
+    ``_push`` stamps ``_pushed_at`` only on a clean send, so an unstamped row IS
+    the backlog. Bounded to rows due inside SWEEP_WINDOW, so a restart or a
+    first deploy re-rings nothing older than that.
     """
     now = datetime.now(timezone.utc)
     rows = (await db.execute(
@@ -232,7 +234,6 @@ async def sweep_deferred_pushes(db: AsyncSession) -> int:
             Notification.read_at.is_(None),
             Notification.deliver_after <= now,
             Notification.deliver_after > now - SWEEP_WINDOW,
-            Notification.deliver_after > Notification.created_at,
             Notification.payload["_pushed_at"].astext.is_(None),
         )
         .order_by(Notification.deliver_after)
