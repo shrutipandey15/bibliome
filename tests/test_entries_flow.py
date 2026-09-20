@@ -480,3 +480,70 @@ async def test_reread_keeps_finish_date_on_the_edit_path_too(client):
     )
     assert r.status_code == 200, r.text
     assert r.json()["finished_at"] == finished_on
+
+
+async def test_recalc_arriving_mid_flight_is_deferred_not_dropped(monkeypatch):
+    """A write landing during a recalc must still get a recalc of its own.
+
+    The dedupe guard used to drop it. The in-flight pass had already read the
+    shelf, so its cache missed that book — but it still cleared `dna_dirty`, and
+    /dna/profile serves the cache whenever that flag is false. Result: a reader
+    adds books and the card is frozen at the old count until some later write
+    happens to recalc on its own.
+    """
+    import asyncio
+    import contextlib
+    import uuid as _uuid
+    from app.services import background
+
+    user_id = _uuid.uuid4()
+    computed = []
+    gate = asyncio.Event()
+
+    class _Result:
+        def scalar_one_or_none(self):
+            return object()  # a user row; nothing below touches its fields
+
+    class _FakeDB:
+        async def execute(self, *a, **kw):
+            return _Result()
+
+        def begin(self):
+            return contextlib.nullcontext()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(background, "async_session", lambda: _FakeDB())
+    monkeypatch.setattr(background.logger, "debug", lambda *a, **kw: None)
+
+    async def _compute(db, user):
+        computed.append(user_id)
+        if len(computed) == 1:
+            await gate.wait()   # hold the first pass open
+        return {}
+
+    async def _snapshot(db, user):
+        return None
+
+    monkeypatch.setattr(background, "compute_and_cache", _compute)
+    monkeypatch.setattr(background, "maybe_snapshot_and_notify", _snapshot)
+    async def _invalidate(uid):
+        return None
+
+    monkeypatch.setattr("app.utils.cache.invalidate_dna", _invalidate)
+
+    first = asyncio.create_task(background.recalculate_dna(user_id))
+    await asyncio.sleep(0)                      # let the first pass reach the gate
+    await background.recalculate_dna(user_id)   # the write that lands mid-flight
+    assert computed == [user_id], "second call should defer, not run concurrently"
+
+    gate.set()
+    await first
+
+    assert computed == [user_id, user_id], "the mid-flight write never got its own recalc"
+    assert user_id not in background._recalc_running
+    assert user_id not in background._recalc_pending

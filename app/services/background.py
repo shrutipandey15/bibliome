@@ -23,6 +23,12 @@ logger = logging.getLogger("bibliome.background")
 
 # Track in-flight recalculations per user — prevents redundant concurrent DB work
 _recalc_running: set[uuid.UUID] = set()
+# Users whose write landed WHILE a recalc was in flight. Dropping those requests
+# is what froze a reader's DNA: the in-flight pass had already read the shelf, so
+# its cache misses the new entry, yet it still clears `dna_dirty` — and
+# /dna/profile trusts that flag, so the stale card is served until some later
+# write happens to recalc alone.
+_recalc_pending: set[uuid.UUID] = set()
 _resonance_running: set[uuid.UUID] = set()
 
 
@@ -30,10 +36,14 @@ async def recalculate_dna(user_id: uuid.UUID) -> None:
     """
     Recalculate and cache DNA profile for a user.
     Runs in background — uses its own DB session.
-    Deduplicates: if a recalculation is already running for this user, skips.
+    Coalesces: a request arriving mid-recalc is deferred, not dropped — it runs
+    once the in-flight pass finishes, over the now-committed shelf.
     """
     if user_id in _recalc_running:
-        logger.debug("DNA recalc already running for user %s, skipping duplicate", user_id)
+        # Not a duplicate — a write the in-flight pass may not have seen. Re-run
+        # after it finishes rather than dropping it.
+        _recalc_pending.add(user_id)
+        logger.debug("DNA recalc already running for user %s, queued a re-run", user_id)
         return
     _recalc_running.add(user_id)
     try:
@@ -62,6 +72,10 @@ async def recalculate_dna(user_id: uuid.UUID) -> None:
         logger.error("Background DNA recalculation failed for user %s: %s", user_id, e)
     finally:
         _recalc_running.discard(user_id)
+
+    if user_id in _recalc_pending:
+        _recalc_pending.discard(user_id)
+        await recalculate_dna(user_id)
 
 
 async def recompute_resonance(user_id: uuid.UUID) -> None:

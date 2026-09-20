@@ -224,7 +224,8 @@ async def manual_snapshot(db: AsyncSession, user: User, v2: dict) -> DNASnapshot
 
 
 async def maybe_snapshot_and_notify(db: AsyncSession, user: User) -> DNASnapshot | None:
-    """Capture a snapshot on drift or monthly cadence; notify on archetype shift.
+    """Capture a snapshot on drift, a changed archetype, or monthly cadence;
+    notify on archetype shift.
 
     Called from the post-commit recalc and /dna/generate — never from a plain read.
     Guarded by the drift gate so early noise never snapshots.
@@ -258,16 +259,28 @@ async def maybe_snapshot_and_notify(db: AsyncSession, user: User) -> DNASnapshot
     age_days = (now - ctx.last_generated_at.replace(tzinfo=timezone.utc)).days \
         if ctx.last_generated_at else None
 
+    # A changed NAME is its own reason to snapshot, independent of how far the
+    # vector moved. Near a boundary one book flips the archetype on a drift far
+    # below the threshold — the mirrors all re-render under the new name (they
+    # read `cached_dna_v2`, rewritten on every recalc), while the timeline still
+    # ends on the old one and the reader is never told, because the "you shifted"
+    # notice below only fires on a snapshot. That is the same reader looking at
+    # two different labels, which is the one thing every cache here exists to
+    # prevent.
+    drifted = snap_drift is not None and snap_drift >= sig.DRIFT_SNAPSHOT_THRESHOLD
+    renamed = bool(ctx.last_archetype) and ctx.last_archetype != archetype_name
     should = (
         ctx.prev_emotion_data is None
-        or (snap_drift is not None and snap_drift >= sig.DRIFT_SNAPSHOT_THRESHOLD)
+        or drifted
+        or renamed
         or (age_days is not None and age_days >= sig.MONTHLY_CADENCE_DAYS)
     )
     if not should:
         return None
 
-    trigger = "drift" if (snap_drift is not None and snap_drift >= sig.DRIFT_SNAPSHOT_THRESHOLD) \
-        else ("cadence" if ctx.prev_emotion_data is not None else "manual")
+    trigger = "drift" if drifted \
+        else ("archetype" if renamed
+              else ("cadence" if ctx.prev_emotion_data is not None else "manual"))
 
     snapshot = DNASnapshot(
         user_id=user.id,

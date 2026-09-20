@@ -140,6 +140,70 @@ async def test_snapshot_on_drift_and_shift_notification(client, db):
     assert shift[0].payload["new"] != shift[0].payload["old"]
 
 
+async def test_archetype_change_snapshots_even_below_the_drift_threshold(client, db, monkeypatch):
+    """A new name is a shift, however small the move that caused it.
+
+    Near an archetype boundary one book flips the label on a drift nowhere near
+    the snapshot threshold. The mirrors all re-render under the new name anyway
+    — so without this the timeline ends on the old label and the reader is never
+    told they changed.
+    """
+    from app.models.user import User
+    from app.models.book_entry import BookEntry, EntryEmotion
+    from app.models.dna_snapshot import DNASnapshot
+    from app.models.notification import Notification
+    from app.services import dna_signals as sig
+    from app.services.dna_service import compute_and_cache, maybe_snapshot_and_notify
+
+    await _user(client, "dnarename")
+    user = (await db.execute(select(User).where(User.username == "dnarename"))).scalar_one()
+
+    async def _snap(emotions, n, days_ago, intensity=8):
+        made = []
+        for i in range(n):
+            e = BookEntry(user_id=user.id, title=f"{emotions[0]}-{days_ago}-{i}",
+                          intensity=intensity, status="finished",
+                          finished_at=date.today() - timedelta(days=days_ago + i))
+            db.add(e)
+            made.append(e)
+        await db.flush()
+        for e in made:
+            for slug in emotions:
+                db.add(EntryEmotion(entry_id=e.id, emotion_id=slug, strength=intensity))
+        await db.commit()
+
+    # 16 books: past the drift gate, so the baseline snapshot is actually taken.
+    await _snap(["comfort", "tenderness"], 16, 300)
+    await compute_and_cache(db, user)
+    base = await maybe_snapshot_and_notify(db, user)
+    await db.commit()
+    first = user.personality_type
+    assert base is not None and first
+
+    # Drift can never be the reason from here on.
+    monkeypatch.setattr(sig, "DRIFT_SNAPSHOT_THRESHOLD", 10.0)
+
+    await _snap(["devastation", "grief", "dread"], 12, 0, intensity=10)
+    await compute_and_cache(db, user)
+    snap = await maybe_snapshot_and_notify(db, user)
+    await db.commit()
+
+    assert user.personality_type != first, "the archetype did not actually change"
+    assert snap is not None, "archetype changed but no snapshot was taken"
+    assert snap.trigger == "archetype"
+    assert snap.personality_type == user.personality_type
+
+    shift = (await db.execute(
+        select(Notification).where(Notification.user_id == user.id, Notification.kind == "dna_shifted")
+    )).scalars().all()
+    assert len(shift) == 1
+    assert shift[0].payload["old"] == first
+    assert shift[0].payload["new"] == user.personality_type
+
+    # Same shelf again: nothing renamed, nothing drifted, no second snapshot.
+    assert await maybe_snapshot_and_notify(db, user) is None
+
+
 # ── snapshot_count on /dna/profile ──
 
 async def test_profile_carries_snapshot_count_on_both_branches(client):
