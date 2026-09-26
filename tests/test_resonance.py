@@ -81,6 +81,21 @@ async def test_shared_emotion_on_same_book_produces_a_match(client):
     assert len(r.json()["matches"]) == 1
 
 
+async def test_new_match_notifies_the_reader_who_was_already_there(client):
+    ha = await _user(client, "gia")
+    hb = await _user(client, "hal")
+    await _log_book(client, ha, "Piranesi", [{"emotion_id": "awe", "strength": 8}])
+    await _log_book(client, hb, "Piranesi", [{"emotion_id": "awe", "strength": 7}])
+    await _refresh((await _me(client, hb))["id"])
+
+    kinds = lambda h: client.get("/api/notifications", headers=h)
+    a = [n for n in (await kinds(ha)).json()["notifications"] if n["kind"] == "resonance_match"]
+    assert len(a) == 1
+    assert a[0]["payload"].get("book_title") is None  # contentless, like every resonance notice
+    b = [n for n in (await kinds(hb)).json()["notifications"] if n["kind"] == "resonance_match"]
+    assert b == []  # the reader whose entry made the match isn't pinged about it
+
+
 async def test_same_book_no_shared_emotion_is_not_a_match(client):
     ha = await _user(client, "cara")
     hb = await _user(client, "dee")

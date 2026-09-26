@@ -28,6 +28,7 @@ from sqlalchemy.orm import aliased, selectinload
 
 from app.models.book import Book
 from app.models.book_entry import BookEntry, EntryEmotion
+from app.models.notification import TIER_DIRECT
 from app.models.reaction_kinds import CHAT_REACTION_KINDS
 from app.models.resonance import (
     STRENGTH_LIGHT,
@@ -40,6 +41,7 @@ from app.models.resonance import (
 from app.models.user import User
 from app.services.aggregate_service import ENGAGED_STATUSES
 from app.services.moderation import VERDICT_CRISIS, VERDICT_HOLD, classify_text
+from app.services.notification_service import notify
 from app.services.social_service import hidden_author_ids, is_blocked_between
 from app.utils.emotions import get_emotion
 
@@ -262,6 +264,13 @@ async def refresh_matches_for_user(db: AsyncSession, user_id: uuid.UUID) -> int:
         result = await db.execute(stmt)
         if result.scalar_one_or_none() is not None:
             created += 1
+            # Tell the reader who was already there. Contentless like every
+            # resonance notice (no book, no person), and batched so a sweep that
+            # finds several matches for one reader is one knock, not several.
+            await notify(
+                db, cand.other_user_id, TIER_DIRECT, "resonance_match", {},
+                batch_key="resonance_match", actor_id=user_id,
+            )
 
     await db.flush()
     return created

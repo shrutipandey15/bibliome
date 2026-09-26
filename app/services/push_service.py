@@ -142,7 +142,7 @@ def _url_for(kind: str, payload: dict) -> str:
         echo_id = payload.get("echo_id")
         return f"/echoes?echo={quote(str(echo_id))}" if echo_id else "/echoes"
 
-    if kind in ("resonance_reach", "resonance_connected", "resonance_message"):
+    if kind in ("resonance_match", "resonance_reach", "resonance_connected", "resonance_message"):
         return "/resonance"
 
     if kind == "collection_message" and discussion:
