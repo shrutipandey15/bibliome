@@ -11,8 +11,15 @@ from app.utils.url_safety import validate_cover_url
 # paused / reread are the states a book lands in once you've engaged with it.
 EntryStatus = Literal["want_to_read", "reading", "finished", "abandoned", "paused", "reread"]
 
-# "Would you read it again?" — separate axis from emotion.
-Verdict = Literal["yes", "no", "not_sure"]
+# "How did it land?" — separate axis from emotion. Replaced "would you read it
+# again?" (yes | no | not_sure) in migration 036.
+Verdict = Literal["loved", "liked", "mixed", "not_for_me"]
+
+# Why a finished book disappointed. Only meaningful after mixed / not_for_me.
+VerdictReason = Literal["ending_let_me_down", "overhyped", "didnt_connect", "badly_written", "forgettable"]
+
+# The picker's "something else…" free text.
+MAX_OTHER_FEELING_CHARS = 80
 
 # Why a book was abandoned. Only meaningful when status == "abandoned".
 DnfReason = Literal["bored", "too_much", "badly_written", "wrong_time", "lost_me", "drifted"]
@@ -68,7 +75,9 @@ class EntryCreate(BaseModel):
     finished_at: date | None = None
     status: EntryStatus | None = None
     verdict: Verdict | None = None
+    verdict_reason: VerdictReason | None = None
     dnf_reason: DnfReason | None = None
+    other_feeling: str | None = Field(default=None, max_length=MAX_OTHER_FEELING_CHARS)
     # How far in, 0-100. Omitted means "hasn't said" and stays NULL. [F2.8]
     progress: int | None = Field(default=None, ge=0, le=100)
 
@@ -113,7 +122,9 @@ class EntryUpdate(BaseModel):
     finished_at: date | None = None
     status: EntryStatus | None = None
     verdict: Verdict | None = None
+    verdict_reason: VerdictReason | None = None
     dnf_reason: DnfReason | None = None
+    other_feeling: str | None = Field(default=None, max_length=MAX_OTHER_FEELING_CHARS)
     # How far in, 0-100. Omitted means "hasn't said" and stays NULL. [F2.8]
     progress: int | None = Field(default=None, ge=0, le=100)
 
@@ -139,7 +150,9 @@ class EntryResponse(BaseModel):
     updated_at: datetime
     status: EntryStatus = "finished"
     verdict: Verdict | None = None
+    verdict_reason: VerdictReason | None = None
     dnf_reason: DnfReason | None = None
+    other_feeling: str | None = None
     progress: int | None = None
     arc_start_emotion_id: str | None = None
     arc_middle_emotion_id: str | None = None

@@ -54,12 +54,12 @@ async def test_profile_has_insights_and_locked_at_ten_books(client):
 
 async def test_reads_for_persists_and_validates(client):
     h = await _user(client, "dnastated")
-    r = await client.patch("/api/user/settings", json={"reads_for": ["comfort", "tenderness"]}, headers=h)
+    r = await client.patch("/api/user/settings", json={"reads_for": ["comfort", "attachment"]}, headers=h)
     assert r.status_code == 200
-    assert r.json()["reads_for"] == ["comfort", "tenderness"]
+    assert r.json()["reads_for"] == ["comfort", "attachment"]
     # Round-trips through GET.
     r = await client.get("/api/user/settings", headers=h)
-    assert r.json()["reads_for"] == ["comfort", "tenderness"]
+    assert r.json()["reads_for"] == ["comfort", "attachment"]
 
 
 async def test_reads_for_rejects_non_canonical_slug(client):
@@ -70,9 +70,9 @@ async def test_reads_for_rejects_non_canonical_slug(client):
 
 async def test_contradiction_insight_appears_once_stated_pref_set(client):
     h = await _user(client, "dnacontra")
-    # Shelf is all devastation, intensity high; they'll claim they read for comfort.
+    # Shelf is all haunted, intensity high; they'll claim they read for comfort.
     for i in range(10):
-        await _add_book(client, h, f"B{i}", ["devastation"], intensity=9)
+        await _add_book(client, h, f"B{i}", ["haunted"], intensity=9)
     r = await client.get("/api/dna/profile", headers=h)
     assert not any(i["category"] == "contradiction" for i in r.json()["insights"])
 
@@ -107,10 +107,10 @@ async def test_snapshot_on_drift_and_shift_notification(client, db):
         return e
 
     # 15 comfort books, ~a year old.
-    comfort = [add(["comfort", "tenderness"], 330 + i * 10) for i in range(15)]
+    comfort = [add(["comfort", "attachment"], 330 + i * 10) for i in range(15)]
     await db.flush()
     for e in comfort:
-        for slug in ("comfort", "tenderness"):
+        for slug in ("comfort", "attachment"):
             db.add(EntryEmotion(entry_id=e.id, emotion_id=slug, strength=7))
     await db.commit()
 
@@ -121,10 +121,10 @@ async def test_snapshot_on_drift_and_shift_notification(client, db):
     assert n_snaps == 1  # first snapshot captured
 
     # Four recent devastating books → the profile moves.
-    fresh = [add(["devastation", "grief"], i, intensity=9) for i in range(4)]
+    fresh = [add(["haunted", "grief"], i, intensity=9) for i in range(4)]
     await db.flush()
     for e in fresh:
-        for slug in ("devastation", "grief"):
+        for slug in ("haunted", "grief"):
             db.add(EntryEmotion(entry_id=e.id, emotion_id=slug, strength=9))
     await db.commit()
 
@@ -173,7 +173,7 @@ async def test_archetype_change_snapshots_even_below_the_drift_threshold(client,
         await db.commit()
 
     # 16 books: past the drift gate, so the baseline snapshot is actually taken.
-    await _snap(["comfort", "tenderness"], 16, 300)
+    await _snap(["comfort", "attachment"], 16, 300)
     await compute_and_cache(db, user)
     base = await maybe_snapshot_and_notify(db, user)
     await db.commit()
@@ -183,7 +183,7 @@ async def test_archetype_change_snapshots_even_below_the_drift_threshold(client,
     # Drift can never be the reason from here on.
     monkeypatch.setattr(sig, "DRIFT_SNAPSHOT_THRESHOLD", 10.0)
 
-    await _snap(["devastation", "grief", "dread"], 12, 0, intensity=10)
+    await _snap(["haunted", "grief", "dread"], 12, 0, intensity=10)
     await compute_and_cache(db, user)
     snap = await maybe_snapshot_and_notify(db, user)
     await db.commit()
@@ -219,7 +219,7 @@ async def test_stale_cache_repairs_itself_when_dna_dirty_lies(client, db):
 
     h = await _user(client, "dnastale")
     for i in range(6):
-        await _add_book(client, h, f"old-{i}", ["comfort", "tenderness"], intensity=6)
+        await _add_book(client, h, f"old-{i}", ["comfort", "attachment"], intensity=6)
 
     r = await client.get("/api/dna/profile", headers=h)
     before = r.json()["book_count"]
@@ -236,7 +236,7 @@ async def test_stale_cache_repairs_itself_when_dna_dirty_lies(client, db):
         made.append(e)
     await db.flush()
     for e in made:
-        for slug in ("devastation", "grief"):
+        for slug in ("haunted", "grief"):
             db.add(EntryEmotion(entry_id=e.id, emotion_id=slug, strength=9))
     user.dna_dirty = False          # the lie a dropped recalc leaves behind
     await db.commit()

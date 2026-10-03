@@ -6,7 +6,7 @@ from app.utils.emotions import VALID_SLUGS
 
 pytestmark = pytest.mark.asyncio
 
-EMO = ["grief", "longing", "catharsis", "tenderness", "awe", "comfort"]
+EMO = ["grief", "longing", "catharsis", "attachment", "awe", "comfort"]
 
 
 async def _auth(client):

@@ -24,7 +24,7 @@ from app.models.book_aggregate import (
     BookEmotionAggregate,
 )
 from app.models.book_entry import BookEntry, EntryEmotion
-from app.utils.emotions import canonicalize
+from app.utils.emotions import VERDICTS, canonicalize
 
 logger = logging.getLogger("bibliome.aggregate")
 
@@ -87,7 +87,7 @@ def build_profile(rows: list[tuple]) -> dict:
     verdict_profile = {}
     if verdicts:
         total = len(verdicts)
-        for value in ("yes", "no", "not_sure"):
+        for value in VERDICTS:
             n = sum(1 for v in verdicts.values() if v == value)
             verdict_profile[value] = round(n / total, 3)
 

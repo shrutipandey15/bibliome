@@ -14,9 +14,9 @@ settings = get_settings()
 
 class EmotionVocabItem(BaseModel):
     slug: str
-    family: str          # UI-only grouping ("it messed me up", "it held me", …)
-    name: str            # the plain word ("confusion")
-    phrase: str          # the first-person line the UI shows ("I have no idea what happened")
+    family: str          # UI-only grouping ("it broke me", "it held me", …)
+    name: str            # the plain word ("heartbreak")
+    phrase: str          # the first-person line the UI shows ("it broke my heart")
     symbol: str
     color: str
     description: str
@@ -30,12 +30,13 @@ class EmotionVocabResponse(BaseModel):
 
 # Bump when the vocabulary changes so clients can cache-bust.
 # v2: the 18-emotion vocabulary with families (replaced the 13-emotion set).
-EMOTION_VOCAB_VERSION = 2
+# v3: the 21-feeling vocabulary; "it lost me" moved to the verdict step.
+EMOTION_VOCAB_VERSION = 3
 
 
 @router.get("/emotions", response_model=EmotionVocabResponse)
 async def get_emotion_vocabulary():
-    """The canonical 18-emotion vocabulary (slug, family, name, symbol, color, description).
+    """The canonical 21-feeling vocabulary (slug, family, name, symbol, color, description).
 
     Public + unauthenticated: it's static reference data. Frontends should consume
     this instead of hardcoding labels/colors (which is how the P2-9 drift happened).

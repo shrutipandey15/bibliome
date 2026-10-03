@@ -19,7 +19,7 @@ from app.services.dna_signals import (
     score_archetype,
     stated_vs_revealed,
 )
-from app.utils.emotions import LOST_ME_SLUGS
+from app.utils.emotions import RETIRED_SLUGS
 
 NOW = datetime.now(timezone.utc)
 
@@ -42,24 +42,25 @@ def test_score_archetype_abstains_on_empty_tally():
     # not zero. What matters is that nothing is named, not what the numbers are.
 
 
-def test_score_archetype_abstains_when_only_lost_me_tags():
-    """"it lost me" tags are registers of disengagement, never a reading identity.
+def test_score_archetype_abstains_when_only_retired_tags():
+    """The retired "it lost me" tags are verdicts now, never a reading identity.
 
-    They appear only as anti_emotions, so a reader who has tagged nothing else
-    scores zero or negative everywhere — and gets no label.
+    They canonicalize to nothing, so a shelf carrying only them has no feeling
+    vector at all — and gets no label rather than one decided by list order.
     """
-    vec = {slug: 0.0 for slug in S._ALL_SLUGS}
-    for slug in LOST_ME_SLUGS:
-        vec[slug] = 1.0 / len(LOST_ME_SLUGS)
+    sigs = [S.entry_sig({"emotions": [slug], "intensity": 5, "finished_at": None,
+                         "created_at": NOW, "status": "finished"})
+            for slug in sorted(RETIRED_SLUGS)]
+    assert all(s.emotions == [] for s in sigs)
+    vec = S.frequency_vector(sigs, weighted=False)
     best, scores, margin = score_archetype(vec)
     assert best is None
     assert margin == 0.0
-    assert max(scores.values()) <= 0
 
 
 def test_score_archetype_still_names_a_type_when_there_is_a_signal():
     vec = {slug: 0.0 for slug in S._ALL_SLUGS}
-    vec["comfort"], vec["tenderness"] = 0.6, 0.4
+    vec["comfort"], vec["attachment"] = 0.6, 0.4
     best, scores, margin = score_archetype(vec)
     assert best == "comfort_architect"
     assert scores[best] == max(scores.values())
@@ -97,8 +98,8 @@ def test_enough_payload_carries_margin_and_hedges_a_close_call():
     # gap of ~0.003 — inside HEDGE_ARCHETYPE_GAP, so a runner-up is named.
     res = build_dna([sig(["grief", "recognition"]) for _ in range(6)])
     assert res["margin"] is not None and res["archetype"] is not None
-    if res["margin"] < S.HEDGE_ARCHETYPE_GAP:
-        assert res["runner_up"]          # a coin-flip says so
+    if res["margin"] < S.HEDGE_ARCHETYPE_GAP or S.BASELINE_PROVISIONAL:
+        assert res["runner_up"]          # a coin-flip, or a guessed baseline, says so
     else:
         assert res["runner_up"] is None
 
@@ -106,20 +107,20 @@ def test_enough_payload_carries_margin_and_hedges_a_close_call():
 # ── P0-3: a claim needs books behind it ──
 
 def test_stated_vs_revealed_requires_three_books():
-    """One 10/10 devastation book must not outweigh a shelf of comfort reads."""
+    """One 10/10 haunted book must not outweigh a shelf of comfort reads."""
     sigs = [sig(["comfort"], intensity=7) for _ in range(30)]
-    sigs += [sig(["devastation"], intensity=10) for _ in range(MIN_BOOKS_PER_CLAIM - 1)]
+    sigs += [sig(["haunted"], intensity=10) for _ in range(MIN_BOOKS_PER_CLAIM - 1)]
 
     res = stated_vs_revealed(sigs, ["comfort"])
     assert res["stated"] == "comfort"
-    assert res["revealed_top"] == "devastation"   # frequency still reports honestly
+    assert res["revealed_top"] == "haunted"   # frequency still reports honestly
     assert res["delta"] is None                   # but no gap is claimed
     assert res["revealed_hi"] is None
 
-    # One more devastation book and the comparison becomes fair game.
-    sigs.append(sig(["devastation"], intensity=10))
+    # One more haunted book and the comparison becomes fair game.
+    sigs.append(sig(["haunted"], intensity=10))
     res = stated_vs_revealed(sigs, ["comfort"])
-    assert res["revealed_hi"] == "devastation"
+    assert res["revealed_hi"] == "haunted"
     assert res["delta"] == pytest.approx(3.0)
 
 
@@ -127,13 +128,13 @@ def test_stated_vs_revealed_compares_on_disjoint_sets():
     """A book carrying both tags feeds the identical intensity to both averages,
     so it can only dilute a gap it can't evidence. It is excluded from both sides."""
     sigs = [sig(["comfort"], intensity=4) for _ in range(3)]
-    sigs += [sig(["devastation"], intensity=10) for _ in range(3)]
+    sigs += [sig(["haunted"], intensity=10) for _ in range(3)]
     # Co-tagged books, rated in between — they must not move the measured gap.
-    sigs += [sig(["comfort", "devastation"], intensity=7) for _ in range(5)]
+    sigs += [sig(["comfort", "haunted"], intensity=7) for _ in range(5)]
 
     res = stated_vs_revealed(sigs, ["comfort"])
     assert res["disjoint"] is True
-    assert res["revealed_hi"] == "devastation"
+    assert res["revealed_hi"] == "haunted"
     assert res["delta"] == pytest.approx(6.0)     # 10 - 4, not diluted toward 7
 
 
@@ -141,13 +142,13 @@ def test_stated_vs_revealed_scores_both_stated_emotions():
     """reads_for allows two. The reader hears about whichever claim their shelf
     contradicts more — the second answer is not silently discarded."""
     sigs = [sig(["comfort"], intensity=6) for _ in range(4)]      # weak claim
-    sigs += [sig(["tenderness"], intensity=2) for _ in range(4)]  # the real gap
-    sigs += [sig(["devastation"], intensity=9) for _ in range(4)]
+    sigs += [sig(["attachment"], intensity=2) for _ in range(4)]  # the real gap
+    sigs += [sig(["haunted"], intensity=9) for _ in range(4)]
 
     first_only = stated_vs_revealed(sigs, ["comfort"])
-    both = stated_vs_revealed(sigs, ["comfort", "tenderness"])
+    both = stated_vs_revealed(sigs, ["comfort", "attachment"])
     assert first_only["stated"] == "comfort"
-    assert both["stated"] == "tenderness"
+    assert both["stated"] == "attachment"
     assert both["delta"] > first_only["delta"]
 
 
@@ -158,7 +159,7 @@ def test_stated_vs_revealed_still_none_without_a_stated_preference():
 
 # ── Three verdicts: the signal measures, it doesn't only accuse ──
 
-def _shelf(stated_n, stated_avg, other_n, other_avg, stated="comfort", other="devastation"):
+def _shelf(stated_n, stated_avg, other_n, other_avg, stated="comfort", other="haunted"):
     """A shelf with two disjoint groups, so the verdict is arithmetic, not luck."""
     return ([sig([stated], intensity=stated_avg) for _ in range(stated_n)]
             + [sig([other], intensity=other_avg) for _ in range(other_n)])
@@ -169,7 +170,7 @@ def test_stated_vs_revealed_verdict_contradicted():
     assert res["verdict"] == "contradicted"
     assert res["reason"] is None
     assert res["delta"] == pytest.approx(3.0)
-    assert res["revealed_hi"] == "devastation"
+    assert res["revealed_hi"] == "haunted"
 
 
 def test_stated_vs_revealed_verdict_confirmed():
@@ -179,13 +180,13 @@ def test_stated_vs_revealed_verdict_confirmed():
     assert res["reason"] is None
     assert res["delta"] == pytest.approx(-3.0)
     # The closest challenger, i.e. the narrowest margin the claim survives by.
-    assert res["revealed_hi"] == "devastation"
+    assert res["revealed_hi"] == "haunted"
 
 
 def test_confirmed_requires_beating_every_comparable_emotion():
     """Out-rating the loudest challenger is not enough — one quiet emotion rated
     higher than the stated one is enough to make the claim not-confirmed."""
-    sigs = _shelf(10, 8, 10, 6)                                   # comfort clears devastation
+    sigs = _shelf(10, 8, 10, 6)                                   # comfort clears haunted
     sigs += [sig(["awe"], intensity=9) for _ in range(3)]          # but not awe
     res = stated_vs_revealed(sigs, ["comfort"])
     assert res["verdict"] != "confirmed"
@@ -244,22 +245,22 @@ def test_the_decisive_claim_wins_and_accusation_gets_no_head_start():
     LARGER gap is reported — ranking by the signed gap would mean the reader
     always hears the accusation, which is the bias this whole change removes."""
     sigs = [sig(["comfort"], intensity=9) for _ in range(6)]      # confirmed by 3
-    sigs += [sig(["tenderness"], intensity=5) for _ in range(6)]  # contradicted by 1
-    sigs += [sig(["devastation"], intensity=6) for _ in range(6)]  # the actual challenger
+    sigs += [sig(["attachment"], intensity=5) for _ in range(6)]  # contradicted by 1
+    sigs += [sig(["haunted"], intensity=6) for _ in range(6)]  # the actual challenger
 
-    res = stated_vs_revealed(sigs, ["tenderness", "comfort"])
+    res = stated_vs_revealed(sigs, ["attachment", "comfort"])
     assert res["stated"] == "comfort"
     assert res["verdict"] == "confirmed"
     # And the other claim was judged against the SHELF, not against comfort —
     # comfort is something the reader also said, so it cannot play challenger.
-    assert stated_vs_revealed(sigs, ["tenderness", "comfort"])["revealed_hi"] != "comfort"
+    assert stated_vs_revealed(sigs, ["attachment", "comfort"])["revealed_hi"] != "comfort"
 
     # A decisive verdict outranks an inconclusive one whichever order they arrive
     # in — the reader's second answer is not a tiebreak, it's a second claim.
     sigs2 = [sig(["comfort"], intensity=9) for _ in range(6)]        # comfort: confirmed
-    sigs2 += [sig(["devastation"], intensity=6) for _ in range(6)]
-    # tenderness: never tagged, so nothing is comparable → inconclusive.
-    for order in (["tenderness", "comfort"], ["comfort", "tenderness"]):
+    sigs2 += [sig(["haunted"], intensity=6) for _ in range(6)]
+    # attachment: never tagged, so nothing is comparable → inconclusive.
+    for order in (["attachment", "comfort"], ["comfort", "attachment"]):
         res2 = stated_vs_revealed(sigs2, order)
         assert res2["stated"] == "comfort"
         assert res2["verdict"] == "confirmed"
@@ -354,15 +355,14 @@ def test_no_frequency_claim_on_a_tie():
 
 # ── P1-5: the archetype table's own invariants ──
 
-def test_grief_romantic_and_soft_masochist_do_not_tie_on_grief_devastation():
-    """The twins shared two of three primaries, so a reader tagging exactly those
-    two scored 1.0 against 1.0 — and list order, not the reader, picked."""
+def test_two_primaries_of_one_type_beat_a_type_sharing_one():
+    """v2's twins shared two primaries, so a reader tagging exactly those two
+    scored a tie that list order decided. In v3 no pair shares two, so a reader
+    on two of one type's primaries must land on that type, decisively."""
     vec = {slug: 0.0 for slug in S._ALL_SLUGS}
-    vec["grief"], vec["devastation"] = 0.5, 0.5
+    vec["grief"], vec["catharsis"] = 0.5, 0.5
     best, scores, margin = score_archetype(vec)
-
-    assert scores["grief_romantic"] != scores["soft_masochist"]
-    assert best == "grief_romantic"       # both of its primaries; the other has one
+    assert best == "grief_romantic"
     assert margin > 0
 
 
@@ -402,7 +402,7 @@ def test_every_archetype_carries_exactly_two_anti_emotions():
 
 def test_comfort_architect_is_reachable_on_its_own_primaries():
     vec = {slug: 0.0 for slug in S._ALL_SLUGS}
-    vec["comfort"], vec["joy"], vec["nostalgia"] = 0.4, 0.3, 0.3
+    vec["comfort"], vec["attachment"], vec["hope"] = 0.4, 0.3, 0.3
     best, _, _ = score_archetype(vec)
     assert best == "comfort_architect"
 
@@ -417,18 +417,18 @@ def test_basis_for_counts_only_what_it_can_evidence():
     counts = {r["emotion"]: r for r in basis["counts"]}
     assert counts["grief"] == {"emotion": "grief", "books": 14, "of": 31}
     assert counts["catharsis"]["books"] == 14
-    # devastation is a primary of this type but never tagged — it is absent, not
+    # haunted is a primary of this type but never tagged — it is absent, not
     # reported as a zero. A zero on a receipt reads like a finding.
-    assert "devastation" not in counts
+    assert "haunted" not in counts
     # Ordered by weight of evidence.
     assert basis["counts"] == sorted(basis["counts"], key=lambda r: -r["books"])
 
 
 def test_basis_for_names_what_the_top_of_the_scale_is_reserved_for():
     sigs = [sig(["comfort"], intensity=3) for _ in range(10)]
-    sigs += [sig(["devastation"], intensity=10) for _ in range(3)]
+    sigs += [sig(["haunted"], intensity=10) for _ in range(3)]
     basis = basis_for("grief_romantic", sigs)
-    assert basis["top_rated_emotions"] == ["devastation"]
+    assert basis["top_rated_emotions"] == ["haunted"]
     assert basis["top_rated_n"] == 3
 
 
@@ -444,7 +444,10 @@ def test_build_dna_carries_the_basis_and_counts_books_not_journal_days():
 
 
 def test_basis_is_absent_when_the_engine_abstained():
-    res = build_dna([sig([]) for _ in range(6)] + [sig(["boredom"]) for _ in range(5)])
-    assert res["enough"] is True
-    assert res["archetype"] is None
-    assert res["basis"] is None
+    """Books whose only tags were retired carry no feelings, so the shelf is not
+    a profile yet — no label, and so no receipt for one."""
+    retired = [S.entry_sig({"emotions": ["boredom"], "intensity": 5, "finished_at": None,
+                            "created_at": NOW, "status": "finished"}) for _ in range(5)]
+    res = build_dna([sig([]) for _ in range(6)] + retired)
+    assert res["enough"] is False
+    assert "archetype" not in res or res["archetype"] is None

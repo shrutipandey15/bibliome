@@ -48,6 +48,7 @@ async def _load_raw(db: AsyncSession, user_id: uuid.UUID) -> list[dict]:
             "arc_start": e.arc_start_emotion_id,
             "arc_end": e.arc_end_emotion_id,
             "dnf_reason": e.dnf_reason,
+            "verdict": e.verdict,
         }
         for e in rows
     ]
@@ -284,8 +285,8 @@ async def maybe_snapshot_and_notify(db: AsyncSession, user: User) -> DNASnapshot
     enduring = sig.frequency_vector(vector_sigs, weighted=False)
     # Archetype from the intensity-scaled vector, matching build_dna so the
     # snapshot's label can't disagree with the one the mirror shows.
-    archetype_id, _, _ = sig.score_archetype(
-        sig.frequency_vector(vector_sigs, weighted=True, intensity_weighted=True)
+    archetype_id, _, _ = sig.classify_reader(
+        sigs, sig.frequency_vector(vector_sigs, weighted=True, intensity_weighted=True)
     )
     if archetype_id is None:
         # Nothing to name, so nothing has shifted. A snapshot here would record an

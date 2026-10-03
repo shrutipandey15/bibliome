@@ -16,22 +16,34 @@ import pytest
 from app.services import dna_signals as S
 from app.services.dna_engine import PERSONALITY_TYPES
 from app.services.dna_signals import score_archetype
-from app.utils.emotions import EMOTIONS, FAMILY_LOST
+# Every live slug is experiential since v3 (the "it lost me" tags were retired).
+EXPERIENTIAL = list(S._ALL_SLUGS)
 
-FAMILY = {e["slug"]: e["family"] for e in EMOTIONS}
-EXPERIENTIAL = [s for s in S._ALL_SLUGS if FAMILY[s] != FAMILY_LOST]
-
+# What a typical book of each kind makes people feel, in the 21-feeling
+# vocabulary. The same 19 kinds of book Stage 3 of the rework simulated. NOTE:
+# the provisional BASELINE_VECTOR is the mean of that simulation, so until it is
+# refreshed from real readers these tests measure whether the *table* is fair
+# under a calibrated baseline — they cannot vouch for the baseline itself.
 BOOK_BUNDLES = {
-    "romantasy_dark": ["desire", "dread", "devastation", "rage", "awe"],
-    "romantasy_soft": ["desire", "longing", "joy", "awe"],
-    "grief_litfic":   ["grief", "devastation", "catharsis", "tenderness"],
-    "cozy":           ["comfort", "tenderness", "joy"],
-    "thriller":       ["dread", "rage", "awe"],
-    "quiet_litfic":   ["recognition", "tenderness", "longing", "awe"],
-    "memoir":         ["recognition", "grief", "catharsis", "nostalgia"],
-    "comic_novel":    ["amusement", "joy", "recognition"],
-    "epic_fantasy":   ["awe", "dread", "devastation", "longing"],
-    "sad_romance":    ["longing", "grief", "desire", "devastation"],
+    "romantasy_dark":   ["desire", "conflicted", "awe", "shock", "thrill"],
+    "romantasy_soft":   ["swoon", "awe", "joy", "attachment"],
+    "romcom":           ["swoon", "amusement", "joy"],
+    "dark_romance":     ["desire", "conflicted", "rage", "dread"],
+    "angsty_romance":   ["longing", "desire", "grief", "attachment"],
+    "grief_litfic":     ["grief", "catharsis", "haunted", "beauty"],
+    "quiet_litfic":     ["recognition", "beauty", "nostalgia", "longing"],
+    "memoir":           ["recognition", "catharsis", "hope", "insight"],
+    "cozy":             ["comfort", "attachment", "joy", "hope"],
+    "comic_novel":      ["amusement", "joy", "insight"],
+    "satire":           ["amusement", "rage", "insight", "shock"],
+    "thriller":         ["thrill", "dread", "shock"],
+    "horror":           ["dread", "haunted", "shock", "thrill"],
+    "epic_fantasy":     ["awe", "thrill", "attachment", "grief"],
+    "scifi_ideas":      ["awe", "insight", "dread"],
+    "pop_nonfiction":   ["insight", "awe", "amusement"],
+    "literary_classic": ["beauty", "insight", "recognition", "grief"],
+    "ya_coming_of_age": ["nostalgia", "attachment", "hope", "joy"],
+    "injustice_novel":  ["rage", "grief", "catharsis", "insight"],
 }
 
 
@@ -49,7 +61,7 @@ def _correlated_readers(n=4000, seed=5):
         counts: Counter = Counter()
         for _book in range(random.randint(10, 50)):
             tags = [s for s in BOOK_BUNDLES[random.choices(keys, weights=taste)[0]]
-                    if random.random() < 0.75]
+                    if random.random() < 0.75][:3]
             if not tags:
                 continue
             for slug in tags:                    # one entry, one vote
@@ -76,15 +88,15 @@ def test_balanced_reader_is_not_handed_a_label_by_list_order(monkeypatch):
     """A reader with an even spread across every experiential tag must not be
     labelled by position in PERSONALITY_TYPES.
 
-    Uncentered this produced a five-way tie at 0.1786 that list order silently
-    resolved into control_intellectual.
+    Uncentered (v2) this produced a five-way tie at 0.1786 that list order
+    silently resolved into control_intellectual.
 
     This asserts the absence of a TIE, not a small gap. The original version of
     this test required the gap to fall under HEDGE_ARCHETYPE_GAP, on the reasoning
     that this is "the most average reader possible" — but that stopped being true
     the moment scores were centered. Average now means BASELINE_VECTOR, which is
-    nowhere near flat (awe 0.126 against nostalgia 0.024), so a reader who tags all
-    14 experiential emotions equally is genuinely unusual and genuinely leans
+    nowhere near flat (insight 0.10 against comfort 0.015), so a reader who tags all
+    21 feelings equally is genuinely unusual and genuinely leans
     somewhere. Their lead of ~0.024 sits above the 40th percentile of the gap
     distribution. Demanding it be hedged would mean setting the hedge threshold
     above the median, which is what made the hedge meaningless in the first place.
@@ -143,10 +155,17 @@ def test_exact_ties_are_vanishingly_rare():
 
 
 @pytest.mark.parametrize("tags,expected", [
-    (["comfort", "joy", "nostalgia"], "comfort_architect"),
-    (["grief", "devastation", "catharsis"], "grief_romantic"),
-    (["amusement", "awe", "rage"], "midnight_arsonist"),
-    (["rage", "dread", "desire"], "soft_masochist"),
+    (["comfort", "attachment", "hope"], "comfort_architect"),
+    (["grief", "catharsis", "haunted"], "grief_romantic"),
+    (["amusement", "rage", "insight"], "midnight_arsonist"),
+    (["rage", "conflicted", "desire"], "soft_masochist"),
+    (["insight", "dread", "awe"], "control_intellectual"),
+    (["recognition", "nostalgia", "beauty"], "quiet_witness"),
+    (["desire", "longing", "attachment"], "obsessive_romantic"),
+    (["recognition", "longing", "insight"], "emotional_archaeologist"),
+    (["awe", "thrill", "joy"], "world_diver"),
+    (["thrill", "dread", "shock"], "adrenaline_seeker"),
+    (["swoon", "joy", "amusement"], "sunshine_romantic"),
 ])
 def test_unambiguous_readers_still_get_the_obvious_label(tags, expected):
     """Calibration must not cost the engine its plain-language correctness."""
@@ -159,18 +178,18 @@ def test_baseline_covers_every_canonical_slug():
 
 
 def test_intensity_weighting_lets_a_hard_hitting_emotion_outweigh_a_frequent_one():
-    """4 books tagged `comfort` at intensity 3, 2 tagged `devastation` at 10.
-    Plain vector: comfort leads 4:2. Intensity-weighted: devastation wins."""
+    """4 books tagged `comfort` at intensity 3, 2 tagged `grief` at 10.
+    Plain vector: comfort leads 4:2. Intensity-weighted: grief wins."""
     from datetime import datetime, timezone
     now = datetime.now(timezone.utc)
     sigs = (
         [S.EntrySig(emotions=["comfort"], intensity=3, ts=now, status="finished")] * 4
-        + [S.EntrySig(emotions=["devastation"], intensity=10, ts=now, status="finished")] * 2
+        + [S.EntrySig(emotions=["grief"], intensity=10, ts=now, status="finished")] * 2
     )
     plain = S.frequency_vector(sigs, weighted=True)
     weighted = S.frequency_vector(sigs, weighted=True, intensity_weighted=True)
-    assert plain["comfort"] > plain["devastation"]
-    assert weighted["devastation"] > weighted["comfort"]
+    assert plain["comfort"] > plain["grief"]
+    assert weighted["grief"] > weighted["comfort"]
 
 
 def test_no_archetype_carries_a_free_anti():
@@ -194,3 +213,17 @@ def test_no_archetype_carries_a_free_anti():
         "penalize anyone. Pick an emotion the type's own readers might plausibly "
         "tag (the thing they read to get away from), not one nobody tags."
     )
+
+
+def test_every_archetype_wins_a_fair_share_of_a_correlated_population():
+    """Stage 3 checkpoint, kept as a guard: with the calibrated baseline, every
+    type takes a real share of readers. A type nobody can win is dead weight in
+    the table (it was 3.6% for the Emotional Archaeologist before it stopped
+    sharing catharsis with the Grief Romantic)."""
+    wins: Counter = Counter()
+    readers = list(_correlated_readers(n=4000, seed=7))
+    for vec in readers:
+        wins[score_archetype(vec)[0]] += 1
+    fair = 1 / len(PERSONALITY_TYPES)
+    low = min((wins[t["id"]] / len(readers), t["id"]) for t in PERSONALITY_TYPES)
+    assert low[0] >= 0.35 * fair, f"{low[1]} wins only {low[0]:.1%} of readers"

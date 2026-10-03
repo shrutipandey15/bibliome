@@ -30,30 +30,42 @@ from app.services.dna_signals import (
     recency_weight,
     score_archetype,
 )
-from app.utils.emotions import EMOTIONS, FAMILY_LOST
+from app.utils.emotions import EMOTIONS
 
 FAMILY = {e["slug"]: e["family"] for e in EMOTIONS}
 IDS = [t["id"] for t in PERSONALITY_TYPES]
 FAIR = 1.0 / len(IDS)
-LOWER, UPPER = 0.06, 0.20
+# The band was 6%-20% for 8 types (fair share 12.5%): 0.48x-1.6x of fair. It
+# scales with the type count so 11 types are held to the same relative standard.
+LOWER, UPPER = 0.48 * FAIR, 1.6 * FAIR
 
 # What a real book actually makes you feel, together. Tags inside one of these
 # bundles are correlated by construction — which is the whole point, because the
 # scorer is a linear sum over marginal frequencies and therefore silently rewards
 # archetypes whose three primaries co-occur.
 BOOK_BUNDLES: dict[str, list[str]] = {
-    "romantasy_dark":   ["desire", "dread", "devastation", "rage", "awe"],
-    "romantasy_soft":   ["desire", "longing", "joy", "awe"],
-    "grief_litfic":     ["grief", "devastation", "catharsis", "tenderness"],
-    "cozy":             ["comfort", "tenderness", "joy", "nostalgia"],
-    "thriller":         ["dread", "rage", "awe"],
-    "quiet_litfic":     ["recognition", "tenderness", "longing", "awe"],
-    "memoir":           ["recognition", "grief", "catharsis", "nostalgia"],
-    "comic_novel":      ["amusement", "joy", "recognition"],
-    "epic_fantasy":     ["awe", "dread", "devastation", "longing"],
-    "sad_romance":      ["longing", "grief", "desire", "devastation"],
+    "romantasy_dark":   ["desire", "conflicted", "awe", "shock", "thrill"],
+    "romantasy_soft":   ["swoon", "awe", "joy", "attachment"],
+    "romcom":           ["swoon", "amusement", "joy"],
+    "dark_romance":     ["desire", "conflicted", "rage", "dread"],
+    "angsty_romance":   ["longing", "desire", "grief", "attachment"],
+    "grief_litfic":     ["grief", "catharsis", "haunted", "beauty"],
+    "quiet_litfic":     ["recognition", "beauty", "nostalgia", "longing"],
+    "memoir":           ["recognition", "catharsis", "hope", "insight"],
+    "cozy":             ["comfort", "attachment", "joy", "hope"],
+    "comic_novel":      ["amusement", "joy", "insight"],
+    "satire":           ["amusement", "rage", "insight", "shock"],
+    "thriller":         ["thrill", "dread", "shock"],
+    "horror":           ["dread", "haunted", "shock", "thrill"],
+    "epic_fantasy":     ["awe", "thrill", "attachment", "grief"],
+    "scifi_ideas":      ["awe", "insight", "dread"],
+    "pop_nonfiction":   ["insight", "awe", "amusement"],
+    "literary_classic": ["beauty", "insight", "recognition", "grief"],
+    "ya_coming_of_age": ["nostalgia", "attachment", "hope", "joy"],
+    "injustice_novel":  ["rage", "grief", "catharsis", "insight"],
 }
-LOST_ME = [s for s in _ALL_SLUGS if FAMILY[s] == FAMILY_LOST]
+# v3 retired the "it lost me" tags; they no longer enter any vector.
+LOST_ME: list[str] = []
 
 
 def _norm(counts: Counter) -> dict[str, float]:
@@ -103,7 +115,7 @@ def tie_rate() -> None:
 
 def uniform_reader() -> None:
     """The most average reader possible. Should not be a 5-way tie."""
-    exp = [s for s in _ALL_SLUGS if FAMILY[s] != FAMILY_LOST]
+    exp = list(_ALL_SLUGS)
     best, scores, margin = score_archetype(_norm(Counter(dict.fromkeys(exp, 1))))
     print("\nTHE PERFECTLY BALANCED READER (equal share of all 14 experiential tags)")
     print("-" * 70)
@@ -135,7 +147,7 @@ def leverage() -> None:
 def independent_population(n_readers: int = 20_000, seed: int = 21) -> dict[str, float]:
     """The model the P1-5 fix was validated against: tags drawn independently."""
     random.seed(seed)
-    exp = [s for s in _ALL_SLUGS if FAMILY[s] != FAMILY_LOST]
+    exp = list(_ALL_SLUGS)
     wins: Counter = Counter()
     for _ in range(n_readers):
         weights = [random.gammavariate(4, 1) for _ in exp]
@@ -161,7 +173,7 @@ def correlated_population(n_readers: int = 20_000, seed: int = 5) -> dict[str, f
             tags = [s for s in BOOK_BUNDLES[random.choices(keys, weights=taste)[0]]
                     if random.random() < 0.75]
             if random.random() < 0.07:
-                tags.append(random.choice(LOST_ME))
+                tags.append(random.choice(LOST_ME)) if LOST_ME else None
             if not tags:
                 continue
             for slug in tags:            # one entry, one vote — matches frequency_vector
@@ -278,7 +290,7 @@ def _drift_shelf(now: datetime, keep: float = 0.75) -> list[EntrySig]:
         tags = [s for s in BOOK_BUNDLES[random.choices(keys, weights=taste)[0]]
                 if random.random() < keep]
         if random.random() < 0.07:
-            tags.append(random.choice(LOST_ME))
+            tags.append(random.choice(LOST_ME)) if LOST_ME else None
         if not tags:
             continue
         sigs.append(EntrySig(
@@ -423,7 +435,7 @@ def _labelled_gaps(n_readers: int, seed: int, keep: float) -> list[float]:
             tags = [s for s in BOOK_BUNDLES[random.choices(keys, weights=taste)[0]]
                     if random.random() < keep]
             if random.random() < 0.07:
-                tags.append(random.choice(LOST_ME))
+                tags.append(random.choice(LOST_ME)) if LOST_ME else None
             if not tags:
                 continue
             for slug in tags:

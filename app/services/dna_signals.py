@@ -19,8 +19,8 @@ from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-from app.services.dna_engine import PERSONALITY_TYPES
-from app.utils.emotions import EMOTIONS, VALID_SLUGS, canonicalize
+from app.services.dna_engine import DISCERNING_READER, PERSONALITY_TYPES
+from app.utils.emotions import EMOTIONS, LEGACY_VERDICT_MAP, VALID_SLUGS, canonicalize
 
 # ── Tunable constants (Part 4 / §11) ──
 HALF_LIFE_DAYS = 120          # a book's emotional weight halves every ~4 months
@@ -42,7 +42,12 @@ HALF_LIFE_DAYS = 120          # a book's emotional weight halves every ~4 months
 # tag-count spread), but the pick that restores the pre-patch rate sits at
 # 0.175-0.185 across every spread and seed tried. Re-run that probe before
 # changing this.
-DRIFT_SNAPSHOT_THRESHOLD = 0.18
+#
+# v3 (21 feelings): re-run on the v3 bundles, the snapshot-shape picks span
+# 0.155-0.175 (0.165 at the default keep=0.75 and on both extra seeds). More
+# dimensions spread each reader thinner, so the same real change moves `drift`
+# less; left at 0.18, genuine shifts would go unannounced.
+DRIFT_SNAPSHOT_THRESHOLD = 0.165
 MONTHLY_CADENCE_DAYS = 30
 MIN_BOOKS_FOR_DNA = 5
 # Below this many books carrying a tag, its average intensity is one reader's mood
@@ -96,6 +101,10 @@ class EntrySig:
     # WHY a book was put down, which is a far stronger sentence than naming the
     # emotion that correlates with stopping.
     dnf_reason: str | None = None
+    # loved | liked | mixed | not_for_me, or None. Old "read again" answers are
+    # mapped forward on the way in (yes→liked, no→not_for_me, not_sure→mixed).
+    # Feeds the Discerning Reader, which is assigned from verdicts, not feelings.
+    verdict: str | None = None
 
 
 def _canon_list(raw) -> list[str]:
@@ -131,6 +140,7 @@ def entry_sig(raw: dict) -> EntrySig:
         arc_end=canonicalize(raw["arc_end"]) if raw.get("arc_end") else None,
         source=raw.get("source") or "book",
         dnf_reason=raw.get("dnf_reason"),
+        verdict=LEGACY_VERDICT_MAP.get(raw.get("verdict"), raw.get("verdict")),
     )
 
 
@@ -527,7 +537,7 @@ def seasonality(sigs: list[EntrySig]) -> dict | None:
 
 # ── Archetype from the recency-weighted vector (B7.5) ──
 
-_TYPES_BY_ID = {t["id"]: t for t in PERSONALITY_TYPES}
+_TYPES_BY_ID = {t["id"]: t for t in [*PERSONALITY_TYPES, DISCERNING_READER]}
 
 # The population's mean emotion vector. Every archetype's score is measured as
 # DEVIATION from what this baseline would already give it, because the raw sum is
@@ -546,19 +556,35 @@ _TYPES_BY_ID = {t["id"]: t for t in PERSONALITY_TYPES}
 # scripts/refresh_archetype_baseline.py). Until then this prior is a stand-in, and
 # a wrong baseline is still strictly better than none: centering on the wrong
 # numbers costs a few points of fairness, centering on nothing costs 10x.
+#
+# v3 vocabulary (21 feelings). No real reader has tagged the nine new feelings yet,
+# so this is the mean of a simulated 12,000-reader population built from 19 kinds
+# of book (Stage 3 of the Emotion & DNA rework). It is PROVISIONAL, and Stage 3
+# measured how much that matters: with the baseline ~10% off, the smallest type
+# fell to ~3% of readers and the largest rose to ~17%. Hence BASELINE_PROVISIONAL
+# below. Replace it with real readers as soon as the gate allows:
+#   python -m scripts.refresh_archetype_baseline --since <v3 launch date> --write
 BASELINE_VECTOR: dict[str, float] = {
-    "awe": 0.126, "longing": 0.099, "devastation": 0.094, "joy": 0.089,
-    "recognition": 0.081, "tenderness": 0.081, "dread": 0.077, "grief": 0.074,
-    "desire": 0.069, "rage": 0.052, "catharsis": 0.049, "amusement": 0.032,
-    "comfort": 0.032, "nostalgia": 0.024, "boredom": 0.005, "revulsion": 0.005,
-    "confusion": 0.005, "indifference": 0.005,
+    "insight": 0.1, "awe": 0.076, "joy": 0.074, "amusement": 0.066,
+    "attachment": 0.063, "grief": 0.062, "dread": 0.059, "shock": 0.05,
+    "thrill": 0.047, "catharsis": 0.043, "recognition": 0.043, "rage": 0.043,
+    "desire": 0.042, "beauty": 0.039, "hope": 0.039, "swoon": 0.032,
+    "nostalgia": 0.029, "haunted": 0.029, "conflicted": 0.028, "longing": 0.024,
+    "comfort": 0.015,
 }
+
+# True while BASELINE_VECTOR is an estimate rather than a measurement of real
+# readers. While it is, every labelled reader is also shown their runner-up ("you
+# sit between X and Y"): a guessed baseline can tilt the leader, and naming both is
+# honest where naming one would overclaim. `refresh_archetype_baseline --write`
+# sets this to False when it writes a baseline measured from real readers.
+BASELINE_PROVISIONAL = True
 
 # NO FREE_ANTI (DNA2). Every archetype anti_emotion must sit at or above this rate
 # in BASELINE_VECTOR. Below it, the centered anti term 0.5*(pop_rate - reader_rate)
-# is ~0 for everyone and the slot is dead weight. 0.03 admits every experiential
-# emotion (amusement/comfort are the lowest live pair at 0.032) and excludes only
-# nostalgia (0.024) and the four "it lost me" disengagement tags (0.005).
+# is ~0 for everyone and the slot is dead weight. Every anti in the v3 table clears
+# 0.03 on the current baseline; the lowest in use is swoon (0.032). Rarer feelings
+# (comfort, longing, conflicted, nostalgia, haunted) are anchors only, never antis.
 # Enforced by tests/test_dna_archetype_calibration.py::test_no_archetype_carries_a_free_anti.
 ANTI_FLOOR_RATE = 0.03
 
@@ -581,9 +607,9 @@ ANTI_FLOOR_RATE = 0.03
 # BASELINE_VECTOR — both move the gap distribution underneath this number.
 HEDGE_ARCHETYPE_GAP = 0.012
 
-# Emotions that anchor at least one archetype. A reader whose entire vector sits
-# outside this set (only "it lost me" tags) has told us what bored them and nothing
-# about who they are — that is an abstention, not a score of zero.
+# Emotions that anchor at least one archetype. In v3 every feeling anchors one, so
+# this only rules out a vector with no feelings at all (e.g. only retired tags,
+# which canonicalize to nothing) — an abstention, not a score of zero.
 _ANCHOR_SLUGS = frozenset(
     e for t in PERSONALITY_TYPES for e in t["primary_emotions"]
 )
@@ -643,6 +669,59 @@ def score_archetype(
     return best, scores, round(top - second, 4)
 
 
+# ── The Discerning Reader: assigned from verdicts, not feelings ──
+#
+# A reader for whom most books don't land has told us something true and specific
+# about themselves, and scoring their feelings would bury it: the few books they do
+# tag decide a feeling archetype that describes a reader they mostly aren't.
+# Stage 3 tested this rule on hand-written discerning shelves (4 of 4 caught) and
+# on a simulated population with ordinary verdict mixes (0% false positives).
+DISCERNING_MIN_BOOKS = 8     # books carrying a verdict or a put-down
+DISCERNING_SHARE = 0.6       # share that didn't land; Mixed counts half
+
+
+def discerning_share(sigs: list[EntrySig]) -> tuple[float, int]:
+    """(share of books that didn't land, number of books with a judgement).
+
+    Books only. A book counts when it carries a verdict or was given up on
+    (status ``abandoned``); ``paused`` is not a judgement and is left out.
+    """
+    judged = [s for s in sigs if s.source == "book" and (s.verdict or s.status == "abandoned")]
+    if not judged:
+        return 0.0, 0
+    missed = sum(
+        1.0 if (s.status == "abandoned" or s.verdict == "not_for_me")
+        else 0.5 if s.verdict == "mixed" else 0.0
+        for s in judged
+    )
+    return missed / len(judged), len(judged)
+
+
+def is_discerning(sigs: list[EntrySig]) -> bool:
+    share, n = discerning_share(sigs)
+    return n >= DISCERNING_MIN_BOOKS and share >= DISCERNING_SHARE
+
+
+def classify_reader(
+    book_sigs: list[EntrySig], current_freq: dict[str, float],
+) -> tuple[str | None, dict[str, float], float]:
+    """The single archetype authority: the Discerning Reader gate, then the
+    feeling scorer. Same return shape as ``score_archetype``; ``scores`` are
+    always the feeling scores so callers can still show a feeling runner-up where
+    that makes sense (it doesn't for the Discerning Reader — callers check)."""
+    best, scores, gap = score_archetype(current_freq)
+    if is_discerning(book_sigs):
+        return DISCERNING_READER["id"], scores, 1.0
+    return best, scores, gap
+
+
+def show_runner_up(archetype_id: str | None, gap: float) -> bool:
+    """Whether to name the runner-up beside the label ("between X and Y")."""
+    if not archetype_id or archetype_id == DISCERNING_READER["id"]:
+        return False
+    return BASELINE_PROVISIONAL or gap < HEDGE_ARCHETYPE_GAP
+
+
 def basis_for(archetype_id: str, sigs: list[EntrySig]) -> dict:
     """The evidence line under the label. Counts only — no adjectives.
 
@@ -656,6 +735,20 @@ def basis_for(archetype_id: str, sigs: list[EntrySig]) -> dict:
     """
     t = _TYPES_BY_ID[archetype_id]
     total = len(sigs)
+    if archetype_id == DISCERNING_READER["id"]:
+        share, judged = discerning_share(sigs)
+        tally = {}
+        for s in sigs:
+            key = "gave_up" if s.status == "abandoned" else s.verdict
+            if key:
+                tally[key] = tally.get(key, 0) + 1
+        return {
+            "counts": [],
+            "verdicts": [{"verdict": k, "books": v, "of": judged}
+                         for k, v in sorted(tally.items(), key=lambda kv: -kv[1])],
+            "top_rated_emotions": [],
+            "top_rated_n": 0,
+        }
     rows = []
     for slug in t["primary_emotions"]:
         n = sum(1 for s in sigs if slug in s.emotions)

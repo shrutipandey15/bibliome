@@ -18,6 +18,12 @@ from app.services import dna_signals as sig
 from app.services.dna_signals import GATES, MIN_BOOKS_FOR_DNA
 from app.utils.emotions import EMOTIONS_BY_SLUG
 
+# Below this tagged-book share a feeling is "rare". Set at 0.9 of an even share of
+# the vocabulary, as the old flat 5% was for 18 emotions (5.6% even). With 21
+# feelings an even spread is 4.8%, so a flat 5% would call a perfectly balanced
+# reader's every feeling rare.
+RARE_SHARE = 0.9 / len(EMOTIONS_BY_SLUG)
+
 # What each locked insight is actually counting, in plain words (B7.6).
 #
 # NONE of these gates count titles on the shelf — they count the books that could
@@ -651,7 +657,7 @@ def build_dna(
     for slug in sig._ALL_SLUGS:
         n = sum(1 for s in tagged if slug in s.emotions)
         book_share[slug] = n / len(tagged)
-    rare = sorted(((s, v) for s, v in book_share.items() if 0 < v < 0.05), key=lambda kv: kv[1])
+    rare = sorted(((s, v) for s, v in book_share.items() if 0 < v < RARE_SHARE), key=lambda kv: kv[1])
 
     pairs = sig.co_occurrence(sigs)
     top_pair = pairs.most_common(1)[0] if pairs else None
@@ -713,7 +719,7 @@ def build_dna(
     }
 
     unlocked, locked, earned = generate_insights(ctx, limit=insight_limit)
-    archetype_id, scores, gap = sig.score_archetype(archetype_vec)
+    archetype_id, scores, gap = sig.classify_reader(sigs, archetype_vec)
 
     return {
         "enough": True,
@@ -740,9 +746,12 @@ def build_dna(
         "margin": gap,
         # When the leader barely clears the field, say so rather than pretending
         # the label was decisive.
+        # While the baseline is provisional every label is hedged (see
+        # dna_signals.BASELINE_PROVISIONAL); never for the Discerning Reader,
+        # whose runner-up would be a feeling type it was chosen over.
         "runner_up": (
             sig.archetype_dict(sorted(scores, key=scores.get, reverse=True)[1])["name"]
-            if archetype_id and gap < sig.HEDGE_ARCHETYPE_GAP else None
+            if sig.show_runner_up(archetype_id, gap) else None
         ),
         # The receipt. Books only — `sigs`, not `vector_sigs` — because this line
         # is rendered on public surfaces and counts things it calls "your books".

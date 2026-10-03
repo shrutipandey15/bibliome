@@ -92,15 +92,15 @@ def test_rare_share_denominator_is_tagged_books():
     `rare` is the only variant its category can pick — otherwise the deterministic
     rotation picks `never` and this never exercises the denominator at all.
 
-    Each of the 20 tagged books carries one distinct emotion, so every emotion sits
-    at exactly 1/20 = 5%, just outside the `0 < v < 0.05` rare band. Divided by the
-    raw shelf of 30 instead, the same books read as 3.3% and every one of them is
-    reported as rare. The raw denominator manufactures rarity out of untagged
-    imports.
+    Each of the 23 tagged books carries one distinct feeling, so every feeling sits
+    at 1/23 = 4.35%, just outside the rare band (0.9 of an even share: 4.29% for 21
+    feelings). Divided by the raw shelf of 33 instead, the same books read as 3.0%
+    and every one of them is reported as rare. The raw denominator manufactures
+    rarity out of untagged imports.
     """
     slugs = [e["slug"] for e in EMOTIONS]
-    sigs = [_sig([slug], 10 + i) for i, slug in enumerate(slugs)]   # 18 tagged
-    sigs += [_sig(["joy"], 40), _sig(["grief"], 41)]                # 20 tagged
+    sigs = [_sig([slug], 10 + i) for i, slug in enumerate(slugs)]   # 21 tagged
+    sigs += [_sig(["joy"], 40), _sig(["grief"], 41)]                # 23 tagged
     sigs += [_sig([], 200 + i) for i in range(10)]                  # untagged padding
     dna = _dna(sigs)
     rare_texts = [i["text"] for i in dna["insights"] if i["variant"] == "rare"]
@@ -176,22 +176,22 @@ def test_reason_variant_replaces_the_weaker_emotion_only_sentence():
 # ── Blind spots are ranked by surprise, not by declaration order ──
 
 def test_blind_spot_names_the_most_surprising_absence_not_the_first_slug():
-    """A reader missing devastation, nostalgia and awe should hear about awe.
+    """A reader missing grief, nostalgia and awe should hear about awe.
 
-    Awe is the most commonly tagged emotion in BASELINE_VECTOR and nostalgia the
-    rarest, so awe's absence is the finding. Devastation merely happens to be
-    first in EMOTIONS, which is what the old implementation reported.
+    Of the three, awe is the most commonly tagged in BASELINE_VECTOR and nostalgia
+    the rarest, so awe's absence is the finding. Grief merely happens to be first
+    in EMOTIONS, which is what the old implementation reported.
     """
     from app.services.dna_signals import BASELINE_VECTOR, blind_spots
     present = [e["slug"] for e in EMOTIONS
-               if e["slug"] not in {"devastation", "nostalgia", "awe"}]
+               if e["slug"] not in {"grief", "nostalgia", "awe"}]
     sigs = [_sig([slug], 10 + i) for i, slug in enumerate(present)]
     ranked = blind_spots(sigs)
 
-    assert set(ranked) == {"devastation", "nostalgia", "awe"}
+    assert set(ranked) == {"grief", "nostalgia", "awe"}
     assert ranked[0] == "awe"
     assert ranked[-1] == "nostalgia"
-    assert BASELINE_VECTOR["awe"] > BASELINE_VECTOR["devastation"] > BASELINE_VECTOR["nostalgia"]
+    assert BASELINE_VECTOR["awe"] > BASELINE_VECTOR["grief"] > BASELINE_VECTOR["nostalgia"]
 
 
 def test_blind_spot_order_survives_a_permutation_of_EMOTIONS(monkeypatch):

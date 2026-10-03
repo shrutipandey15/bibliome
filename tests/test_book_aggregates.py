@@ -70,8 +70,8 @@ def test_build_profile_counts_readers_not_entries():
     """One reader logging a re-read is one confirmation, not two."""
     reader = uuid.uuid4()
     rows = [
-        (reader, "finished", "yes", "grief", 8),
-        (reader, "reread", "yes", "grief", 6),
+        (reader, "finished", "liked", "grief", 8),
+        (reader, "reread", "liked", "grief", 6),
     ]
     profile = build_profile(rows)
     assert profile["reader_count"] == 1
@@ -84,17 +84,17 @@ def test_build_profile_counts_readers_not_entries():
 def test_build_profile_fractions_and_dnf():
     r1, r2, r3, r4 = (uuid.uuid4() for _ in range(4))
     rows = [
-        (r1, "finished", "yes", "devastation", 9),
-        (r2, "finished", "yes", "devastation", 7),
+        (r1, "finished", "liked", "haunted", 9),
+        (r2, "finished", "liked", "haunted", 7),
         (r3, "finished", "no", "comfort", 5),
         (r4, "abandoned", "no", None, None),
     ]
     profile = build_profile(rows)
     assert profile["reader_count"] == 4
-    assert profile["emotion_profile"]["devastation"]["count"] == 2
-    assert profile["emotion_profile"]["devastation"]["tagged_by_fraction"] == 0.5
-    assert profile["emotion_profile"]["devastation"]["mean_strength"] == 8.0
-    assert profile["verdict_profile"]["yes"] == 0.5
+    assert profile["emotion_profile"]["haunted"]["count"] == 2
+    assert profile["emotion_profile"]["haunted"]["tagged_by_fraction"] == 0.5
+    assert profile["emotion_profile"]["haunted"]["mean_strength"] == 8.0
+    assert profile["verdict_profile"]["liked"] == 0.5
     assert profile["dnf_rate"] == 0.25
     # An entry with no emotions still counts as a reader.
     assert "comfort" in profile["emotion_profile"]
@@ -102,15 +102,17 @@ def test_build_profile_fractions_and_dnf():
 
 def test_build_profile_canonicalizes_legacy_slugs():
     reader = uuid.uuid4()
-    # "chaos" was retired to "confusion"; "made_up" has no target and is dropped.
+    # "devastation" merged into "grief"; "boredom" was retired to the verdict
+    # step; "made_up" has no target. Only the merge survives into the profile.
     rows = [
-        (reader, "finished", None, "chaos", 6),
+        (reader, "finished", None, "devastation", 6),
+        (reader, "finished", None, "boredom", 6),
         (reader, "finished", None, "made_up", 6),
     ]
     profile = build_profile(rows)
-    assert "confusion" in profile["emotion_profile"]
-    assert "chaos" not in profile["emotion_profile"]
-    assert "made_up" not in profile["emotion_profile"]
+    assert "grief" in profile["emotion_profile"]
+    for gone in ("devastation", "boredom", "made_up"):
+        assert gone not in profile["emotion_profile"]
 
 
 def test_build_profile_empty():
@@ -121,7 +123,7 @@ async def test_aggregate_builds_and_is_visible_to_its_own_reader(client):
     headers = await _auth(client, "agg1@example.com", "aggregate1")
     entry = await _entry(
         client, headers, title="The Vegetarian", author="Han Kang",
-        emotions=[{"emotion_id": "devastation", "strength": 9}],
+        emotions=[{"emotion_id": "haunted", "strength": 9}],
     )
     r = await client.get(f"/api/books/{entry['book_id']}/profile", headers=headers)
     assert r.status_code == 200, r.text
@@ -129,7 +131,7 @@ async def test_aggregate_builds_and_is_visible_to_its_own_reader(client):
     # Only one reader, but it's this reader's own book — always visible to them.
     assert body["reader_count"] == 1
     assert body["confidence"] == "emerging"
-    assert body["emotion_profile"]["devastation"]["mean_strength"] == 9.0
+    assert body["emotion_profile"]["haunted"]["mean_strength"] == 9.0
 
 
 # ── B8.6: privacy floor ───────────────────────────────────────────────────────

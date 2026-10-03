@@ -28,10 +28,11 @@ def _canonical_emotions(emotions) -> list[str]:
             out.append(canon)
     return out
 
-# Maps the engine's internal personality ids → the 8 canonical "bible" slugs.
-# The engine currently recognises 8 types; this mapping assigns each one a stable
-# bible slug. Some matches are judgment calls — update if the product team
-# clarifies the intent of a specific mapping.
+# Maps the engine's internal personality ids → the public "bible" slugs stored on
+# DNA snapshots. The eight original types keep the slugs they shipped with so
+# existing snapshots stay continuous, with one fix: `awe_chaser` moves to the
+# World-Diver, the type that actually anchors on awe (the Emotional Archaeologist
+# held no awe at all, so "The Awe Chaser" could never be triggered by wonder).
 DNA_TYPE_SLUG_MAP: dict[str, str] = {
     "grief_romantic":          "grief_romantic",
     "control_intellectual":    "chaos_cartographer",
@@ -40,13 +41,14 @@ DNA_TYPE_SLUG_MAP: dict[str, str] = {
     "midnight_arsonist":       "rage_archivist",
     "quiet_witness":           "tender_witness",
     "obsessive_romantic":      "two_am_scholar",
-    "emotional_archaeologist": "awe_chaser",
+    "emotional_archaeologist": "emotional_archaeologist",
+    "world_diver":             "awe_chaser",
+    "adrenaline_seeker":       "adrenaline_seeker",
+    "sunshine_romantic":       "sunshine_romantic",
+    "discerning_reader":       "discerning_reader",
 }
 
-BIBLE_DNA_SLUGS = frozenset({
-    "grief_romantic", "chaos_cartographer", "soft_masochist", "awe_chaser",
-    "comfort_architect", "rage_archivist", "tender_witness", "two_am_scholar",
-})
+BIBLE_DNA_SLUGS = frozenset(DNA_TYPE_SLUG_MAP.values())
 
 
 def dna_type_slug_for(engine_id: str | None) -> str | None:
@@ -55,40 +57,36 @@ def dna_type_slug_for(engine_id: str | None) -> str | None:
     return DNA_TYPE_SLUG_MAP.get(engine_id)
 
 
-# Personality "fingerprints" over the canonical 18-emotion vocabulary.
+# Personality "fingerprints" over the canonical 21-feeling vocabulary (v3).
 #
 # INVARIANT: every slug in primary_emotions / anti_emotions MUST be a canonical
 # VALID_SLUGS value (see tests/test_dna_engine.py::test_personality_slugs_are_canonical).
-# Fingerprints were migrated to the 18-emotion vocabulary:
-#   wit→amusement, chaos→confusion, two_am→longing (the old removed slugs).
-# Archetypes are anchored only on *experiential* emotions. Across the 8 types,
-# every experiential emotion is used as a primary at least once
+# Every one of the 21 feelings anchors at least one type
 # (test_every_experiential_emotion_is_used_somewhere).
 #
-# Three further invariants, all added after simulation found them violated:
-#   - No two types may share more than ONE primary (P1-5). Sharing two makes a tie
-#     that list order silently resolves, which is not a decision anyone made.
-#   - Every type carries exactly TWO anti_emotions (P1-5). A third is a permanent
-#     handicap that shows up as that type under-winning at population scale.
-#   - NO FREE_ANTI (DNA2). Every anti_emotion must clear ANTI_FLOOR_RATE in
-#     BASELINE_VECTOR. Under score centering an anti contributes
-#     0.5 * (population_rate - reader_rate); an anti nobody tags (the "it lost me"
-#     family sits at 0.005) makes that term ~0 for everyone, so the type is
-#     silently measured on ONE axis of avoidance while others use two. The
-#     disengagement tag still tells against a reader without the anti term —
-#     frequency_vector normalises over the whole vocabulary, so tagging boredom
-#     dilutes every other share. See test_no_archetype_carries_a_free_anti and
-#     the memory archetype-centering-anti-emotion-trap.
+# Rebuilt in Stage 3 of the Emotion & DNA rework. Tested before shipping against
+# 58 reading histories written blind from the descriptions below (89.7% labelled
+# as expected: clear readers 11/11, messy 21/22, between-two 9/10) and a 12,000-
+# reader simulated population with a calibrated baseline (every type 4.6–13.1%).
+#
+# The invariants all still hold, and still matter:
+#   - No two types share more than ONE primary (P1-5).
+#   - Every type carries exactly TWO anti_emotions (P1-5).
+#   - NO FREE_ANTI (DNA2): every anti must clear ANTI_FLOOR_RATE in BASELINE_VECTOR.
+#     `comfort` was the anti for four types in the first draft and failed this;
+#     the antis below are spread across well-tagged feelings instead.
+#
+# The Discerning Reader is not in this list. It is assigned from verdicts, not
+# feelings (see dna_signals.classify_reader), so it takes no part in the feeling
+# fingerprints or the fairness maths.
 PERSONALITY_TYPES = [
     {
         "id": "grief_romantic",
         "name": "The Grief Romantic",
         "description": "You seek books that break your heart because feeling deeply is how you know you're alive. Loss isn't your enemy — numbness is.",
-        "primary_emotions": ["grief", "catharsis", "devastation"],
-        # DNA3: amusement (0.032) barely fired. `joy` is the sharper anti — "you
-        # avoid books with neat happy endings" — and a stronger discriminator that
-        # keeps this common-emotion type off the top of the band.
-        "anti_emotions": ["comfort", "joy"],  # they reject safe comfort and the happy ending
+        "primary_emotions": ["grief", "catharsis", "haunted"],
+        # Bittersweet, never breezy: joy and laughter are what this reader passes on.
+        "anti_emotions": ["joy", "amusement"],
         "blind_spots": ["You avoid books with neat happy endings", "You mistake emotional pain for depth"],
         "comfort_tropes": ["Unrequited love", "Beautiful suffering", "Bittersweet endings"],
         "color": "#3A5A6B",
@@ -98,10 +96,7 @@ PERSONALITY_TYPES = [
         "id": "control_intellectual",
         "name": "The Control-Seeking Intellectual",
         "description": "You read to master what unsettles you. Understanding is your armor, and every book is a new piece of territory mapped.",
-        "primary_emotions": ["recognition", "dread", "awe"],
-        # DNA2: `confusion` (baseline 0.005) was a FREE_ANTI — its penalty never
-        # fired. `grief` is what this reader actually keeps at arm's length:
-        # "abandon books that make you vulnerable". Both antis now clear the floor.
+        "primary_emotions": ["insight", "dread", "awe"],
         "anti_emotions": ["grief", "catharsis"],  # they resist vulnerability, and being emotionally undone
         "blind_spots": ["You intellectualize emotions instead of feeling them", "You abandon books that make you vulnerable"],
         "comfort_tropes": ["Unreliable narrators", "Philosophical fiction", "Systems and structures"],
@@ -111,18 +106,13 @@ PERSONALITY_TYPES = [
     {
         "id": "soft_masochist",
         "name": "The Soft Masochist",
-        # Re-anchored twice. P1-5 moved it off grief+devastation (two of The Grief
-        # Romantic's primaries) onto rage+dread+devastation. DNA3 moves it off
-        # `devastation` too: sharing that common tag with Grief Romantic AND
-        # holding rage+dread made this the catch-all for any dark shelf — it was
-        # over-assigned at population scale. `desire` narrows it to the reader who
-        # is *drawn to* the book that comes at them: dark romance, enemies with
-        # teeth, the pull toward what hurts. Now rage+dread+desire.
+        # `conflicted` ("I shouldn't love this but I do") is this reader in one
+        # phrase: drawn to the book that comes at them, and aware of it.
         "description": "You choose pain on purpose. Not sorrow — teeth. You're drawn to the book that comes at you over the one that holds you.",
-        "primary_emotions": ["rage", "dread", "desire"],
-        "anti_emotions": ["comfort", "joy"],
+        "primary_emotions": ["rage", "conflicted", "desire"],
+        "anti_emotions": ["joy", "hope"],
         "blind_spots": ["You equate suffering with authenticity", "You distrust books that feel too safe"],
-        "comfort_tropes": ["Tragic love", "Moral ambiguity", "Devastating plot twists"],
+        "comfort_tropes": ["Dark romance", "Moral ambiguity", "Villains you shouldn't root for"],
         "color": "#6B3A5D",
         "glyph": "◆",
     },
@@ -130,17 +120,8 @@ PERSONALITY_TYPES = [
         "id": "comfort_architect",
         "name": "The Comfort Architect",
         "description": "You build emotional safety through stories. Your bookshelf isn't a collection — it's a home you can always return to.",
-        # DNA3: was comfort+longing+tenderness, which shared TWO primaries with
-        # The Obsessive Romantic (comfort, longing) — an invariant violation and a
-        # permanent hedge-tie. `longing` never fit a type built on *safety*, and
-        # `tenderness` belongs to The Quiet Witness. This is the feel-good reader:
-        # comfort + joy + amusement — the cozy, happy, gently funny shelf. A
-        # genuinely distinct cluster from the pain types, and it leaves tenderness
-        # and nostalgia for The Quiet Witness to own outright.
-        "primary_emotions": ["comfort", "joy", "amusement"],
-        # Two, not three (P1-5). Carrying a third penalty made this the only type
-        # paying an extra subtraction on every scoring pass; the handicap was in
-        # the data, not in the readers.
+        # Found family and the book that leaves you hopeful: comfort + attachment + hope.
+        "primary_emotions": ["comfort", "attachment", "hope"],
         "anti_emotions": ["rage", "dread"],
         "blind_spots": ["You avoid books that might destabilize you", "You re-read instead of risking new things"],
         "comfort_tropes": ["Found family", "Slow-burn romance", "Cozy settings"],
@@ -151,12 +132,10 @@ PERSONALITY_TYPES = [
         "id": "midnight_arsonist",
         "name": "The Midnight Arsonist",
         "description": "You read like you're setting fire to your own beliefs. Comfort zones are for people who haven't found the right book yet.",
-        "primary_emotions": ["amusement", "awe", "rage"],
-        # DNA2: `boredom` (0.005) was a FREE_ANTI. `tenderness` is the register
-        # this reader dismisses — "you dismiss gentle books as boring".
-        "anti_emotions": ["comfort", "tenderness"],
+        "primary_emotions": ["amusement", "rage", "insight"],
+        "anti_emotions": ["attachment", "swoon"],  # dismisses the gentle and the sweet
         "blind_spots": ["You conflate discomfort with growth", "You dismiss gentle books as boring"],
-        "comfort_tropes": ["Boundary-pushing fiction", "Experimental structure", "Provocative themes"],
+        "comfort_tropes": ["Boundary-pushing fiction", "Satire", "Provocative themes"],
         "color": "#C47A3A",
         "glyph": "△",
     },
@@ -164,20 +143,10 @@ PERSONALITY_TYPES = [
         "id": "quiet_witness",
         "name": "The Quiet Witness",
         "description": "You absorb everything and process in silence. Books are your confessional — the only place you don't perform.",
-        # DNA3: was tenderness+awe+nostalgia. `awe` was over-contested (three other
-        # types hold it) and, unanchored elsewhere, made this the confused
-        # under-winner. `recognition` ("how did it know that about me") IS the
-        # confessional: being seen without performing. The Quiet Witness now owns
-        # tenderness, recognition and nostalgia as a tight introspective triple —
-        # no shared-primary tie with anyone.
-        "primary_emotions": ["tenderness", "recognition", "nostalgia"],
-        # DNA2 replaced FREE_ANTI `revulsion`; DNA3 rebalanced the pair. rage+
-        # devastation carried 0.146 of population tag-mass — the biggest free
-        # anti-bonus of any type (see archetype-centering-anti-emotion-trap) and
-        # why this type over-won once it owned a clean triple. dread (the
-        # confrontation it avoids) + amusement (it doesn't read for laughs) =
-        # 0.109, in line with the rest of the table.
-        "anti_emotions": ["dread", "amusement"],
+        # Tenderness merged into comfort, so the introspective triple is now
+        # being seen + memory + the sentence itself.
+        "primary_emotions": ["recognition", "nostalgia", "beauty"],
+        "anti_emotions": ["thrill", "amusement"],  # not here for pace, not here for laughs
         "blind_spots": ["You observe more than you feel", "You use reading to avoid confrontation"],
         "comfort_tropes": ["Introspective narrators", "Literary fiction", "Quiet revelations"],
         "color": "#B8964E",
@@ -187,16 +156,7 @@ PERSONALITY_TYPES = [
         "id": "obsessive_romantic",
         "name": "The Obsessive Romantic",
         "description": "You don't read books — you fall into them. Every story is a love affair, and you don't do casual.",
-        # DNA3: was desire+comfort+longing. `comfort` never fit a type built on
-        # being *consumed* — the obsessive reader isn't soothed, they're wrecked
-        # by how much they cared. `devastation` is "characters you'd die for",
-        # and dropping `comfort` clears the two-primary overlap with The Comfort
-        # Architect. Now desire+longing+devastation.
-        "primary_emotions": ["desire", "longing", "devastation"],
-        # DNA2 replaced FREE_ANTI `indifference`; DNA3 set the pair to
-        # amusement + joy — the light, easy, happy read is exactly the "casual"
-        # this type refuses — and to bring the anti tag-mass (0.121) in line with
-        # the rest of the table.
+        "primary_emotions": ["desire", "longing", "attachment"],
         "anti_emotions": ["amusement", "joy"],  # they cannot do casual
         "blind_spots": ["You abandon books you can't fall in love with", "You chase the high of a new obsession"],
         "comfort_tropes": ["Consuming love stories", "Immersive worlds", "Characters you'd die for"],
@@ -207,23 +167,65 @@ PERSONALITY_TYPES = [
         "id": "emotional_archaeologist",
         "name": "The Emotional Archaeologist",
         "description": "You dig into stories looking for buried parts of yourself. Every book is an excavation site.",
-        # DNA3: was longing+joy+catharsis — and mapped to the public slug
-        # `awe_chaser` while holding no `awe` at all, so "The Awe Chaser" could
-        # never be triggered by wonder. `joy` didn't fit an excavation either.
-        # `awe` (the wonder of what gets uncovered) makes the name true. Now
-        # awe+longing+catharsis.
-        "primary_emotions": ["awe", "longing", "catharsis"],
-        # DNA2 replaced FREE_ANTI `indifference`. DNA3: amusement + comfort
-        # carried only 0.064 of population tag-mass — too small an anti term,
-        # which left this type under-winning. joy (this reader does not dig for
-        # delight) lifts the pair to 0.121, matched to the table.
-        "anti_emotions": ["amusement", "joy"],
+        # Being seen, the ache underneath, and what it teaches you about yourself.
+        # (It shared catharsis with the Grief Romantic in the first draft and stole
+        # grief readers; insight separates the dig from the wound.)
+        "primary_emotions": ["recognition", "longing", "insight"],
+        "anti_emotions": ["amusement", "rage"],
         "blind_spots": ["You over-analyze what you read", "You search for meaning even when there's none"],
         "comfort_tropes": ["Psychological depth", "Identity exploration", "Hidden truths"],
         "color": "#7A5A9B",
         "glyph": "◎",
     },
+    {
+        "id": "world_diver",
+        "name": "The World-Diver",
+        "description": "You read to live somewhere else. Vast worlds, long histories, maps in the front pages — you want to be swallowed whole and come back glowing.",
+        "primary_emotions": ["awe", "thrill", "joy"],
+        "anti_emotions": ["recognition", "grief"],  # not here to be mirrored, not here to mourn
+        "blind_spots": ["You escape into worlds instead of looking at your own", "You skip the quiet books that don't transport you"],
+        "comfort_tropes": ["Epic fantasy", "Deep worldbuilding", "Maps and histories"],
+        "color": "#3A7A8C",
+        "glyph": "✦",
+    },
+    {
+        "id": "adrenaline_seeker",
+        "name": "The Adrenaline Seeker",
+        "description": "You read for the pulse. Twists, fear, the 3am chapter — a book has to grab you by the collar and not let go.",
+        "primary_emotions": ["thrill", "dread", "shock"],
+        "anti_emotions": ["recognition", "beauty"],  # plot over prose, story over self
+        "blind_spots": ["You rush past the quiet parts", "You trust a twist more than a feeling"],
+        "comfort_tropes": ["Thrillers", "Horror", "Twists you didn't see coming"],
+        "color": "#8C3A3A",
+        "glyph": "✶",
+    },
+    {
+        "id": "sunshine_romantic",
+        "name": "The Sunshine Romantic",
+        "description": "You read for the swoon. Banter, butterflies and the happy ending you were promised — you believe in love stories and you're not embarrassed about it.",
+        "primary_emotions": ["swoon", "joy", "amusement"],
+        "anti_emotions": ["grief", "dread"],
+        "blind_spots": ["You bail when a story turns dark", "You read for the ending you already know"],
+        "comfort_tropes": ["Romcoms", "Banter", "Happily ever after"],
+        "color": "#D4876B",
+        "glyph": "☼",
+    },
 ]
+
+# Assigned from verdicts, never from feelings (dna_signals.classify_reader).
+# Shaped like a personality type so every consumer of `archetype_dict` works
+# unchanged; its feeling lists are empty on purpose.
+DISCERNING_READER = {
+    "id": "discerning_reader",
+    "name": "The Discerning Reader",
+    "description": "You have high standards. Most books don't reach you — and when one does, it matters.",
+    "primary_emotions": [],
+    "anti_emotions": [],
+    "blind_spots": ["You decide a book has failed you before it has finished", "You might be reading the wrong shelf, not the wrong books"],
+    "comfort_tropes": ["Books that earn it", "Hidden gems", "Writers who never waste a page"],
+    "color": "#6E6E6E",
+    "glyph": "◌",
+}
 
 
 def _archetype_table_rev() -> str:

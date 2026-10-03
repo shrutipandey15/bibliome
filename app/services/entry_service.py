@@ -103,7 +103,10 @@ async def create_entry(db: AsyncSession, user_id: uuid.UUID, data: EntryCreate) 
         notes=data.notes,
         status=status,
         verdict=data.verdict,
+        # A disappointment reason only belongs to a book that disappointed.
+        verdict_reason=data.verdict_reason if data.verdict in ("mixed", "not_for_me") else None,
         dnf_reason=data.dnf_reason,
+        other_feeling=(data.other_feeling or "").strip() or None,
         # Only an open book carries a progress figure — on a finished one the
         # status already says where you are, and a stale 61% would contradict it.
         progress=data.progress if status in ("reading", "paused") else None,
@@ -225,8 +228,14 @@ async def update_entry(
 
     # Update scalar fields
     update_data = data.model_dump(exclude_unset=True, exclude={"emotions"})
+    if "other_feeling" in update_data:
+        update_data["other_feeling"] = (update_data["other_feeling"] or "").strip() or None
     for field, value in update_data.items():
         setattr(entry, field, value)
+    # A disappointment reason only belongs to a book that disappointed: moving the
+    # verdict back to loved/liked clears it rather than leaving a stale "overhyped".
+    if entry.verdict not in ("mixed", "not_for_me"):
+        entry.verdict_reason = None
 
     # Retitling an entry retargets its book identity, so its emotions move to the
     # right aggregate (B8.1). The caller is responsible for recomputing both the

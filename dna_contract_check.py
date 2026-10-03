@@ -7,7 +7,9 @@ mirrored copies, so a slug/count drift (the class of bug that produced the
 
 Checks:
   - emotion slugs: app/utils/emotions.py VALID_SLUGS == frontend SEED slugs
-  - archetype count: len(PERSONALITY_TYPES) == frontend ARCHETYPE_COUNT
+  - archetype count: len(PERSONALITY_TYPES) + DISCERNING_READER == frontend ARCHETYPE_COUNT
+  - archetype pages: frontend src/data/archetypes.js ids == backend ids
+  - verdicts: app/utils/emotions.py VERDICTS == EntryModal VERDICT_OPTIONS
   - opened-book statuses: dna_signals.OPENED_STATUSES == frontend OPENED_STATUSES
   - landing-page archetype preview (name/color/glyph) matches PERSONALITY_TYPES
 
@@ -29,9 +31,30 @@ def backend_emotion_slugs() -> set[str]:
 
 
 def backend_personality_types() -> list[dict]:
+    """Every archetype the engine can return: the feeling types plus the
+    verdict-based Discerning Reader."""
     sys.path.insert(0, str(BACKEND_ROOT))
-    from app.services.dna_engine import PERSONALITY_TYPES
-    return PERSONALITY_TYPES
+    from app.services.dna_engine import DISCERNING_READER, PERSONALITY_TYPES
+    return [*PERSONALITY_TYPES, DISCERNING_READER]
+
+
+def backend_verdicts() -> list[str]:
+    sys.path.insert(0, str(BACKEND_ROOT))
+    from app.utils.emotions import VERDICTS
+    return list(VERDICTS)
+
+
+def frontend_verdicts(frontend_root: Path) -> list[str] | None:
+    text = (frontend_root / "src" / "components" / "EntryModal.jsx").read_text()
+    m = re.search(r"VERDICT_OPTIONS\s*=\s*\[(.*?)\];", text, re.DOTALL)
+    return re.findall(r'value:\s*"(\w+)"', m.group(1)) if m else None
+
+
+def frontend_archetype_ids(frontend_root: Path) -> set[str] | None:
+    path = frontend_root / "src" / "data" / "archetypes.js"
+    if not path.exists():
+        return None
+    return set(re.findall(r'^\s*id:\s*"(\w+)"', path.read_text(), re.MULTILINE))
 
 
 def backend_opened_statuses() -> set[str]:
@@ -42,8 +65,11 @@ def backend_opened_statuses() -> set[str]:
 
 def frontend_emotion_slugs(frontend_root: Path) -> set[str]:
     text = (frontend_root / "src" / "services" / "emotions.js").read_text()
+    # Only the live SEED block — the RETIRED display rows below it are not vocabulary.
+    m = re.search(r"const SEED = \[(.*?)\n\];", text, re.DOTALL)
+    block = m.group(1) if m else text
     # SEED rows look like: ["slug", "family", ...],
-    return set(re.findall(r'\["(\w+)",\s*"[^"]+",\s*"[^"]+",', text))
+    return set(re.findall(r'\["(\w+)",\s*"[^"]+",\s*"[^"]+",', block))
 
 
 def frontend_archetype_count(frontend_root: Path) -> int | None:
@@ -96,6 +122,17 @@ def main(frontend_arg: str | None = None) -> int:
     fe_count = frontend_archetype_count(frontend_root)
     if fe_count is not None and fe_count != len(be_types):
         failures.append(f"ARCHETYPE_COUNT={fe_count} but backend defines {len(be_types)}")
+
+    fe_ids = frontend_archetype_ids(frontend_root)
+    be_ids = {t["id"] for t in be_types}
+    if fe_ids is not None and fe_ids != be_ids:
+        failures.append(
+            f"archetype pages mismatch: backend-only={be_ids - fe_ids} frontend-only={fe_ids - be_ids}"
+        )
+
+    fe_verdicts = frontend_verdicts(frontend_root)
+    if fe_verdicts is not None and fe_verdicts != backend_verdicts():
+        failures.append(f"VERDICT_OPTIONS={fe_verdicts} but backend VERDICTS={backend_verdicts()}")
 
     be_statuses = backend_opened_statuses()
     fe_statuses = frontend_opened_statuses(frontend_root)

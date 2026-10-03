@@ -100,7 +100,7 @@ async def test_same_book_no_shared_emotion_is_not_a_match(client):
     ha = await _user(client, "cara")
     hb = await _user(client, "dee")
     await _log_book(client, ha, "Piranesi", [{"emotion_id": "awe", "strength": 8}])
-    await _log_book(client, hb, "Piranesi", [{"emotion_id": "boredom", "strength": 8}])
+    await _log_book(client, hb, "Piranesi", [{"emotion_id": "amusement", "strength": 8}])
     await _refresh((await _me(client, ha))["id"])
 
     r = await client.get("/api/resonance/matches", headers=ha)

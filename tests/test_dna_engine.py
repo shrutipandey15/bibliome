@@ -18,7 +18,7 @@ from app.services.dna_engine import (
     generate_stats,
     build_heatmap_data,
 )
-from app.utils.emotions import VALID_SLUGS, LEGACY_EMOTION_MAP, LOST_ME_SLUGS
+from app.utils.emotions import VALID_SLUGS, LEGACY_EMOTION_MAP, RETIRED_SLUGS
 
 
 def _entry(emotions, intensity=5, days_ago=0, title="Book", author="Author"):
@@ -48,26 +48,41 @@ def test_personality_slugs_are_canonical():
 
 
 def test_every_experiential_emotion_is_used_somewhere():
-    """Every *experiential* emotion anchors at least one archetype.
+    """Every one of the 21 feelings anchors at least one archetype.
 
-    The "it lost me" family (boredom/revulsion/confusion/indifference) is excluded:
-    those are registers of disengagement — a book failing you, not a reading
-    identity — so they only ever appear as anti_emotions, never as a primary.
+    Since v3 every live slug is experiential: the "it lost me" disengagement tags
+    were retired to the verdict step and are no longer valid slugs at all.
     """
     used = {
         slug
         for ptype in PERSONALITY_TYPES
         for slug in ptype["primary_emotions"]
     }
-    experiential = VALID_SLUGS - LOST_ME_SLUGS
-    missing = experiential - used
-    assert not missing, f"experiential emotions never used as a primary: {sorted(missing)}"
+    missing = VALID_SLUGS - used
+    assert not missing, f"feelings never used as a primary: {sorted(missing)}"
+    assert not (RETIRED_SLUGS & VALID_SLUGS)
+
+
+def test_type_invariants_hold():
+    """P1-5: 3 primaries, 2 antis, no primary is also an anti, and no two types
+    share more than one primary (sharing two is a tie list order resolves)."""
+    import itertools
+    for t in PERSONALITY_TYPES:
+        assert len(t["primary_emotions"]) == 3, t["id"]
+        assert len(t["anti_emotions"]) == 2, t["id"]
+        assert not set(t["primary_emotions"]) & set(t["anti_emotions"]), t["id"]
+    for a, b in itertools.combinations(PERSONALITY_TYPES, 2):
+        shared = set(a["primary_emotions"]) & set(b["primary_emotions"])
+        assert len(shared) <= 1, (a["id"], b["id"], shared)
 
 
 def test_type_slug_map_targets_bible_slugs():
     assert set(DNA_TYPE_SLUG_MAP.values()) == BIBLE_DNA_SLUGS
     for ptype in PERSONALITY_TYPES:
         assert ptype["id"] in DNA_TYPE_SLUG_MAP
+    assert "discerning_reader" in DNA_TYPE_SLUG_MAP
+    # The public "awe_chaser" slug belongs to the type that actually anchors on awe.
+    assert DNA_TYPE_SLUG_MAP["world_diver"] == "awe_chaser"
 
 
 # ── calculate_personality behaviour ──
@@ -78,15 +93,15 @@ def test_below_three_entries_returns_no_personality():
 
 
 def test_output_frequency_keys_are_canonical():
-    entries = [_entry(["chaos", "awe"], days_ago=i) for i in range(5)]
+    entries = [_entry(["devastation", "boredom", "awe"], days_ago=i) for i in range(5)]
     result = calculate_personality(entries)
     assert set(result["emotion_frequency"]).issubset(VALID_SLUGS)
 
 
 def test_strong_signal_selects_expected_type():
-    # amusement + awe + rage is the midnight_arsonist fingerprint.
+    # amusement + rage + insight is the midnight_arsonist fingerprint.
     entries = [
-        _entry(["amusement", "awe", "rage"], intensity=9, days_ago=i, title=f"B{i}")
+        _entry(["amusement", "rage", "insight"], intensity=9, days_ago=i, title=f"B{i}")
         for i in range(6)
     ]
     result = calculate_personality(entries)
@@ -109,14 +124,19 @@ def test_legacy_slugs_are_remapped_not_dropped():
 
 
 def test_retired_slugs_canonicalize_forward():
-    """The 13→18 cutover retired chaos/wit/two_am; they must map forward, not drop."""
-    from app.utils.emotions import canonicalize
-    assert canonicalize("chaos") == "confusion"
+    """Merged slugs map forward, never drop; retired "it lost me" tags drop out of
+    every vector (they are verdicts now) but stay stored and displayable."""
+    from app.utils.emotions import canonicalize, get_emotion
+    assert canonicalize("devastation") == "grief"
+    assert canonicalize("tenderness") == "comfort"
+    assert canonicalize("seen") == "comfort"
     assert canonicalize("wit") == "amusement"
     assert canonicalize("two_am") == "longing"
     assert canonicalize("2am") == "longing"
-    # nostalgia was a legacy alias; it is now canonical in its own right.
     assert canonicalize("nostalgia") == "nostalgia"
+    for retired in ("boredom", "revulsion", "confusion", "indifference", "chaos"):
+        assert canonicalize(retired) is None
+    assert get_emotion("boredom")["phrase"]
 
 
 def test_unknown_slugs_are_ignored():

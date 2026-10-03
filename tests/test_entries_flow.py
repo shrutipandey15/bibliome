@@ -34,19 +34,51 @@ async def test_per_emotion_strengths_persist_independently(client):
 
 
 async def test_read_path_canonicalizes_legacy_emotion(client):
-    # A retired slug reaching the read path surfaces under its canonical name.
+    # A merged slug reaching the read path surfaces under its canonical name.
     # (Write validation blocks legacy slugs, so this proves the read-time remap.)
+    from app.schemas.entry import EmotionOut
     from app.utils.emotions import canonicalize
-    assert canonicalize("chaos") == "confusion"
+    assert canonicalize("devastation") == "grief"
+    assert EmotionOut(emotion_id="tenderness", strength=5).emotion_id == "comfort"
+    # A retired "it lost me" tag has no canonical target: it is shown as stored.
+    assert EmotionOut(emotion_id="boredom", strength=5).emotion_id == "boredom"
 
 
 # ── verdict + dnf_reason axes round-trip ──
 
 async def test_verdict_round_trips(client):
     headers = await _auth(client)
-    r = await _create(client, headers, verdict="yes")
+    r = await _create(client, headers, verdict="loved")
     assert r.status_code == 201, r.text
-    assert r.json()["verdict"] == "yes"
+    assert r.json()["verdict"] == "loved"
+    # The old "read again?" answers are no longer accepted on write.
+    r = await _create(client, headers, verdict="yes")
+    assert r.status_code == 422
+
+
+async def test_verdict_reason_only_sticks_to_a_disappointing_verdict(client):
+    headers = await _auth(client)
+    r = await _create(client, headers, verdict="mixed", verdict_reason="ending_let_me_down")
+    assert r.status_code == 201, r.text
+    assert r.json()["verdict_reason"] == "ending_let_me_down"
+    # A book the reader loved can't also have "overhyped" as its reason.
+    r = await _create(client, headers, verdict="loved", verdict_reason="overhyped")
+    assert r.status_code == 201, r.text
+    assert r.json()["verdict_reason"] is None
+    # Moving a disappointing verdict back up clears the stale reason.
+    eid = (await _create(client, headers, verdict="not_for_me", verdict_reason="overhyped")).json()["id"]
+    r = await client.put(f"/api/entries/{eid}", json={"verdict": "liked"}, headers=headers)
+    assert r.status_code == 200, r.text
+    assert r.json()["verdict_reason"] is None
+
+
+async def test_something_else_free_text_round_trips(client):
+    headers = await _auth(client)
+    r = await _create(client, headers, other_feeling="  second-hand embarrassment  ")
+    assert r.status_code == 201, r.text
+    assert r.json()["other_feeling"] == "second-hand embarrassment"
+    r = await _create(client, headers, other_feeling="x" * 81)
+    assert r.status_code == 422
 
 
 async def test_dnf_reason_round_trips_on_abandoned(client):
@@ -287,15 +319,19 @@ async def test_emotion_vocabulary_endpoint(client):
     r = await client.get("/api/emotions")
     assert r.status_code == 200
     body = r.json()
-    assert body["count"] == 18
+    assert body["count"] == 21
+    assert body["version"] == 3
     slugs = {e["slug"] for e in body["emotions"]}
-    assert "nostalgia" in slugs and "devastation" in slugs
-    assert "two_am" not in slugs and "chaos" not in slugs  # old vocab retired
+    assert "nostalgia" in slugs and "haunted" in slugs and "beauty" in slugs
+    # Merged and retired vocabulary is gone from what the picker is served.
+    for gone in ("devastation", "tenderness", "boredom", "confusion", "two_am", "chaos"):
+        assert gone not in slugs
+    assert len({e["family"] for e in body["emotions"]}) == 6
     for e in body["emotions"]:
         assert e["slug"] and e["name"] and e["color"] and e["symbol"] and e["family"] and e["phrase"]
     # phrase is the first-person line the UI shows, distinct from the plain word.
-    conf = next(e for e in body["emotions"] if e["slug"] == "confusion")
-    assert conf["name"] == "confusion" and conf["phrase"] == "I have no idea what happened"
+    grief = next(e for e in body["emotions"] if e["slug"] == "grief")
+    assert grief["name"] == "heartbreak" and grief["phrase"] == "it broke my heart"
 
 
 # ── B2.2: TBR fast-add — one tap, no modal ──

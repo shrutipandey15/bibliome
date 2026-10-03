@@ -53,8 +53,13 @@ class BookEntry(Base):
     )
 
     status: Mapped[str] = mapped_column(String(20), nullable=False, server_default="finished")
-    # "Would you read it again?" — yes | no | not_sure (nullable).
+    # "How did it land?" — loved | liked | mixed | not_for_me (nullable). Replaced
+    # "would you read it again?" in migration 036; old answers were mapped forward.
     verdict: Mapped[str | None] = mapped_column(String(10))
+    # Why a finished book disappointed — only after mixed / not_for_me (nullable).
+    verdict_reason: Mapped[str | None] = mapped_column(String(24))
+    # The reader's own words from the picker's "something else…" (nullable).
+    other_feeling: Mapped[str | None] = mapped_column(String(80))
     # Why a book was abandoned — only set when status == 'abandoned' (nullable).
     dnf_reason: Mapped[str | None] = mapped_column(String(20))
     arc_start_emotion_id: Mapped[str | None] = mapped_column(String(30))
@@ -73,8 +78,13 @@ class BookEntry(Base):
             name="check_entry_status",
         ),
         CheckConstraint(
-            "verdict IS NULL OR verdict IN ('yes','no','not_sure')",
+            "verdict IS NULL OR verdict IN ('loved','liked','mixed','not_for_me')",
             name="check_entry_verdict",
+        ),
+        CheckConstraint(
+            "verdict_reason IS NULL OR verdict_reason IN "
+            "('ending_let_me_down','overhyped','didnt_connect','badly_written','forgettable')",
+            name="check_entry_verdict_reason",
         ),
         CheckConstraint(
             "dnf_reason IS NULL OR dnf_reason IN "

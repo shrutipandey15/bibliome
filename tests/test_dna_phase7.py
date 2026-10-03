@@ -46,7 +46,7 @@ def _blind(n):        return [sig(["comfort"]) for _ in range(n)]               
 def _intensity(n):    return [sig(["comfort"], intensity=9) for _ in range(n)]          # share_high=1
 def _range(n):        return [sig(["comfort"]) for _ in range(n)]
 def _pairing(n):      return [sig(["comfort", "dread"]) for _ in range(n)]              # co-occur
-def _contra(n):       return [sig(["devastation"], intensity=9) for _ in range(n)]      # vs stated comfort
+def _contra(n):       return [sig(["haunted"], intensity=9) for _ in range(n)]      # vs stated comfort
 def _abandon(n):      return ([sig(["comfort"]) for _ in range(n - 3)]
                               # `abandoned`, not `reading`: a book in progress has not
                               # been put down. Migration 022 added the explicit status.
@@ -95,17 +95,17 @@ def test_every_applicable_template_renders_without_error():
         "arc_count": 20,          # arc carries its own denominator
         "range": {"entropy": 0.4, "distinct": 4},
         "range_prev_distinct": 9,
-        "blind_spots": ["tenderness"],
+        "blind_spots": ["attachment"],
         "rare": [("amusement", 0.03)],
         "top_pair": (("comfort", "dread"), 12),
-        "stated": {"stated": "comfort", "revealed_top": "devastation",
-                   "revealed_hi": "devastation", "delta": 2.3,
+        "stated": {"stated": "comfort", "revealed_top": "haunted",
+                   "revealed_hi": "haunted", "delta": 2.3,
                    "verdict": "contradicted", "reason": None,
                    # Frequency claims compare COUNTS, not the rank — a tie in
                    # `revealed_top` is not "more often".
                    "stated_books": 12, "revealed_top_books": 20,
                    "evidence": {"stated": {"emotion": "comfort", "books": 12, "avg": 6.1},
-                                "compared": {"emotion": "devastation", "books": 9, "avg": 8.4}}},
+                                "compared": {"emotion": "haunted", "books": 9, "avg": 8.4}}},
         "abandonment": {"emotion": "amusement", "fraction": 0.8,
                         "dnf_reason": "lost_me", "dnf_reason_books": 4},
         "arc": {"start": "dread", "end": "catharsis", "fraction": 0.7, "n_arc": 20},
@@ -120,11 +120,11 @@ def test_every_applicable_template_renders_without_error():
     # The stated-vs-revealed verdicts are mutually exclusive by construction, so
     # the confirmation templates need their own contexts to be reachable at all.
     confirmed = {**base["stated"], "verdict": "confirmed", "delta": -2.3,
-                 "revealed_hi": "devastation",
+                 "revealed_hi": "haunted",
                  "evidence": {"stated": {"emotion": "comfort", "books": 12, "avg": 8.4},
-                              "compared": {"emotion": "devastation", "books": 9, "avg": 6.1}}}
+                              "compared": {"emotion": "haunted", "books": 9, "avg": 6.1}}}
     ctx_confirmed = {**ctx_intense, "stated": {**confirmed, "revealed_top": "comfort"}}
-    ctx_confirmed_elsewhere = {**ctx_intense, "stated": {**confirmed, "revealed_top": "devastation"}}
+    ctx_confirmed_elsewhere = {**ctx_intense, "stated": {**confirmed, "revealed_top": "haunted"}}
 
     # The two abandonment variants are mutually exclusive by construction: the
     # emotion-only sentence is suppressed whenever the reader told us why, so it
@@ -165,12 +165,12 @@ def test_every_applicable_template_renders_without_error():
 
 def test_dna_moves_when_recent_books_flip():
     # A comfort reader whose comfort reading is now ~a year in the past…
-    sigs = [sig(["comfort", "tenderness"], intensity=6, days=330 + i * 10) for i in range(15)]
+    sigs = [sig(["comfort", "attachment"], intensity=6, days=330 + i * 10) for i in range(15)]
     settled = build_dna(sigs)
     assert settled["archetype"]["id"] == "comfort_architect"
     # …then three recent devastating books. Recency weighting lets the fresh reading
     # dominate once the old has decayed — the headline moves (DoD).
-    sigs += [sig(["devastation", "grief"], intensity=9, days=i) for i in range(3)]
+    sigs += [sig(["haunted", "grief"], intensity=9, days=i) for i in range(3)]
     moved = build_dna(sigs)
 
     assert moved["drift"] > 0.1                       # the profile genuinely moved
@@ -186,7 +186,7 @@ def test_uniform_reader_shows_no_drift():
 # ── stated_vs_revealed only fires with a stated preference ──
 
 def test_contradiction_requires_reads_for():
-    sigs = [sig(["devastation"], intensity=9) for _ in range(12)]
+    sigs = [sig(["haunted"], intensity=9) for _ in range(12)]
     assert "contradiction" not in categories(sigs, reads_for=None)
     assert "contradiction" in categories(sigs, reads_for=["comfort"])
 
@@ -327,7 +327,7 @@ def test_dnf_insight_fires_without_any_emotion_correlation():
     # Every DNF carries a DIFFERENT emotion, so no emotion can correlate.
     varied = [
         S.EntrySig(emotions=[e], intensity=7, ts=NOW, status="abandoned", dnf_reason="bored")
-        for e in ("grief", "awe", "confusion", "desire")
+        for e in ("grief", "awe", "shock", "desire")
     ]
     sigs = [sig(["comfort"]) for _ in range(8)] + varied
     res = build_dna(sigs, insight_limit=99)

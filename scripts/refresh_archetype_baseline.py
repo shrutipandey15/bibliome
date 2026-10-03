@@ -6,6 +6,15 @@ enough books, replace it with the real thing and this stops being an estimate.
 
 Run:  python -m scripts.refresh_archetype_baseline           # print only
       python -m scripts.refresh_archetype_baseline --write   # patch dna_signals.py
+      python -m scripts.refresh_archetype_baseline --since 2026-10-01 --write
+
+--since: only count entries created on/after this date. Use the v3 (21-feeling)
+launch date: older entries can't carry the nine feelings v3 added, so including
+them would teach the baseline that nobody feels those, and every new feeling
+would read as a strong signal for whoever tags it.
+
+--write also flips BASELINE_PROVISIONAL to False: the baseline is now measured,
+so labels stop being hedged by default.
 
 Two properties this deliberately preserves:
 
@@ -23,6 +32,7 @@ import argparse
 import asyncio
 import re
 from collections import Counter
+from datetime import datetime, timezone
 from pathlib import Path
 
 from sqlalchemy import select
@@ -43,11 +53,12 @@ SMOOTHING = 0.002         # keeps never-tagged slugs off exactly zero
 TARGET = Path("app/services/dna_signals.py")
 
 
-async def collect() -> tuple[dict[str, float], int]:
+async def collect(since: datetime | None = None) -> tuple[dict[str, float], int]:
     async with async_session() as db:
-        rows = (await db.execute(
-            select(BookEntry).options(selectinload(BookEntry.emotions))
-        )).scalars().all()
+        stmt = select(BookEntry).options(selectinload(BookEntry.emotions))
+        if since is not None:
+            stmt = stmt.where(BookEntry.created_at >= since)
+        rows = (await db.execute(stmt)).scalars().all()
 
     by_user: dict[str, list[list[str]]] = {}
     for entry in rows:
@@ -99,15 +110,19 @@ def write(block: str) -> None:
     )
     if new == src:
         raise SystemExit("BASELINE_VECTOR block not found — patch it by hand.")
+    new = re.sub(r"^BASELINE_PROVISIONAL = True$", "BASELINE_PROVISIONAL = False", new, count=1, flags=re.M)
     TARGET.write_text(new)
 
 
 async def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--write", action="store_true")
+    ap.add_argument("--since", help="YYYY-MM-DD: only entries created on/after this date")
     args = ap.parse_args()
+    since = (datetime.strptime(args.since, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+             if args.since else None)
 
-    vec, n = await collect()
+    vec, n = await collect(since)
     if not vec:
         print(f"Only {n} readers clear {MIN_BOOKS_PER_READER} tagged books "
               f"(need {MIN_READERS}). Keeping the existing prior — a stand-in "

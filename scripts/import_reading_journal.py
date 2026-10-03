@@ -6,7 +6,8 @@ The workbook's vocabulary is the app's own vocabulary, so the mapping is direct:
     Books.emotions   -> entry_emotions.emotion_id   (the 18 canonical slugs)
     Books.doors      -> the emotion *families*; UI-only, not stored (verified only)
     Books.status     -> book_entries.status         (Finished -> finished, ...)
-    Books.read_again -> book_entries.verdict        (Yes -> yes, Not sure -> not_sure)
+    Books.read_again -> book_entries.verdict        (Yes -> liked, No -> not_for_me, Not sure -> mixed)
+    Books.verdict    -> book_entries.verdict        (Loved/Liked/Mixed/Not for me), preferred when present
     Books.*quote*    -> book_entries.quote          (hardest line first, extras after)
     Echoes.feelings  -> echoes.primary/secondary_emotion, via each emotion's `phrase`
     Echoes.visibility-> echoes.visibility           (Community -> community)
@@ -42,7 +43,7 @@ from app.services.background import recalculate_dna
 from app.services.book_search import bump_popularity
 from app.services.echo_service import create_echo
 from app.services.import_service import _dedupe_keys
-from app.utils.emotions import EMOTIONS, VALID_SLUGS
+from app.utils.emotions import EMOTIONS, RETIRED_SLUGS, VALID_SLUGS, canonicalize
 
 # app.database builds its engine with echo=True under ENVIRONMENT=development,
 # which buries this script's report under every statement. echo=True routes
@@ -59,8 +60,32 @@ FAMILIES = {e["family"] for e in EMOTIONS}
 FAMILY_OF = {e["slug"]: e["family"] for e in EMOTIONS}
 SLUG_BY_PHRASE = {e["phrase"]: e["slug"] for e in EMOTIONS}
 
+# Workbooks written against the v2 (18-emotion) vocabulary still import: their
+# slugs map forward through canonicalize(), their doors and echo phrases through
+# the tables below. Retired "it lost me" tags are dropped with a warning — they
+# are verdicts now, and the app no longer accepts them as feelings.
+V2_FAMILIES = {"it messed me up", "it held me", "the yearning", "it hit different", "it lost me"}
+V2_PHRASES = {
+    "it wrecked me": "devastation", "I'm still not over it": "grief",
+    "shoulders up by my ears the entire time": "dread",
+    "I wanted to throw it across the room": "rage",
+    "it felt like being tucked in": "comfort", "handle-with-care kind of love": "tenderness",
+    "I closed it smiling": "joy", "I actually laughed out loud": "amusement",
+    "the yearning was unreal": "longing", "the tension nearly killed me": "desire",
+    "it smelled like a memory": "nostalgia",
+    "I had to put it down and just sit there": "awe", "it read my mind": "recognition",
+    "I cried and felt lighter after": "catharsis",
+    "my two brain cells died": "boredom", "I felt a little sick": "revulsion",
+    "I have no idea what happened": "confusion", "closed it and forgot it existed": "indifference",
+}
+for _phrase, _old in V2_PHRASES.items():
+    SLUG_BY_PHRASE.setdefault(_phrase, canonicalize(_old) or _old)
+
 STATUS_MAP = {"Want to Read": "want_to_read", "Reading": "reading", "Finished": "finished"}
-VERDICT_MAP = {"Yes": "yes", "No": "no", "Not sure": "not_sure"}
+# "Would you read it again?" (v2 workbooks) carried forward the same way migration
+# 036 carries stored answers; "How did it land?" (v3 workbooks) maps directly.
+VERDICT_MAP = {"Yes": "liked", "No": "not_for_me", "Not sure": "mixed"}
+LANDED_MAP = {"Loved": "loved", "Liked": "liked", "Mixed": "mixed", "Not for me": "not_for_me"}
 VISIBILITY_MAP = {"Community": "community", "Public": "public"}
 
 # The sheet records which emotions a book provoked, not how hard. Rather than
@@ -195,10 +220,16 @@ def translate(books: list[dict], echoes: list[dict]) -> tuple[list[dict], list[d
             raise Abort(f"Books row {i}: unknown status {raw_status!r} (expected {sorted(STATUS_MAP)})")
         status = STATUS_MAP.get(raw_status, "finished")
 
+        raw_landed = row.get("verdict")
         raw_verdict = row["read_again"]
-        if raw_verdict and raw_verdict not in VERDICT_MAP:
-            raise Abort(f"Books row {i}: unknown read_again {raw_verdict!r}")
-        verdict = VERDICT_MAP.get(raw_verdict)
+        if raw_landed:
+            if raw_landed not in LANDED_MAP:
+                raise Abort(f"Books row {i}: unknown verdict {raw_landed!r}")
+            verdict = LANDED_MAP[raw_landed]
+        else:
+            if raw_verdict and raw_verdict not in VERDICT_MAP:
+                raise Abort(f"Books row {i}: unknown read_again {raw_verdict!r}")
+            verdict = VERDICT_MAP.get(raw_verdict)
 
         started = _parse_date(row["started"], "started", i)
         finished = _parse_date(row["finished"], "finished", i)
@@ -209,24 +240,31 @@ def translate(books: list[dict], echoes: list[dict]) -> tuple[list[dict], list[d
         if status != "finished" and finished:
             raise Abort(f"Books row {i}: status is {raw_status!r} but a finish date is set")
 
-        slugs = _split(row["emotions"])
-        unknown = [s for s in slugs if s not in VALID_SLUGS]
+        raw_slugs = _split(row["emotions"])
+        if len(set(raw_slugs)) != len(raw_slugs):
+            raise Abort(f"Books row {i}: repeated emotion tag (entry_emotions is unique per pair)")
+        retired = [s for s in raw_slugs if s in RETIRED_SLUGS]
+        unknown = [s for s in raw_slugs if s not in RETIRED_SLUGS and not canonicalize(s)]
         if unknown:
             raise Abort(f"Books row {i}: emotions not in the app vocabulary: {unknown}")
+        for s in retired:
+            warnings.append(f"row {i:>3} {title[:38]:<38} retired tag {s!r} dropped (now a verdict, not a feeling)")
+        # Map v2 slugs forward (devastation → grief …); a merge can make two tags
+        # one, so dedupe after mapping, keeping first-seen order.
+        slugs = list(dict.fromkeys(canonicalize(s) for s in raw_slugs if s not in RETIRED_SLUGS))
         if not slugs:
             raise Abort(f"Books row {i}: no emotions — nothing to record")
-        if len(set(slugs)) != len(slugs):
-            raise Abort(f"Books row {i}: repeated emotion tag (entry_emotions is unique per pair)")
 
         # Doors are the emotion families — a UI grouping the app deliberately does
         # not store. Validate them, and flag any door with no emotion under it so
         # the discrepancy is visible rather than silently dropped.
         doors = _split(row["doors"])
-        bad_doors = [d for d in doors if d not in FAMILIES]
+        bad_doors = [d for d in doors if d not in FAMILIES and d not in V2_FAMILIES]
         if bad_doors:
             raise Abort(f"Books row {i}: unknown doors {bad_doors} (expected {sorted(FAMILIES)})")
         covered = {FAMILY_OF[s] for s in slugs}
-        for orphan in sorted(set(doors) - covered):
+        # v2 doors can't be checked against v3 families; only v3 doors are.
+        for orphan in sorted(set(doors) - covered - V2_FAMILIES):
             warnings.append(f"row {i:>3} {title[:38]:<38} door {orphan!r} has no emotion tag under it")
 
         # created_at drives DNA recency weighting and orders the shelf, so anchor
@@ -270,6 +308,8 @@ def translate(books: list[dict], echoes: list[dict]) -> tuple[list[dict], list[d
         if len(feelings) > 2:
             raise Abort(f"Echoes row {i}: {len(feelings)} feelings — the app stores at most 2")
         slugs = [SLUG_BY_PHRASE[f] for f in feelings]
+        # A retired phrase ("my two brain cells died") has no feeling to store.
+        slugs = list(dict.fromkeys(s for s in slugs if s in VALID_SLUGS))
 
         raw_vis = row["visibility"]
         if raw_vis and raw_vis not in VISIBILITY_MAP:

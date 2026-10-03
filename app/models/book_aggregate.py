@@ -46,7 +46,7 @@ class BookEmotionAggregate(Base):
     # "one reader felt it at 10".
     emotion_profile: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
 
-    # { yes, no, not_sure } as fractions of readers who gave a verdict.
+    # { loved, liked, mixed, not_for_me } as fractions of readers who gave a verdict.
     verdict_profile: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
 
     dnf_rate: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)

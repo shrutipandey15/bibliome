@@ -39,7 +39,7 @@ async def test_public_card_matches_in_app_archetype(client):
     h = await _user(client, "onengine")
     # A shelf with a real winner, and enough of it that the label is not a coin flip.
     for i in range(8):
-        await _add_book(client, h, f"Grief {i}", ["grief", "devastation", "catharsis"])
+        await _add_book(client, h, f"Grief {i}", ["grief", "haunted", "catharsis"])
     for i in range(3):
         await _add_book(client, h, f"Soft {i}", ["comfort"])
 
@@ -140,7 +140,7 @@ async def test_generated_snapshot_matches_the_dna_tab(client):
     could name an archetype the DNA tab never showed."""
     h = await _user(client, "gensnap")
     for i in range(8):
-        await _add_book(client, h, f"B{i}", ["grief", "devastation", "catharsis"])
+        await _add_book(client, h, f"B{i}", ["grief", "haunted", "catharsis"])
 
     in_app = (await client.get("/api/dna/profile", headers=h)).json()
     r = await client.post("/api/dna/generate", headers=h)
