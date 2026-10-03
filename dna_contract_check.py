@@ -9,6 +9,8 @@ Checks:
   - emotion slugs: app/utils/emotions.py VALID_SLUGS == frontend SEED slugs
   - archetype count: len(PERSONALITY_TYPES) + DISCERNING_READER == frontend ARCHETYPE_COUNT
   - archetype pages: frontend src/data/archetypes.js ids == backend ids
+  - share card copy: archetypes.js article / shareLine / redFlag == backend
+    article / share_line / red_flag, verbatim
   - verdicts: app/utils/emotions.py VERDICTS == EntryModal VERDICT_OPTIONS
   - opened-book statuses: dna_signals.OPENED_STATUSES == frontend OPENED_STATUSES
   - landing-page archetype preview (name/color/glyph) matches PERSONALITY_TYPES
@@ -55,6 +57,23 @@ def frontend_archetype_ids(frontend_root: Path) -> set[str] | None:
     if not path.exists():
         return None
     return set(re.findall(r'^\s*id:\s*"(\w+)"', path.read_text(), re.MULTILINE))
+
+
+def frontend_card_copy(frontend_root: Path) -> dict[str, dict] | None:
+    """{id: {article, share_line, red_flag}} from archetypes.js, one per entry."""
+    path = frontend_root / "src" / "data" / "archetypes.js"
+    if not path.exists():
+        return None
+    text = path.read_text()
+    out = {}
+    for m in re.finditer(r'^\s*id:\s*"(\w+)",(.*?)(?=^\s*id:\s*"|\Z)', text, re.MULTILINE | re.DOTALL):
+        body = m.group(2)
+        found = {}
+        for js, py in (("article", "article"), ("shareLine", "share_line"), ("redFlag", "red_flag")):
+            f = re.search(js + r':\s*"((?:[^"\\]|\\.)*)"', body)
+            found[py] = f.group(1).replace('\\"', '"') if f else None
+        out[m.group(1)] = found
+    return out
 
 
 def backend_opened_statuses() -> set[str]:
@@ -129,6 +148,15 @@ def main(frontend_arg: str | None = None) -> int:
         failures.append(
             f"archetype pages mismatch: backend-only={be_ids - fe_ids} frontend-only={fe_ids - be_ids}"
         )
+
+    fe_copy = frontend_card_copy(frontend_root) or {}
+    for t in be_types:
+        fe = fe_copy.get(t["id"])
+        if fe is None:
+            continue  # an id mismatch is reported above
+        for key in ("article", "share_line", "red_flag"):
+            if fe[key] != t[key]:
+                failures.append(f"share card copy drift for {t['id']}.{key}: {fe[key]!r} != {t[key]!r}")
 
     fe_verdicts = frontend_verdicts(frontend_root)
     if fe_verdicts is not None and fe_verdicts != backend_verdicts():

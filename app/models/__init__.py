@@ -5,6 +5,7 @@ from app.models.book_aggregate import BookEmotionAggregate
 from app.models.dna_snapshot import DNASnapshot
 from app.models.refresh_token import RefreshToken
 from app.models.share_token import ShareToken
+from app.models.card import CardCount, CardPreview
 from app.models.audit_log import AuditLog
 from app.models.entry_checkin import EntryCheckin
 from app.models.echo import Echo, EchoReply, EchoReaction
@@ -27,6 +28,8 @@ __all__ = [
     "DNASnapshot",
     "RefreshToken",
     "ShareToken",
+    "CardPreview",
+    "CardCount",
     "AuditLog",
     "EntryCheckin",
     "Echo",

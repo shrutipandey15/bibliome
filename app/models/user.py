@@ -49,6 +49,16 @@ class User(Base):
     dna_seen_archetype: Mapped[str | None] = mapped_column(String(40), nullable=True)
     cached_dna_profile: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
+    # What the reader puts on the card they share (DNA card spec, "share
+    # choices"). Both start on; they apply to the images, the /s/ page and the
+    # link preview alike, so the link always matches the image they posted.
+    card_show_season: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true", default=True)
+    card_show_red_flag: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true", default=True)
+    # The reader turned their card link off. Kept on the account (not in one
+    # browser) so no device quietly makes a new public link; only an explicit
+    # "make a link" clears it.
+    card_link_off: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false", default=False)
+
     # Stated preference (B7.1): 1–2 canonical emotion slugs — "what do you read for?"
     # The *stated* half of the stated-vs-revealed insight; the shelf is the revealed half.
     reads_for: Mapped[list | None] = mapped_column(JSONB, nullable=True)

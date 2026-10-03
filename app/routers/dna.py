@@ -28,7 +28,9 @@ from app.schemas.dna import (
     StatsResponse,
 )
 from app.services.blind_spots_service import get_blind_spots
-from app.services.dna_service import cache_is_current, compute_and_cache, manual_snapshot, shift_unseen
+from app.services.dna_service import (
+    cache_is_current, card_payload, compute_and_cache, manual_snapshot, shift_unseen,
+)
 from app.services.profile_service import archetype_share
 from app.services.calendar_service import get_emotional_calendar
 from app.services.dna_engine import (
@@ -112,6 +114,8 @@ async def get_dna_profile(
         **payload,
         "archetype_share": await archetype_share(db, current_user.personality_type),
         "shift_unseen": shift_unseen(current_user, payload),
+        # The owner's share card: what the DNA tab's card and share sheet draw.
+        "card": card_payload(current_user, owner=True),
     }
 
 

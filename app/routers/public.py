@@ -1,9 +1,9 @@
 """Public surface — reduced to the one legitimate case (Phase 5 B5.1).
 
 The old username/entry-based public endpoints (stream, echoes, card, room, per-echo
-images) are gone — they bypassed the visibility spine. Server-side OG/card image
-generation is retired (no longer part of the product). What remains is the
-share-token DNA card as JSON: a revocable, opt-in capability link the user creates
+images) are gone — they bypassed the visibility spine. The one image left is
+the share card's link preview, served beside the page on /s/ (og.py). What
+remains here is the share-token DNA card as JSON: a revocable, opt-in capability link the user creates
 for themselves (visibility spine, B2.1). Echo is the one real public surface.
 """
 

@@ -265,3 +265,12 @@ def test_emotion_claims_still_report_the_tagged_count():
             assert insight["n"] == 5, (
                 f"{insight['category']} reports n={insight['n']}, not the 5 tagged books"
             )
+
+
+def test_drift_tolerates_a_vector_stored_before_the_vocabulary_grew():
+    # A snapshot saved under 18 emotions lacks the newer slugs; POST /dna/generate
+    # 500'd with KeyError: 'haunted' comparing against it.
+    from app.services.dna_signals import drift
+    current = {e["slug"]: 1.0 for e in EMOTIONS}
+    old = {e["slug"]: 1.0 for e in EMOTIONS[:18]}
+    assert 0.0 <= drift(old, current) < 1.0

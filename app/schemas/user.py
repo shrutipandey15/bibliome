@@ -13,6 +13,9 @@ class UserSettingsUpdate(BaseModel):
     # "What do you read for?" — 1–2 canonical emotion slugs (B7.1). Validated in
     # the router against VALID_SLUGS; `[]` clears it.
     reads_for: list[str] | None = Field(default=None, max_length=2)
+    # What goes on the card the reader shares (DNA card spec).
+    card_show_season: bool | None = None
+    card_show_red_flag: bool | None = None
 
 # Typed by the user, verbatim, on top of their password. Deletion is instant and
 # total, so it should be impossible to reach by mis-clicking.
@@ -42,6 +45,8 @@ class UserSettingsResponse(BaseModel):
     is_public: bool  # derived (profile_visibility == "public"); kept for back-compat
     personality_type: str | None
     reads_for: list[str] | None = None
+    card_show_season: bool = True
+    card_show_red_flag: bool = True
     username: str
     email: str
 

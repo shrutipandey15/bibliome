@@ -807,7 +807,10 @@ def build_dna(
         "season": ({**_mini(season_id),
                     "since": _day(state["seasons"][-1]["from"]),
                     "books": state["seasons"][-1]["books"],
-                    "home": season_id == archetype_id}
+                    "home": season_id == archetype_id,
+                    # The season story's bloom: books per feeling over the
+                    # window the season reads (books only, like emotion_counts).
+                    "counts": sig.recent_counts(sigs, sig.SEASON_WINDOW)}
                    if season_id else None),
         "seasons": [_span(x) for x in reversed(state["seasons"][-12:])],
         "eras": [_span(x) for x in reversed(state["eras"][-12:])],

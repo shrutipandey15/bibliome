@@ -48,6 +48,11 @@ class PersonalityInfo(BaseModel):
     glyph: str
     blind_spots: list[str]
     comfort_tropes: list[str]
+    # The share card's lines. Optional only because a payload cached before they
+    # existed still validates; the card itself reads them from the live table.
+    article: str | None = None
+    share_line: str | None = None
+    red_flag: str | None = None
 
 
 class TopEmotion(BaseModel):
@@ -219,6 +224,10 @@ class DNAProfileReady(BaseModel):
     # Merged on top by the /profile route: the archetype changed since the reader
     # last acknowledged one (dna_service.shift_unseen). Per request, not cached.
     shift_unseen: bool = False
+    # Merged on top by the /profile route: the owner's share card (dna_card),
+    # with both share switches' content present and the switches themselves in
+    # `choices`, so the share sheet can preview either setting without a refetch.
+    card: dict[str, Any] | None = None
 
 
 DNAProfileV2Response = DNAProfileNotEnough | DNAProfileReady

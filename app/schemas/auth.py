@@ -1,5 +1,6 @@
 import uuid
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, EmailStr, Field
 
@@ -9,6 +10,10 @@ class RegisterRequest(BaseModel):
     username: str = Field(min_length=3, max_length=50, pattern=r"^[a-zA-Z0-9_-]+$")
     password: str = Field(min_length=8, max_length=128)
     display_name: str | None = Field(default=None, max_length=100)
+    # Where the sign-up came from, if it came from a shared card's "Find yours".
+    # Counted into a daily total and dropped; never stored on the account and
+    # never tied to the reader whose card it was.
+    via: Literal["card"] | None = None
 
 
 class LoginRequest(BaseModel):

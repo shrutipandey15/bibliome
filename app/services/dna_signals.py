@@ -201,7 +201,8 @@ def frequency_vector(
 
 
 def cosine(a: dict[str, float], b: dict[str, float]) -> float:
-    dot = sum(a[s] * b[s] for s in _ALL_SLUGS)
+    # .get: a vector stored before the vocabulary grew lacks the newer slugs.
+    dot = sum(a.get(s, 0.0) * b.get(s, 0.0) for s in _ALL_SLUGS)
     na = math.sqrt(sum(v * v for v in a.values()))
     nb = math.sqrt(sum(v * v for v in b.values()))
     if na == 0 or nb == 0:
@@ -775,7 +776,22 @@ def archetype_dict(type_id: str) -> dict:
     t = _TYPES_BY_ID[type_id]
     return {"id": t["id"], "name": t["name"], "description": t["description"],
             "color": t["color"], "glyph": t["glyph"],
-            "blind_spots": t["blind_spots"], "comfort_tropes": t["comfort_tropes"]}
+            "blind_spots": t["blind_spots"], "comfort_tropes": t["comfort_tropes"],
+            # The shareable card's first-person lines (dna_card).
+            "article": t["article"], "share_line": t["share_line"], "red_flag": t["red_flag"]}
+
+
+def recent_counts(sigs: list["EntrySig"], n: int) -> dict[str, int]:
+    """Books per feeling over the last `n` tagged books in reading order.
+
+    What the season story's bloom and its "my last 6 books" numbers are drawn
+    from. Books only: callers pass opened book sigs, never journal days.
+    """
+    counts: dict[str, int] = {}
+    for s in [s for s in _reading_order(sigs) if s.emotions][-n:]:
+        for slug in s.emotions:
+            counts[slug] = counts.get(slug, 0) + 1
+    return counts
 
 
 # ── Aliveness: climate, seasons, firsts and the echo (DNA Aliveness spec) ──

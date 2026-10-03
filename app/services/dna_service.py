@@ -23,6 +23,7 @@ from app.models.dna_snapshot import DNASnapshot
 from app.models.notification import TIER_DIRECT
 from app.models.user import User
 from app.services import dna_signals as sig
+from app.services.dna_card import card_payload_from
 from app.services.dna_engine import ARCHETYPE_TABLE_REV, calculate_personality, dna_type_slug_for
 from app.services.dna_insights import build_dna
 from app.services.journal_service import load_emotion_sources as load_journal_sources
@@ -116,6 +117,7 @@ def is_fresh(cache: dict | None) -> bool:
         and mislabels it as a book count.
       - no `echo` / `eras`: cached before the aliveness layer, and under the old
         archetype rule.
+      - a season without `counts`: cached before the share card's season story.
     """
     if not cache:
         return False
@@ -125,6 +127,9 @@ def is_fresh(cache: dict | None) -> bool:
         return False
     # Cached before the aliveness layer (echo, seasons, eras, moments) existed.
     if "alive_state" not in cache or (cache.get("enough") and "eras" not in cache):
+        return False
+    # Cached before the share card drew the season story's own bloom.
+    if (cache.get("season") or {}).get("id") and "counts" not in cache["season"]:
         return False
     return all("need" in row for row in (cache.get("locked") or []))
 
@@ -164,48 +169,29 @@ async def cache_is_current(db: AsyncSession, user: User) -> bool:
     return cache.get("shelf_stamp") == await _shelf_stamp(db, user.id)
 
 
-def card_payload(user: User) -> dict | None:
-    """The one shape every public surface renders.
+def card_payload(user: User, *, owner: bool = False) -> dict | None:
+    """The one shape every card surface renders (dna_card.card_payload_from).
 
     Reads the cache only — a public path must never recompute, and must never see a
     different engine than the owner's own DNA tab. Returns None when there is no
     card to show, which the caller renders as "not ready yet" rather than filling
     in with a second opinion from somewhere else.
+
+    Strangers get the reader's share choices applied (season, red flag) on every
+    surface: the /s/ page, its link preview, a public profile. The owner's own
+    view (`owner=True`, the DNA tab's share sheet) carries both, plus the
+    switches themselves, so the sheet can preview either setting without a
+    refetch.
     """
-    v2 = user.cached_dna_v2
-    if not v2 or not v2.get("enough") or not v2.get("archetype"):
-        return None
-    return {
-        "archetype": v2["archetype"],
-        "archetype_scores": v2["archetype_scores"],
-        "margin": v2.get("margin"),
-        # The hedge has to travel with the label. build_dna decides a close call is
-        # too close to assert outright and names the runner-up; a card that drops
-        # it asserts the noun flatly for exactly the readers the engine was least
-        # sure about. Same reader, two surfaces, different confidence is the same
-        # class of bug as P0-1 — the numbers agreeing is not enough if the hedging
-        # doesn't.
-        "runner_up": v2.get("runner_up"),
-        "basis": v2.get("basis"),
-        "book_count": v2["book_count"],
-        # Books per register, from the same opened-only tally `book_count` and
-        # `basis` are drawn from — so this card's fingerprint can never disagree
-        # with its own basis line, or with the DNA tab's, the way reading it off
-        # the separately-cached `/dna/stats` endpoint could.
-        "emotion_counts": v2.get("emotion_counts") or None,
-        # Books only, deliberately: `profiles.current` spans the journal, and a
-        # stranger must not be able to read emotion frequencies out of someone's
-        # private life even in aggregate. A cache written before `current_books`
-        # existed simply carries no emotions rather than falling back to the
-        # journal-spanning vector.
-        "top_emotions": [
-            {"emotion_id": s, "weight": round(w, 4)}
-            for s, w in sorted(
-                v2["profiles"].get("current_books", {}).items(), key=lambda kv: -kv[1]
-            )[:5]
-            if w > 0
-        ],
-    }
+    if owner:
+        return card_payload_from(
+            user.cached_dna_v2,
+            choices={"season": user.card_show_season, "red_flag": user.card_show_red_flag},
+        )
+    return card_payload_from(
+        user.cached_dna_v2,
+        show_season=user.card_show_season, show_red_flag=user.card_show_red_flag,
+    )
 
 
 async def compute_and_cache(db: AsyncSession, user: User) -> dict:

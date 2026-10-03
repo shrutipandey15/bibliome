@@ -29,7 +29,9 @@ from app.services.journal_service import (
     replace_key_bundle,
 )
 from app.services.notification_service import notify
-from app.services.visibility import create_share_token, revoke_share_tokens
+from app.services.card_preview import ensure_preview
+from app.services.dna_service import card_payload
+from app.services.visibility import card_link, current_card_link, revoke_share_tokens
 from app.utils.cookies import clear_refresh_cookie
 from app.utils.emotions import canonicalize
 
@@ -48,6 +50,8 @@ def _settings_response(user: User) -> UserSettingsResponse:
         is_public=user.is_public,
         personality_type=user.personality_type,
         reads_for=user.reads_for,
+        card_show_season=user.card_show_season,
+        card_show_red_flag=user.card_show_red_flag,
         username=user.username,
         email=user.email,
     )
@@ -84,9 +88,24 @@ async def update_settings(
             current_user.reads_for = canon
         current_user.dna_dirty = True
 
+    # The card switches are plain booleans on non-null columns: an explicit null
+    # means "no change", never "unset".
+    for key in ("card_show_season", "card_show_red_flag"):
+        if update_data.get(key, False) is None:
+            update_data.pop(key)
+
     for field, value in update_data.items():
         if hasattr(current_user, field):
             setattr(current_user, field, value)
+
+    # A switch changes what the link preview draws. Render the new one now, so
+    # the next crawler to fetch the link never meets a missing image.
+    if {"card_show_season", "card_show_red_flag"} & update_data.keys():
+        await db.flush()
+        if await current_card_link(db, current_user.id):
+            card = card_payload(current_user)
+            if card:
+                await ensure_preview(db, current_user, card)
 
     await db.flush()
     return _settings_response(current_user)
@@ -237,13 +256,34 @@ async def delete_my_account(
     clear_refresh_cookie(response)
 
 
+@router.get("/share-token")
+async def get_share_token(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """The reader's card link, or null if they have none. `off` says the reader
+    turned it off, so the share sheet shows that instead of making a new one."""
+    return {
+        "share_token": await current_card_link(db, current_user.id),
+        "off": current_user.card_link_off,
+    }
+
+
 @router.post("/share-token")
 async def generate_share_token(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Mint a new revocable share link (capability link) for the current user."""
-    token = await create_share_token(db, current_user.id)
+    """The reader's card link: one per reader, made once and reused, until
+    "Turn off my card link" revokes it. The link preview image is rendered here,
+    before anyone can paste the link anywhere, because WhatsApp caches a failed
+    image fetch against the URL."""
+    token = await card_link(db, current_user.id)
+    # Asking for a link is the explicit "make a link" that ends "off".
+    current_user.card_link_off = False
+    card = card_payload(current_user)
+    if card:
+        await ensure_preview(db, current_user, card)
     await db.commit()
     return {"share_token": token}
 
@@ -253,6 +293,8 @@ async def revoke_share_token(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Revoke all of the current user's active share links."""
+    """"Turn off my card link": revoke all of the reader's links, and remember
+    it on the account so no device quietly makes a new one."""
     await revoke_share_tokens(db, current_user.id)
+    current_user.card_link_off = True
     await db.flush()

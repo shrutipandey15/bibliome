@@ -14,10 +14,10 @@ inspect a path only these URLs use; this fires only where it applies and is
 ordinary testable code. nginx routes /s/ here (location ^~ /s/ in
 deploy/bibliome.nginx.conf).
 
-What it does NOT do: generate a per-card image. Server-side card image
-generation was retired with the rest of the old public surface, so every share
-still uses the static /og-image.png. Text tags are what actually changes the
-preview from a bare link into a card.
+It also serves the card's own preview image, /s/:token/card.jpg?v=hash
+(card_preview): a 1200×630 JPEG of the reader's card, rendered before the first
+crawler arrives and served as stored bytes. The static /og-image.png is now only
+for links that are invalid, revoked, or whose reader has no card yet.
 """
 
 import html
@@ -25,12 +25,16 @@ import logging
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.database import get_db
+from app.middleware.rate_limit import RateLimiter
 from app.routers.public import public_limiter
+from app.services import dna_card
+from app.services.card_counts import bump, crawler_name
+from app.services.card_preview import ensure_preview, stored_preview
 from app.services.dna_service import card_payload
 from app.services.visibility import resolve_share_token
 
@@ -39,6 +43,13 @@ logger = logging.getLogger("bibliome.og")
 router = APIRouter(tags=["og"])
 
 SITE = "https://bibliome.app"
+GENERIC_IMAGE = f"{SITE}/og-image.png"
+GENERIC_ALT = "Bibliome — the emotional fingerprint of your reading life"
+
+# The image is stored bytes, so it can take a crawler burst after a share (one
+# WhatsApp group fetches it from several Meta addresses at once) more generously
+# than the page does.
+image_limiter = RateLimiter(max_requests=120, window_seconds=60, prefix="og-image")
 
 # Served when the built frontend isn't on disk — a dev box, or a deploy that
 # half-finished. A scraper still gets correct tags and a human still gets the
@@ -72,10 +83,11 @@ def _index_html() -> str | None:
     return _index_html._body
 
 
-def _tags(title: str, description: str, url: str) -> str:
+def _tags(title: str, description: str, url: str, image: str = GENERIC_IMAGE,
+          alt: str = GENERIC_ALT, image_type: str = "image/png") -> str:
     """The head block. Everything interpolated is escaped — `handle` is
     user-controlled, and this is the one place it reaches raw HTML."""
-    t, d, u = (html.escape(x, quote=True) for x in (title, description, url))
+    t, d, u, i, a = (html.escape(x, quote=True) for x in (title, description, url, image, alt))
     return (
         f"<title>{t}</title>"
         f'<meta name="description" content="{d}" />'
@@ -88,13 +100,16 @@ def _tags(title: str, description: str, url: str) -> str:
         f'<meta property="og:title" content="{t}" />'
         f'<meta property="og:description" content="{d}" />'
         f'<meta property="og:site_name" content="Bibliome" />'
-        f'<meta property="og:image" content="{SITE}/og-image.png" />'
+        f'<meta property="og:image" content="{i}" />'
+        f'<meta property="og:image:type" content="{image_type}" />'
         f'<meta property="og:image:width" content="1200" />'
         f'<meta property="og:image:height" content="630" />'
+        f'<meta property="og:image:alt" content="{a}" />'
         f'<meta name="twitter:card" content="summary_large_image" />'
         f'<meta name="twitter:title" content="{t}" />'
         f'<meta name="twitter:description" content="{d}" />'
-        f'<meta name="twitter:image" content="{SITE}/og-image.png" />'
+        f'<meta name="twitter:image" content="{i}" />'
+        f'<meta name="twitter:image:alt" content="{a}" />'
     )
 
 
@@ -133,8 +148,8 @@ def _strip_head_tags(doc: str) -> str:
     return head + rest
 
 
-def _render(title: str, description: str, url: str) -> HTMLResponse:
-    tags = _tags(title, description, url)
+def _render(title: str, description: str, url: str, **image) -> HTMLResponse:
+    tags = _tags(title, description, url, **image)
     shell = _index_html()
     if shell is None:
         logger.warning("FRONTEND_DIR has no index.html; serving the bare shell")
@@ -161,6 +176,10 @@ async def shared_card_page(token: str, request: Request, db: AsyncSession = Depe
     """
     await public_limiter.check(request)
     url = f"{SITE}/s/{token}"
+    # A person opening a shared card, counted into today's total. Crawlers are
+    # counted where they matter, on the image they came for.
+    if crawler_name(request.headers.get("user-agent")) is None:
+        await bump(db, "visit", "human")
 
     generic = (
         "Bibliome — the emotional fingerprint of your reading life",
@@ -172,17 +191,70 @@ async def shared_card_page(token: str, request: Request, db: AsyncSession = Depe
     if not user:
         return _render(*generic, url)
 
+    # The card as strangers see it: the reader's switches applied.
     card = card_payload(user)
     if card is None:
         return _render(*generic, url)
 
-    archetype = card["archetype"]
-    name = archetype.get("name") or "a reading archetype"
-    handle = user.handle or "A reader"
-    title = f"{handle} is {name} — Bibliome"
-    # The engine's own words for the archetype. The card the reader is about to
-    # open says the same thing, so the preview cannot oversell it.
-    desc = archetype.get("description") or (
-        "A reading archetype, worked out from the emotions this reader recorded."
+    a = card["archetype"]
+    name = dna_card.display_name(a.get("name") or "reading archetype")
+    who = f"@{user.handle}" if user.handle else "This reader"
+    title = f"{who} reads like {a.get('article') or 'a'} {name} — Bibliome"
+    # The archetype's own line, first person, as on the card itself.
+    line = a.get("share_line") or a.get("description") or ""
+    desc = f"“{line}” What does your reading say about you?" if line else \
+        "What does your reading say about you?"
+
+    # Make (or confirm) the stored preview BEFORE handing out its URL, so a
+    # crawler that follows these tags always finds the image.
+    v = await ensure_preview(db, user, card)
+    if v is None:
+        return _render(title, desc, url)
+    await db.commit()
+    return _render(title, desc, url,
+                   image=f"{url}/card.jpg?v={v}",
+                   alt=dna_card.preview_alt(card, user.handle),
+                   image_type="image/jpeg")
+
+
+@router.get("/s/{token}/card.jpg", include_in_schema=False)
+async def shared_card_image(token: str, request: Request, db: AsyncSession = Depends(get_db)):
+    """The card's link-preview image. Stored bytes, never a render on the hot
+    path — unless the stored one is missing or stale, which ensure_preview on
+    the page above makes rare.
+
+    A dead link redirects to the generic image: the preview a crawler cached
+    for a link that has since been turned off should not keep showing the card.
+    """
+    await image_limiter.check(request)
+    crawler = crawler_name(request.headers.get("user-agent"))
+    if crawler:
+        await bump(db, "preview", crawler)
+
+    user = await resolve_share_token(db, token)
+    card = card_payload(user) if user else None
+    if card is None:
+        return RedirectResponse(GENERIC_IMAGE, status_code=302)
+
+    want = dna_card.preview_hash(dna_card.preview_spec(card, user.handle))
+    have = await stored_preview(db, user.id)
+    if have is not None and have.hash == want:
+        jpeg = have.jpeg
+    else:
+        v = await ensure_preview(db, user, card)
+        have = await stored_preview(db, user.id) if v else None
+        if have is None:
+            return RedirectResponse(GENERIC_IMAGE, status_code=302)
+        jpeg = have.jpeg
+
+    # The URL carries the hash, so a URL whose hash matches can be cached for
+    # good; an old hash still gets the current card, briefly cached.
+    current = request.query_params.get("v") == want
+    return Response(
+        jpeg, media_type="image/jpeg",
+        headers={
+            "Cache-Control": "public, max-age=31536000, immutable" if current
+            else "public, max-age=3600",
+            "X-Robots-Tag": "noindex",
+        },
     )
-    return _render(title, f"{desc} Read on Bibliome, the emotional book tracker.", url)

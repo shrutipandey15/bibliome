@@ -83,6 +83,11 @@ PERSONALITY_TYPES = [
     {
         "id": "grief_romantic",
         "name": "The Grief Romantic",
+        # The shareable card speaks as the reader (first person, under 60
+        # characters): what they'd say out loud, and the blind spot admitted.
+        "article": "a",
+        "share_line": "Loss isn't my enemy. Numbness is.",
+        "red_flag": "I avoid neat happy endings",
         "description": "You seek books that break your heart because feeling deeply is how you know you're alive. Loss isn't your enemy — numbness is.",
         "primary_emotions": ["grief", "catharsis", "haunted"],
         # Bittersweet, never breezy: joy and laughter are what this reader passes on.
@@ -95,6 +100,9 @@ PERSONALITY_TYPES = [
     {
         "id": "control_intellectual",
         "name": "The Control-Seeking Intellectual",
+        "article": "a",
+        "share_line": "If it scares me, I read until it doesn't.",
+        "red_flag": "I'd rather analyse a feeling than have it",
         "description": "You read to master what unsettles you. Understanding is your armor, and every book is a new piece of territory mapped.",
         "primary_emotions": ["insight", "dread", "awe"],
         "anti_emotions": ["grief", "catharsis"],  # they resist vulnerability, and being emotionally undone
@@ -106,6 +114,9 @@ PERSONALITY_TYPES = [
     {
         "id": "soft_masochist",
         "name": "The Soft Masochist",
+        "article": "a",
+        "share_line": "I choose pain on purpose. Not sorrow — teeth.",
+        "red_flag": "I don't trust a book that feels too safe",
         # `conflicted` ("I shouldn't love this but I do") is this reader in one
         # phrase: drawn to the book that comes at them, and aware of it.
         "description": "You choose pain on purpose. Not sorrow — teeth. You're drawn to the book that comes at you over the one that holds you.",
@@ -119,6 +130,9 @@ PERSONALITY_TYPES = [
     {
         "id": "comfort_architect",
         "name": "The Comfort Architect",
+        "article": "a",
+        "share_line": "My bookshelf isn't a collection. It's a home.",
+        "red_flag": "I re-read instead of risking something new",
         "description": "You build emotional safety through stories. Your bookshelf isn't a collection — it's a home you can always return to.",
         # Found family and the book that leaves you hopeful: comfort + attachment + hope.
         "primary_emotions": ["comfort", "attachment", "hope"],
@@ -131,6 +145,9 @@ PERSONALITY_TYPES = [
     {
         "id": "midnight_arsonist",
         "name": "The Midnight Arsonist",
+        "article": "a",
+        "share_line": "I read to set fire to my own beliefs.",
+        "red_flag": "I call gentle books boring",
         "description": "You read like you're setting fire to your own beliefs. Comfort zones are for people who haven't found the right book yet.",
         "primary_emotions": ["amusement", "rage", "insight"],
         "anti_emotions": ["attachment", "swoon"],  # dismisses the gentle and the sweet
@@ -142,6 +159,9 @@ PERSONALITY_TYPES = [
     {
         "id": "quiet_witness",
         "name": "The Quiet Witness",
+        "article": "a",
+        "share_line": "Books are where I stop performing.",
+        "red_flag": "I observe more than I feel",
         "description": "You absorb everything and process in silence. Books are your confessional — the only place you don't perform.",
         # Tenderness merged into comfort, so the introspective triple is now
         # being seen + memory + the sentence itself.
@@ -155,6 +175,9 @@ PERSONALITY_TYPES = [
     {
         "id": "obsessive_romantic",
         "name": "The Obsessive Romantic",
+        "article": "an",
+        "share_line": "I don't read books. I fall into them.",
+        "red_flag": "I quit books I can't fall in love with",
         "description": "You don't read books — you fall into them. Every story is a love affair, and you don't do casual.",
         "primary_emotions": ["desire", "longing", "attachment"],
         "anti_emotions": ["amusement", "joy"],  # they cannot do casual
@@ -166,6 +189,9 @@ PERSONALITY_TYPES = [
     {
         "id": "emotional_archaeologist",
         "name": "The Emotional Archaeologist",
+        "article": "an",
+        "share_line": "Every book is a dig for a buried part of me.",
+        "red_flag": "I find meaning even where there's none",
         "description": "You dig into stories looking for buried parts of yourself. Every book is an excavation site.",
         # Being seen, the ache underneath, and what it teaches you about yourself.
         # (It shared catharsis with the Grief Romantic in the first draft and stole
@@ -180,6 +206,9 @@ PERSONALITY_TYPES = [
     {
         "id": "world_diver",
         "name": "The World-Diver",
+        "article": "a",
+        "share_line": "I read to live somewhere else.",
+        "red_flag": "I skip quiet books that don't take me anywhere",
         "description": "You read to live somewhere else. Vast worlds, long histories, maps in the front pages — you want to be swallowed whole and come back glowing.",
         "primary_emotions": ["awe", "thrill", "joy"],
         "anti_emotions": ["recognition", "grief"],  # not here to be mirrored, not here to mourn
@@ -191,6 +220,9 @@ PERSONALITY_TYPES = [
     {
         "id": "adrenaline_seeker",
         "name": "The Adrenaline Seeker",
+        "article": "an",
+        "share_line": "If it doesn't grab me by the collar, I'm out.",
+        "red_flag": "I rush past the quiet parts",
         "description": "You read for the pulse. Twists, fear, the 3am chapter — a book has to grab you by the collar and not let go.",
         "primary_emotions": ["thrill", "dread", "shock"],
         "anti_emotions": ["recognition", "beauty"],  # plot over prose, story over self
@@ -202,6 +234,9 @@ PERSONALITY_TYPES = [
     {
         "id": "sunshine_romantic",
         "name": "The Sunshine Romantic",
+        "article": "a",
+        "share_line": "I believe in love stories. Not embarrassed about it.",
+        "red_flag": "I bail when a story turns dark",
         "description": "You read for the swoon. Banter, butterflies and the happy ending you were promised — you believe in love stories and you're not embarrassed about it.",
         "primary_emotions": ["swoon", "joy", "amusement"],
         "anti_emotions": ["grief", "dread"],
@@ -218,6 +253,11 @@ PERSONALITY_TYPES = [
 DISCERNING_READER = {
     "id": "discerning_reader",
     "name": "The Discerning Reader",
+    # The shareable card speaks as the reader (first person, under 60
+    # characters): what they'd say out loud, and the blind spot admitted.
+    "article": "a",
+    "share_line": "Most books don't reach me. The ones that do, matter.",
+    "red_flag": "I decide a book has failed before it's finished",
     "description": "You have high standards. Most books don't reach you — and when one does, it matters.",
     "primary_emotions": [],
     "anti_emotions": [],
