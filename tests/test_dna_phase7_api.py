@@ -120,8 +120,9 @@ async def test_snapshot_on_drift_and_shift_notification(client, db):
     n_snaps = (await db.execute(select(func.count(DNASnapshot.id)).where(DNASnapshot.user_id == user.id))).scalar()
     assert n_snaps == 1  # first snapshot captured
 
-    # Four recent devastating books → the profile moves.
-    fresh = [add(["haunted", "grief"], i, intensity=9) for i in range(4)]
+    # Six recent devastating books → the profile moves, and clearly enough (past
+    # the switch margin, on consecutive saves) that the archetype does too.
+    fresh = [add(["haunted", "grief"], i, intensity=9) for i in range(6)]
     await db.flush()
     for e in fresh:
         for slug in ("haunted", "grief"):

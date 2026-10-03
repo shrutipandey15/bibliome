@@ -375,14 +375,21 @@ DNF_REASONS = [
     ),
 ]
 
-# ── 7. Range (gate 8; narrowing variant needs a prior snapshot) ──
+# ── 7. Range (gate 8; narrowing variant compares two windows of books) ──
+RANGE_WINDOW = 10   # books per window
+RANGE_DROP = 3      # fewer feelings than this is noise, not a narrowing
 RANGE = [
     InsightTemplate(
         "range", "narrowing", GATES["range"], True,
+        # Like for like: the last RANGE_WINDOW books against the RANGE_WINDOW
+        # before them. It used to compare an old snapshot's ALL-TIME count with
+        # today's all-time count, which can only grow, so "lately" never meant
+        # lately.
         lambda c: (c.get("range_prev_distinct") is not None
-                   and c["range"]["distinct"] < c["range_prev_distinct"]),
-        lambda c: (f"Your range narrowed — you used to reach for "
-                   f"{c['range_prev_distinct']} feelings; lately {c['range']['distinct']}."),
+                   and c.get("range_lately") is not None
+                   and c["range_lately"] <= c["range_prev_distinct"] - RANGE_DROP),
+        lambda c: (f"Your range narrowed — your {RANGE_WINDOW} books before reached for "
+                   f"{c['range_prev_distinct']} feelings; your last {RANGE_WINDOW}, {c['range_lately']}."),
         lambda c: 0.75,
     ),
     InsightTemplate(
@@ -583,6 +590,23 @@ def _earned_row(cat: str, need: int, have: int) -> dict:
     }
 
 
+def _mini(type_id: str | None) -> dict | None:
+    """Just enough of an archetype to draw it: id, name, colour, glyph."""
+    if not type_id:
+        return None
+    a = sig.archetype_dict(type_id)
+    return {"id": a["id"], "name": a["name"], "color": a["color"], "glyph": a["glyph"]}
+
+
+def _day(ts) -> str | None:
+    return ts.date().isoformat() if ts else None
+
+
+def _span(x: dict) -> dict:
+    """An era or a season, ready to print: who, from, to (None = still), books."""
+    return {**_mini(x["id"]), "from": _day(x["from"]), "to": _day(x["to"]), "books": x["books"]}
+
+
 def _top_slug(vec: dict[str, float]) -> str | None:
     ranked = sorted(vec.items(), key=lambda kv: kv[1], reverse=True)
     return ranked[0][0] if ranked and ranked[0][1] > 0 else None
@@ -596,6 +620,8 @@ def build_dna(
     prev_snapshot: dict | None = None,
     snapshot_count: int = 0,
     insight_limit: int = 4,
+    echo_entry_id: str | None = None,
+    prev_state: dict | None = None,
 ) -> dict:
     """The one entry point: turn a reader's entries into the DNA payload (B7.5/B7.6).
 
@@ -626,6 +652,19 @@ def build_dna(
     # are five titles we know nothing about — computing a profile from them would
     # be reading tea leaves in an empty cup.
     tagged = [s for s in sigs if s.emotions]
+    # Climate, season, leaning and moments — one replay of the shelf in reading
+    # order (dna_signals, "Aliveness"). The echo is the same replay with and
+    # without the book that was just saved.
+    state = sig.dna_state(sigs, journal_sigs)
+    echo = sig.echo_for(echo_entry_id, sigs, journal_sigs, after=state, prev=prev_state)
+    alive_state = sig.compact_state(state)
+    if echo:
+        extra = echo["extra"]
+        if extra and extra["kind"] == "shift":
+            extra = {**extra, "from": _mini(extra["from"]), "to": _mini(extra["to"])}
+        elif extra and extra["kind"] in ("season", "leaning"):
+            extra = {**extra, "archetype": _mini(extra.pop("id"))}
+        echo = {**echo, "book_type": _mini(echo["book_type"]), "extra": extra}
     if len(tagged) < MIN_BOOKS_FOR_DNA:
         return {
             "enough": False,
@@ -639,14 +678,14 @@ def build_dna(
             "snapshot_count": snapshot_count,
             "has_two_snapshots": snapshot_count >= 2,
             "journal_entry_count": journal_count,
+            "echo": echo,
+            # What this reader has now been shown — the next echo's "before".
+            "alive_state": alive_state,
         }
 
     enduring = sig.frequency_vector(vector_sigs, weighted=False)
     current = sig.frequency_vector(vector_sigs, weighted=True)
     drift_val = sig.drift(enduring, current)
-    # Archetype only: same recency-weighted vector, additionally scaled by how
-    # hard each book hit. drift/entropy/display stay on `current`.
-    archetype_vec = sig.frequency_vector(vector_sigs, weighted=True, intensity_weighted=True)
 
     # Book-share for the "rare" blind-spot variant. The denominator is TAGGED books,
     # not the shelf: only a tagged book could have carried the emotion, so dividing
@@ -667,10 +706,11 @@ def build_dna(
     dnf_tally = sig.dnf_reasons(sigs)
 
     prev_current = (prev_snapshot or {}).get("current_vector")
-    prev_enduring = (prev_snapshot or {}).get("enduring_vector")
-    range_prev_distinct = (
-        sum(1 for v in prev_enduring.values() if v > 0) if prev_enduring else None
-    )
+    in_order = [s for s in sig._reading_order(sigs) if s.emotions]
+    range_prev_distinct = range_lately = None
+    if len(in_order) >= 2 * RANGE_WINDOW:
+        range_lately = len({e for s in in_order[-RANGE_WINDOW:] for e in s.emotions})
+        range_prev_distinct = len({e for s in in_order[-2 * RANGE_WINDOW:-RANGE_WINDOW] for e in s.emotions})
 
     # Books per register, counted once per book — the shareable card's fingerprint.
     # Built from the same opened-only `sigs` everything else in this function reads,
@@ -699,6 +739,7 @@ def build_dna(
         "intensity_signature": sig.intensity_signature(sigs),
         "range": sig.range_entropy(sigs),
         "range_prev_distinct": range_prev_distinct,
+        "range_lately": range_lately,
         # An emotion is only a blind spot if it's absent from the journal too —
         # "you have never named this" is a stronger and more honest claim when it
         # covers everywhere the reader names feelings, not just the shelf.
@@ -719,7 +760,13 @@ def build_dna(
     }
 
     unlocked, locked, earned = generate_insights(ctx, limit=insight_limit)
-    archetype_id, scores, gap = sig.classify_reader(sigs, archetype_vec)
+    # The archetype is the replayed climate: the intensity-scaled vector at a
+    # slower fade than `current` (CLIMATE_HALF_LIFE_DAYS), switched only on a
+    # clear, repeated lead (ARCHETYPE_SWITCH_MARGIN × ARCHETYPE_SWITCH_CONFIRM).
+    # drift/entropy/display stay on `current`.
+    archetype_id, scores, gap = state["archetype_id"], state["scores"], state["margin"]
+    leaning_id = state["leaning_id"]
+    season_id = state["season_id"]
 
     return {
         "enough": True,
@@ -749,10 +796,24 @@ def build_dna(
         # While the baseline is provisional every label is hedged (see
         # dna_signals.BASELINE_PROVISIONAL); never for the Discerning Reader,
         # whose runner-up would be a feeling type it was chosen over.
-        "runner_up": (
-            sig.archetype_dict(sorted(scores, key=scores.get, reverse=True)[1])["name"]
-            if sig.show_runner_up(archetype_id, gap) else None
-        ),
+        # The hedge is now the leaning line: shown when the nearest rival has
+        # caught up with this archetype or passed it (it can, for a while, under
+        # the switch margin). The name stays in `runner_up` because the public
+        # card already carries it and must keep hedging exactly as the owner's
+        # own view does.
+        "runner_up": sig.archetype_dict(leaning_id)["name"] if leaning_id else None,
+        "leaning": _mini(leaning_id),
+        # Weather around the climate. Newest first everywhere.
+        "season": ({**_mini(season_id),
+                    "since": _day(state["seasons"][-1]["from"]),
+                    "books": state["seasons"][-1]["books"],
+                    "home": season_id == archetype_id}
+                   if season_id else None),
+        "seasons": [_span(x) for x in reversed(state["seasons"][-12:])],
+        "eras": [_span(x) for x in reversed(state["eras"][-12:])],
+        "moments": list(reversed(state["moments"][-20:])),
+        "echo": echo,
+        "alive_state": alive_state,
         # The receipt. Books only — `sigs`, not `vector_sigs` — because this line
         # is rendered on public surfaces and counts things it calls "your books".
         "basis": sig.basis_for(archetype_id, sigs) if archetype_id else None,

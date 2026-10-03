@@ -105,6 +105,11 @@ class EntrySig:
     # mapped forward on the way in (yes→liked, no→not_for_me, not_sure→mixed).
     # Feeds the Discerning Reader, which is assigned from verdicts, not feelings.
     verdict: str | None = None
+    # Which entry this came from, and its title. Only the "aliveness" layer reads
+    # them: the echo has to find the book that was just saved, and a moment
+    # ("a first: it gave me butterflies") is dated and named by its book.
+    entry_id: str | None = None
+    title: str | None = None
 
 
 def _canon_list(raw) -> list[str]:
@@ -141,18 +146,20 @@ def entry_sig(raw: dict) -> EntrySig:
         source=raw.get("source") or "book",
         dnf_reason=raw.get("dnf_reason"),
         verdict=LEGACY_VERDICT_MAP.get(raw.get("verdict"), raw.get("verdict")),
+        entry_id=str(raw["id"]) if raw.get("id") is not None else None,
+        title=raw.get("title"),
     )
 
 
 # ── Recency weighting (B7.3) ──
 
-def recency_weight(age_days: float) -> float:
-    return math.exp(-_LN2 * max(age_days, 0.0) / HALF_LIFE_DAYS)
+def recency_weight(age_days: float, half_life: float | None = None) -> float:
+    return math.exp(-_LN2 * max(age_days, 0.0) / (half_life or HALF_LIFE_DAYS))
 
 
 def frequency_vector(
     sigs: list[EntrySig], *, weighted: bool, intensity_weighted: bool = False,
-    now: datetime | None = None,
+    now: datetime | None = None, half_life: float | None = None,
 ) -> dict[str, float]:
     """An emotion vector over the full canonical vocabulary, normalized to sum 1.0 (all-zero if no tags).
 
@@ -180,7 +187,7 @@ def frequency_vector(
     mean_int = (sum(s.intensity for s in tagged) / len(tagged)) if tagged else 1.0
     vec = {s: 0.0 for s in _ALL_SLUGS}
     for sig in tagged:
-        w = recency_weight((now - sig.ts).days) if weighted else 1.0
+        w = recency_weight((now - sig.ts).days, half_life) if weighted else 1.0
         if intensity_weighted and mean_int > 0:
             w *= sig.intensity / mean_int
         w /= len(sig.emotions)
@@ -769,3 +776,385 @@ def archetype_dict(type_id: str) -> dict:
     return {"id": t["id"], "name": t["name"], "description": t["description"],
             "color": t["color"], "glyph": t["glyph"],
             "blind_spots": t["blind_spots"], "comfort_tropes": t["comfort_tropes"]}
+
+
+# ── Aliveness: climate, seasons, firsts and the echo (DNA Aliveness spec) ──
+#
+# The archetype is the reader's climate: it changes rarely and means something
+# when it does. Around it sits weather that is allowed to move every few books —
+# the reading season, the firsts, and the echo after each save.
+#
+# Both switch rules (climate and season) depend on the ORDER books arrived, so
+# instead of storing "the current archetype" and nudging it on each save, the
+# shelf is replayed in reading order and the rules applied from the start. An
+# edit, a delete or a backdated import then gives the same answer every time,
+# and nothing has to be migrated when a rule changes.
+#
+# Numbers from scripts/dna_alive_probe.py (simulated readers, real engine):
+#   - today's rule (120-day fade, no margin) changes the label 20–28 times per 100
+#     books on mixed shelves; this one about 5, while ~87% of readers whose taste
+#     really changes still reach their new archetype, a median ~15 books later.
+#   - a 6-book season with a 2-save confirmation turns about every 6 books.
+#   - firsts at these thresholds fire on ~12% of saves.
+
+CLIMATE_HALF_LIFE_DAYS = 240     # the archetype's vector; `current` stays on 120
+ARCHETYPE_SWITCH_MARGIN = 0.03   # a new archetype must lead the current one by this…
+ARCHETYPE_SWITCH_CONFIRM = 2     # …on this many saves in a row
+DISCERNING_EXIT_SHARE = 0.55     # enter at DISCERNING_SHARE, leave below this
+SEASON_WINDOW = 6                # the season is the last N tagged books
+SEASON_CONFIRM = 2               # a new season must win this many saves in a row
+SEASON_MIN_BOOKS = 10            # below this the window is most of the shelf
+TIPPING_GAP = 0.01               # "leaning toward" when a rival is within this
+TIPPING_GAP_PROVISIONAL = 0.02   # …looser while the baseline is a guess
+FIRST_BLIND_SPOT_BOOKS = 15      # a feeling never tagged in the first N+ books
+FIRST_RETURN_GAP = 20            # a feeling back after N+ books away…
+FIRST_RETURN_MIN_SEEN = 2        # …that had been tagged at least this often
+
+# Part of the snapshot's rule stamp: changing any of these changes labels for
+# reasons that are ours, not the reader's, so dna_service suppresses the "your
+# DNA shifted" notification across such a change (the same way it does for an
+# edit to the archetype table).
+CLIMATE_RULES = (f"hl{CLIMATE_HALF_LIFE_DAYS}:m{ARCHETYPE_SWITCH_MARGIN}"
+                 f":c{ARCHETYPE_SWITCH_CONFIRM}:dx{DISCERNING_EXIT_SHARE}")
+
+_TYPE_ORDER = [t["id"] for t in PERSONALITY_TYPES]
+_DISCERNING_ID = DISCERNING_READER["id"]
+
+
+def _reading_order(sigs: list[EntrySig]) -> list[EntrySig]:
+    """Opened books in the order they were read. Ties (same day) break on entry
+    id so the order — and so every replayed answer — is deterministic."""
+    return sorted(opened_only(sigs), key=lambda s: (s.ts, s.entry_id or ""))
+
+
+def _normalized(raw: dict[str, float]) -> dict[str, float]:
+    total = sum(raw.values())
+    if total <= 0:
+        return {s: 0.0 for s in _ALL_SLUGS}
+    return {s: raw.get(s, 0.0) / total for s in _ALL_SLUGS}
+
+
+def _rival(archetype_id: str, scores: dict[str, float]) -> str | None:
+    others = [t for t in _TYPE_ORDER if t != archetype_id and t in scores]
+    return max(others, key=lambda t: scores[t]) if others else None
+
+
+def leaning(archetype_id: str | None, scores: dict[str, float]) -> str | None:
+    """The archetype the reader is leaning toward, or None.
+
+    Shown when the nearest rival has caught up with the reader's own archetype or
+    passed it — which, under the switch margin, it can do for a while without
+    taking the label. Never for the Discerning Reader, which isn't scored on
+    feelings, so a feeling rival means nothing against it.
+    """
+    if not archetype_id or archetype_id == _DISCERNING_ID or archetype_id not in scores:
+        return None
+    gap = TIPPING_GAP_PROVISIONAL if BASELINE_PROVISIONAL else TIPPING_GAP
+    rival = _rival(archetype_id, scores)
+    if rival is None:
+        return None
+    return rival if scores[rival] >= scores[archetype_id] - gap else None
+
+
+def replay_climate(book_sigs: list[EntrySig],
+                   journal_sigs: list[EntrySig] | None = None) -> dict:
+    """The archetype, replayed book by book under the switch margin.
+
+    One step per tagged book, from the MIN_BOOKS_FOR_DNA-th on. At each step the
+    archetype vector is what `frequency_vector(weighted, intensity_weighted,
+    half_life=CLIMATE_HALF_LIFE_DAYS)` would give at that book's date over every
+    book and journal day up to it. Computed incrementally: the recency factor
+    `exp(-ln2·(now-ts)/hl)` splits into a per-entry term and a per-step term, and
+    the per-step term (like the mean intensity) is common to every entry, so it
+    cancels when the vector is normalized.
+
+    Journal days between books count toward the next step; journal days after
+    the latest book wait for the next book. The climate moves on books.
+
+    Returns {archetype_id, scores, margin, eras}. `eras` oldest first:
+    {id, from, to, books}, where `to` is None for the current one.
+    """
+    books_all = _reading_order(book_sigs)
+    tagged = [b for b in books_all if b.emotions]
+    out = {"archetype_id": None, "scores": {}, "margin": 0.0, "eras": []}
+    if len(tagged) < MIN_BOOKS_FOR_DNA:
+        return out
+    journal = sorted((j for j in (journal_sigs or []) if j.emotions), key=lambda j: j.ts)
+    # Anchored on the NEWEST entry so every exponent is <= 0: a far-past date
+    # underflows to a weight of 0 (as recency_weight always did) instead of a
+    # far-future typo overflowing and taking the whole DNA down with it.
+    t_ref = max([tagged[-1].ts] + [j.ts for j in journal[-1:]])
+
+    def term(s: EntrySig) -> float:
+        days = (s.ts - t_ref).total_seconds() / 86400.0
+        return math.exp(_LN2 * days / CLIMATE_HALF_LIFE_DAYS) * s.intensity / len(s.emotions)
+
+    raw: dict[str, float] = {}
+    ji = bi = 0
+    judged = missed = 0.0
+    displayed: str | None = None
+    cand: str | None = None
+    streak = 0
+    eras: list[dict] = []
+    scores: dict[str, float] = {}
+    for k, book in enumerate(tagged, start=1):
+        t = book.ts
+        while ji < len(journal) and journal[ji].ts <= t:
+            for e in journal[ji].emotions:
+                raw[e] = raw.get(e, 0.0) + term(journal[ji])
+            ji += 1
+        for e in book.emotions:
+            raw[e] = raw.get(e, 0.0) + term(book)
+        # Judgements (verdicts and put-downs) on every opened book up to here,
+        # tagged or not — the Discerning Reader is assigned from those.
+        while bi < len(books_all) and (books_all[bi].ts, books_all[bi].entry_id or "") <= (t, book.entry_id or ""):
+            s = books_all[bi]
+            if s.source == "book" and (s.verdict or s.status == "abandoned"):
+                judged += 1
+                missed += (1.0 if (s.status == "abandoned" or s.verdict == "not_for_me")
+                           else 0.5 if s.verdict == "mixed" else 0.0)
+            bi += 1
+        if k < MIN_BOOKS_FOR_DNA:
+            continue
+        best, scores, _ = score_archetype(_normalized(raw))
+        share = missed / judged if judged else 0.0
+        before = displayed
+        if displayed == _DISCERNING_ID:
+            if judged < DISCERNING_MIN_BOOKS or share < DISCERNING_EXIT_SHARE:
+                displayed = best
+        elif judged >= DISCERNING_MIN_BOOKS and share >= DISCERNING_SHARE:
+            displayed = _DISCERNING_ID
+        elif displayed is None:
+            displayed = best
+        elif best is not None and best != displayed and \
+                scores[best] - scores.get(displayed, float("-inf")) >= ARCHETYPE_SWITCH_MARGIN:
+            streak = streak + 1 if cand == best else 1
+            cand = best
+            if streak >= ARCHETYPE_SWITCH_CONFIRM:
+                displayed = best
+        else:
+            cand, streak = None, 0
+        if displayed != before:
+            cand, streak = None, 0
+            if eras:
+                eras[-1]["to"] = t
+            eras.append({"id": displayed, "from": t, "to": None, "books": 0})
+        if eras:
+            eras[-1]["books"] += 1
+
+    # Put-downs and verdicts on untagged books after the last tagged one still
+    # count toward the Discerning Reader — they're often exactly the books a
+    # reader doesn't bother tagging. Fold them in and re-check that rule alone.
+    tail_ts = None
+    while bi < len(books_all):
+        s = books_all[bi]
+        if s.source == "book" and (s.verdict or s.status == "abandoned"):
+            judged += 1
+            missed += (1.0 if (s.status == "abandoned" or s.verdict == "not_for_me")
+                       else 0.5 if s.verdict == "mixed" else 0.0)
+            tail_ts = s.ts
+        bi += 1
+    if tail_ts is not None:
+        share = missed / judged if judged else 0.0
+        before = displayed
+        if displayed == _DISCERNING_ID and (judged < DISCERNING_MIN_BOOKS or share < DISCERNING_EXIT_SHARE):
+            displayed = score_archetype(_normalized(raw))[0]
+        elif displayed != _DISCERNING_ID and judged >= DISCERNING_MIN_BOOKS and share >= DISCERNING_SHARE:
+            displayed = _DISCERNING_ID
+        if displayed != before:
+            if eras:
+                eras[-1]["to"] = tail_ts
+            eras.append({"id": displayed, "from": tail_ts, "to": None, "books": 0})
+
+    if displayed == _DISCERNING_ID:
+        margin = 1.0
+    elif displayed in scores:
+        rival = _rival(displayed, scores)
+        margin = round(scores[displayed] - scores[rival], 4) if rival else 0.0
+    else:
+        margin = 0.0
+    return {"archetype_id": displayed, "scores": scores, "margin": margin, "eras": eras}
+
+
+def replay_season(book_sigs: list[EntrySig]) -> dict:
+    """The reading season: the archetype the last SEASON_WINDOW tagged books point
+    to, under a SEASON_CONFIRM-save confirmation. Books only — a season is about
+    what the reader has been reading. No time decay inside the window.
+
+    Returns {season_id, seasons}; `seasons` oldest first, {id, from, to, books}.
+    """
+    tagged = [b for b in _reading_order(book_sigs) if b.emotions]
+    out = {"season_id": None, "seasons": []}
+    if len(tagged) < SEASON_MIN_BOOKS:
+        return out
+    current: str | None = None
+    cand: str | None = None
+    streak = 0
+    seasons: list[dict] = []
+    for k in range(SEASON_MIN_BOOKS, len(tagged) + 1):
+        window = tagged[k - SEASON_WINDOW:k]
+        best = book_archetype_of(window)
+        t = tagged[k - 1].ts
+        before = current
+        if current is None:
+            current = best
+        elif best is not None and best != current:
+            streak = streak + 1 if cand == best else 1
+            cand = best
+            if streak >= SEASON_CONFIRM:
+                current = best
+        else:
+            cand, streak = None, 0
+        if current != before:
+            cand, streak = None, 0
+            if seasons:
+                seasons[-1]["to"] = t
+            seasons.append({"id": current, "from": t, "to": None, "books": 0})
+        if seasons:
+            seasons[-1]["books"] += 1
+    return {"season_id": current, "seasons": seasons}
+
+
+def book_archetype_of(sigs: list[EntrySig], prefer: tuple[str | None, ...] = ()) -> str | None:
+    """The archetype a handful of books point to on their own — one book for the
+    echo, the season window for the season. Intensity-scaled like the climate,
+    no time decay. A tie (say a book tagged only "thrill", a primary of two
+    archetypes) goes to the first of `prefer` that is tied, then table order."""
+    tagged = [s for s in sigs if s.emotions]
+    if not tagged:
+        return None
+    best, scores, _ = score_archetype(frequency_vector(tagged, weighted=False, intensity_weighted=True))
+    if best is None:
+        return None
+    top = scores[best]
+    tied = [t for t in _TYPE_ORDER if scores[t] >= top - 1e-6]
+    for p in prefer:
+        if p in tied:
+            return p
+    return tied[0]
+
+
+def firsts(book_sigs: list[EntrySig]) -> list[dict]:
+    """Dated moments from the reader's own shelf, oldest first. Books only.
+
+    - first:    a feeling tagged for the first time after FIRST_BLIND_SPOT_BOOKS+
+                tagged books without it — a blind spot broken.
+    - return:   a feeling tagged FIRST_RETURN_MIN_SEEN+ times before, back after
+                FIRST_RETURN_GAP+ tagged books away. `gap` = books away.
+    - spectrum: the book that completed all of the feelings.
+
+    Thresholds are set so moments fire on roughly one save in eight; looser ones
+    fired on a third of saves and stopped meaning anything.
+    """
+    tagged = [b for b in _reading_order(book_sigs) if b.emotions]
+    seen: Counter = Counter()
+    last: dict[str, int] = {}
+    out: list[dict] = []
+    spectrum_done = False
+
+    def moment(kind: str, s: EntrySig, emotion: str | None, gap: int | None = None) -> dict:
+        return {"kind": kind, "emotion": emotion, "gap": gap, "entry_id": s.entry_id,
+                "title": s.title, "date": s.ts.date().isoformat()}
+
+    for i, s in enumerate(tagged):
+        for e in s.emotions:
+            if seen[e] == 0 and i >= FIRST_BLIND_SPOT_BOOKS:
+                out.append(moment("first", s, e))
+            elif seen[e] >= FIRST_RETURN_MIN_SEEN and i - last[e] - 1 >= FIRST_RETURN_GAP:
+                out.append(moment("return", s, e, i - last[e] - 1))
+        for e in s.emotions:
+            seen[e] += 1
+            last[e] = i
+        if not spectrum_done and len(seen) == len(_ALL_SLUGS):
+            spectrum_done = True
+            out.append(moment("spectrum", s, None))
+    return out
+
+
+def dna_state(book_sigs: list[EntrySig], journal_sigs: list[EntrySig] | None = None) -> dict:
+    """Climate, season, leaning and moments for a shelf, all from one replay."""
+    climate = replay_climate(book_sigs, journal_sigs)
+    season = replay_season(book_sigs)
+    return {
+        **climate,
+        **season,
+        "leaning_id": leaning(climate["archetype_id"], climate["scores"]),
+        "moments": firsts(book_sigs),
+    }
+
+
+def _moment_key(m: dict) -> list:
+    return [m["kind"], m["emotion"], m["entry_id"]]
+
+
+def compact_state(state: dict) -> dict:
+    """The few facts the NEXT echo compares against: what the reader was told
+    last time. Stored in the cached payload; JSON-safe."""
+    return {
+        "archetype_id": state["archetype_id"],
+        "season_id": state["season_id"],
+        "leaning_id": state["leaning_id"],
+        "moment_keys": [_moment_key(m) for m in state["moments"]],
+    }
+
+
+def echo_for(entry_id: str | None, book_sigs: list[EntrySig],
+             journal_sigs: list[EntrySig] | None = None,
+             after: dict | None = None, prev: dict | None = None) -> dict | None:
+    """What saving this book did, as one line and at most one extra.
+
+    The first line is a pure difference — the shelf with the book against the
+    same shelf without it — so it is the same whichever process computes it, and
+    a backdated book is judged where it sits in reading order.
+
+    The extra is measured against `prev`, the state the reader was last shown
+    (`compact_state` of the previous payload). Against "the shelf without this
+    book" an edit would re-announce its own old firsts, and the shift or season
+    it caused weeks ago, every time it was saved. With no `prev` (a first
+    computation, or a cache from before this layer) there is no extra: nothing
+    is announced that we can't show is new.
+
+    {entry_id, book_type, relation, extra}:
+      relation  deepened  — the book points to the reader's own archetype
+                pulled    — it points elsewhere, and saving it raised that score
+                reads_like — anything else (below the DNA gate, or the score
+                             didn't rise; the echo never claims a pull it can't show)
+      extra     the first that applies of shift, season, first/return/spectrum,
+                leaning — or None.
+    """
+    if not entry_id:
+        return None
+    opened = opened_only(book_sigs)
+    target = next((s for s in opened if s.entry_id == entry_id), None)
+    if target is None or not target.emotions:
+        return None
+    after = after or dna_state(book_sigs, journal_sigs)
+    before = dna_state([s for s in book_sigs if s.entry_id != entry_id], journal_sigs)
+    climate = after["archetype_id"]
+    book_type = book_archetype_of([target], prefer=(after["season_id"], climate))
+    if climate is None:
+        relation = "reads_like"
+    elif book_type == climate:
+        relation = "deepened"
+    elif before["scores"] and after["scores"].get(book_type, 0.0) > before["scores"].get(book_type, 0.0):
+        relation = "pulled"
+    elif not before["scores"]:
+        relation = "pulled"
+    else:
+        relation = "reads_like"
+
+    extra = None
+    if prev is not None:
+        had = {tuple(k) for k in prev.get("moment_keys") or []}
+        new = [m for m in after["moments"]
+               if m["entry_id"] == entry_id and tuple(_moment_key(m)) not in had]
+        if prev.get("archetype_id") and climate and prev["archetype_id"] != climate:
+            extra = {"kind": "shift", "from": prev["archetype_id"], "to": climate}
+        # A first season isn't a turn: there has to have been one before.
+        elif prev.get("season_id") and after["season_id"] and after["season_id"] != prev["season_id"]:
+            extra = {"kind": "season", "id": after["season_id"], "home": after["season_id"] == climate}
+        elif new:
+            extra = {"kind": new[0]["kind"], "emotion": new[0]["emotion"], "gap": new[0]["gap"]}
+        elif after["leaning_id"] and after["leaning_id"] != prev.get("leaning_id"):
+            extra = {"kind": "leaning", "id": after["leaning_id"]}
+    return {"entry_id": entry_id, "book_type": book_type, "relation": relation, "extra": extra}

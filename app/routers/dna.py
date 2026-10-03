@@ -28,7 +28,7 @@ from app.schemas.dna import (
     StatsResponse,
 )
 from app.services.blind_spots_service import get_blind_spots
-from app.services.dna_service import cache_is_current, compute_and_cache, manual_snapshot
+from app.services.dna_service import cache_is_current, compute_and_cache, manual_snapshot, shift_unseen
 from app.services.profile_service import archetype_share
 from app.services.calendar_service import get_emotional_calendar
 from app.services.dna_engine import (
@@ -111,7 +111,27 @@ async def get_dna_profile(
     return {
         **payload,
         "archetype_share": await archetype_share(db, current_user.personality_type),
+        "shift_unseen": shift_unseen(current_user, payload),
     }
+
+
+@router.post("/shift-seen", status_code=status.HTTP_204_NO_CONTENT)
+async def mark_shift_seen(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """The reader has seen the shift card for their current archetype; don't show
+    it again until the archetype changes."""
+    # Acknowledge what the page shows NOW, not a cache a pending recalc is about
+    # to replace — or the card would come back for the label it just showed.
+    if not current_user.dna_dirty and await cache_is_current(db, current_user):
+        v2 = current_user.cached_dna_v2 or {}
+    else:
+        v2 = await compute_and_cache(db, current_user)
+    archetype = v2.get("archetype") if v2.get("enough") else None
+    if archetype:
+        current_user.dna_seen_archetype = archetype["id"]
+        await db.flush()
 
 
 @router.post("/generate", response_model=DNAGenerateResponse)
@@ -316,24 +336,49 @@ async def get_monthly_recap(
     # Fetch all user entries
     all_entries = await _get_user_entries(db, current_user.id)
 
-    # Split into month entries and prior entries
+    # Split by the date the book was READ (finished_at), falling back to when it
+    # was logged — the same date the DNA's recency and seasons use. Splitting on
+    # created_at put a whole imported back catalogue into the import month.
+    def read_on(e):
+        if e.get("finished_at"):
+            return datetime.combine(e["finished_at"], datetime.min.time(), tzinfo=timezone.utc)
+        return e.get("created_at")
+
     month_entries = []
     prior_entries = []
     for e in all_entries:
-        created = e.get("created_at")
-        if not created:
+        when = read_on(e)
+        if not when:
             continue
-        if month_start <= created <= month_end:
+        if month_start <= when <= month_end:
             month_entries.append(e)
-        elif created < month_start:
+        elif when < month_start:
             prior_entries.append(e)
+
+    # Shifts, seasons and moments come from the same replayed DNA the reader's
+    # mirror shows, never from a second engine.
+    if not current_user.dna_dirty and await cache_is_current(db, current_user):
+        v2 = current_user.cached_dna_v2
+    else:
+        v2 = await compute_and_cache(db, current_user)
+    first, last = month_start.date().isoformat(), month_end.date().isoformat()
+    in_month = lambda d: d is not None and first <= d <= last
+    eras = v2.get("eras") or []
+    shift = None
+    for i, era in enumerate(eras):
+        if in_month(era.get("from")) and i + 1 < len(eras):
+            shift = {"previous_type": eras[i + 1]["name"], "current_type": era["name"], "shifted": True}
+            break
 
     recap = generate_recap(
         month_entries=month_entries,
         prior_entries=prior_entries,
         current_personality=current_user.personality_type,
+        shift=shift,
     )
     recap["month"] = month
+    recap["seasons"] = [s for s in (v2.get("seasons") or []) if in_month(s.get("from"))]
+    recap["moments"] = [m for m in (v2.get("moments") or []) if in_month(m.get("date"))]
 
     return recap
 

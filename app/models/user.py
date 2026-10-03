@@ -43,6 +43,10 @@ class User(Base):
 
     # DNA caching — dirty flag flips true on entry create/update/delete
     dna_dirty: Mapped[bool] = mapped_column(Boolean, default=True)
+    # The archetype id the reader last acknowledged on the DNA page. The shift
+    # card shows when the current archetype differs from it. Set silently the
+    # first time a reader gets an archetype, so a first label is never a "shift".
+    dna_seen_archetype: Mapped[str | None] = mapped_column(String(40), nullable=True)
     cached_dna_profile: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
     # Stated preference (B7.1): 1–2 canonical emotion slugs — "what do you read for?"

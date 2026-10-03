@@ -266,6 +266,10 @@ async def update_entry(
 
     # Update emotions if provided
     if data.emotions is not None:
+        # A feelings-only edit changes no column on the entry itself, so its
+        # `updated_at` would not move — and the DNA's shelf stamp and its
+        # after-save echo both key on "the entry touched last".
+        entry.updated_at = func.now()
         # Remove existing emotions
         for existing in entry.emotions:
             await db.delete(existing)

@@ -148,6 +148,9 @@ class RecapShift(BaseModel):
 
 class RecapResponse(BaseModel):
     month: str
+    # Seasons that started and moments dated in this month (aliveness layer).
+    seasons: list[dict[str, Any]] = []
+    moments: list[dict[str, Any]] = []
     books_logged: int
     avg_intensity: float
     top_emotions: list[TopEmotion]
@@ -166,6 +169,10 @@ class DNAProfileNotEnough(BaseModel):
     snapshot_count: int
     has_two_snapshots: bool
     journal_entry_count: int
+    # What the latest save did (the archetype the book points to). Below the gate
+    # there's no archetype to compare it with, so `relation` is "reads_like".
+    echo: dict[str, Any] | None
+    shift_unseen: bool = False
 
 
 class DNAProfileReady(BaseModel):
@@ -190,6 +197,14 @@ class DNAProfileReady(BaseModel):
     archetype_scores: dict[str, float]
     margin: float
     runner_up: str | None
+    # Aliveness layer — required, for the same reason as `emotion_counts`: a
+    # default would turn "the engine forgot" into "nothing happened".
+    leaning: dict[str, Any] | None
+    season: dict[str, Any] | None
+    seasons: list[dict[str, Any]]
+    eras: list[dict[str, Any]]
+    moments: list[dict[str, Any]]
+    echo: dict[str, Any] | None
     basis: dict[str, Any] | None
     profiles: dict[str, dict[str, float]]
     drift: float
@@ -201,6 +216,9 @@ class DNAProfileReady(BaseModel):
     # per-reader) — not part of build_dna's own return. Whole percent, or None
     # if too few readers share this archetype to say honestly (profile_service).
     archetype_share: int | None = None
+    # Merged on top by the /profile route: the archetype changed since the reader
+    # last acknowledged one (dna_service.shift_unseen). Per request, not cached.
+    shift_unseen: bool = False
 
 
 DNAProfileV2Response = DNAProfileNotEnough | DNAProfileReady

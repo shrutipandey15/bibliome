@@ -8,7 +8,7 @@ in-app while their share link confidently labelled them. These are the guards.
 
 import pytest
 
-from app.services.dna_signals import HEDGE_ARCHETYPE_GAP
+from app.services.dna_signals import TIPPING_GAP_PROVISIONAL
 
 pytestmark = pytest.mark.asyncio
 
@@ -70,18 +70,19 @@ async def test_public_card_hedges_when_the_in_app_mirror_hedges(client):
     of that decision, not a second opinion with more confidence than the first.
     """
     h = await _user(client, "hedged")
-    # An even recognition+awe+longing shelf sits emotional_archaeologist and
-    # control_intellectual at a gap of ~0.009, well inside HEDGE_ARCHETYPE_GAP, so
-    # build_dna fills in a runner-up. Asserted rather than skipped-if-absent: a
-    # guard that quietly opts out when its own fixture drifts is not a guard.
+    # An even grief+longing shelf sits obsessive_romantic and grief_romantic a
+    # hair apart, inside the leaning gap, so build_dna names the rival it leans
+    # toward. Asserted rather than skipped-if-absent: a guard that quietly opts
+    # out when its own fixture drifts is not a guard.
     for i in range(10):
-        await _add_book(client, h, f"Dig {i}", ["recognition", "awe", "longing"])
+        await _add_book(client, h, f"Ache {i}", ["grief", "longing"])
 
     in_app = (await client.get("/api/dna/profile", headers=h)).json()
     assert in_app["runner_up"], (
-        f"fixture no longer lands in the hedge band (margin {in_app['margin']}, "
-        f"threshold {HEDGE_ARCHETYPE_GAP}) — re-pick the shelf, don't drop the test"
+        f"fixture no longer lands in the leaning band (margin {in_app['margin']}, "
+        f"gap {TIPPING_GAP_PROVISIONAL}) — re-pick the shelf, don't drop the test"
     )
+    assert in_app["leaning"]["name"] == in_app["runner_up"]
 
     token = await _share_token(client, h)
     card = (await client.get(f"/api/public/shared/{token}")).json()

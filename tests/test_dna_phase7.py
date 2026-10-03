@@ -95,6 +95,7 @@ def test_every_applicable_template_renders_without_error():
         "arc_count": 20,          # arc carries its own denominator
         "range": {"entropy": 0.4, "distinct": 4},
         "range_prev_distinct": 9,
+        "range_lately": 4,
         "blind_spots": ["attachment"],
         "rare": [("amusement", 0.03)],
         "top_pair": (("comfort", "dread"), 12),
@@ -168,12 +169,15 @@ def test_dna_moves_when_recent_books_flip():
     sigs = [sig(["comfort", "attachment"], intensity=6, days=330 + i * 10) for i in range(15)]
     settled = build_dna(sigs)
     assert settled["archetype"]["id"] == "comfort_architect"
-    # …then three recent devastating books. Recency weighting lets the fresh reading
-    # dominate once the old has decayed — the headline moves (DoD).
-    sigs += [sig(["haunted", "grief"], intensity=9, days=i) for i in range(3)]
+    # …then three recent devastating books. The profile moves at once, but the
+    # archetype is the climate: three books are weather, not a new reader.
+    three = sigs + [sig(["haunted", "grief"], intensity=9, days=i) for i in range(3)]
+    held = build_dna(three)
+    assert held["drift"] > 0.1                        # the profile genuinely moved
+    assert held["archetype"]["id"] == settled["archetype"]["id"]
+    # A few more and the lead is clear and repeated — the headline moves (DoD).
+    sigs += [sig(["haunted", "grief"], intensity=9, days=i) for i in range(6)]
     moved = build_dna(sigs)
-
-    assert moved["drift"] > 0.1                       # the profile genuinely moved
     assert moved["archetype"]["id"] != settled["archetype"]["id"]  # headline changed
 
 

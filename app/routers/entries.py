@@ -234,7 +234,8 @@ async def import_library(
     if imported:
         current_user.dna_dirty = True
         await db.flush()
-        background_tasks.add_task(recalculate_dna, current_user.id)
+        # An import moves the shelf in one go: no "your DNA shifted" for that.
+        background_tasks.add_task(recalculate_dna, current_user.id, notify_shift=False)
         for book_id in engaged_book_ids:
             background_tasks.add_task(refresh_book_aggregate, book_id)
         background_tasks.add_task(recompute_resonance, current_user.id)

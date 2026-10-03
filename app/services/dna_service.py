@@ -28,6 +28,11 @@ from app.services.dna_insights import build_dna
 from app.services.journal_service import load_emotion_sources as load_journal_sources
 from app.services.notification_service import notify
 
+# The stamp a snapshot carries so a label change can be told apart from a change
+# in our own rules: the archetype table AND the climate's switch rules. A shift
+# across a change in either is ours, not the reader's — snapshot, don't notify.
+RULES_REV = f"{ARCHETYPE_TABLE_REV}/{sig.CLIMATE_RULES}"
+
 
 async def _load_raw(db: AsyncSession, user_id: uuid.UUID) -> list[dict]:
     """Slim load — only the columns the signal math needs (Part 4 perf)."""
@@ -40,6 +45,11 @@ async def _load_raw(db: AsyncSession, user_id: uuid.UUID) -> list[dict]:
     rows = result.scalars().all()
     return [
         {
+            # id/title/updated_at feed the aliveness layer: the echo finds the
+            # book just saved, and moments are named by their book.
+            "id": str(e.id),
+            "title": e.title,
+            "updated_at": e.updated_at,
             "emotions": [em.emotion_id for em in e.emotions],
             "intensity": e.intensity,
             "created_at": e.created_at,
@@ -104,12 +114,17 @@ def is_fresh(cache: dict | None) -> bool:
       - no `emotion_counts`: cached before the tally the card's fingerprint is
         drawn from was returned at all, so the card falls back to a share vector
         and mislabels it as a book count.
+      - no `echo` / `eras`: cached before the aliveness layer, and under the old
+        archetype rule.
     """
     if not cache:
         return False
     if "snapshot_count" not in cache:
         return False
     if cache.get("enough") and ("earned" not in cache or "emotion_counts" not in cache):
+        return False
+    # Cached before the aliveness layer (echo, seasons, eras, moments) existed.
+    if "alive_state" not in cache or (cache.get("enough") and "eras" not in cache):
         return False
     return all("need" in row for row in (cache.get("locked") or []))
 
@@ -201,8 +216,15 @@ async def compute_and_cache(db: AsyncSession, user: User) -> dict:
     journal_sigs = await _load_journal_sigs(db, user.id)
     ctx = await _snapshot_context(db, user.id)
 
+    prev = user.cached_dna_v2
     v2 = build_dna(sigs, user.reads_for, journal_sigs=journal_sigs,
-                   prev_snapshot=ctx.prev_emotion_data, snapshot_count=ctx.count)
+                   prev_snapshot=ctx.prev_emotion_data, snapshot_count=ctx.count,
+                   echo_entry_id=_latest_touched(raw),
+                   # What the reader was last shown, if that cache is of this
+                   # layer's shape; the echo's extra line is measured against it.
+                   prev_state=(prev or {}).get("alive_state") if is_fresh(prev) else None)
+    if v2.get("enough"):
+        v2["eras"] = _with_books_that_moved(v2["eras"], sigs)
 
     # Legacy public signature — books ONLY, deliberately. This payload is reused as
     # the *public* profile signature, and the journal is private: a stranger must
@@ -221,9 +243,51 @@ async def compute_and_cache(db: AsyncSession, user: User) -> dict:
     # The headline archetype now comes from the recency-weighted profile so it can
     # change (B7.5); None until there's enough data.
     user.personality_type = v2["archetype"]["name"] if v2.get("archetype") else None
+    # The first archetype a reader is given is not a "shift": record it as seen,
+    # so the shift card only ever announces a change that happened after it.
+    if v2.get("archetype") and user.dna_seen_archetype is None:
+        user.dna_seen_archetype = v2["archetype"]["id"]
     user.dna_dirty = False
     await db.flush()
     return v2
+
+
+def _latest_touched(raw: list[dict]) -> str | None:
+    """The opened book with a feeling that was saved most recently — the one the
+    echo speaks about. The client shows the echo only when this matches the book
+    it just saved, and only for saves that should get one (not imports, not a
+    notes-only edit), so picking "the latest" here is safe."""
+    rows = [r for r in raw if r.get("emotions") and r.get("status") in sig.OPENED_STATUSES
+            and r.get("updated_at") is not None]
+    if not rows:
+        return None
+    return max(rows, key=lambda r: r["updated_at"])["id"]
+
+
+def _with_books_that_moved(eras: list[dict], sigs: list[sig.EntrySig]) -> list[dict]:
+    """For the current era, when it follows another: up to three books, from the
+    dozen read up to the change, that point to the new archetype — strongest
+    first. These are what the shift card names."""
+    if len(eras) < 2 or not eras[0].get("from"):
+        return eras
+    new_id, start = eras[0]["id"], eras[0]["from"]
+    in_order = [s for s in sig._reading_order(sigs)
+                if s.emotions and s.ts.date().isoformat() <= start][-12:]
+    movers = [s for s in in_order if sig.book_archetype_of([s]) == new_id]
+    movers.sort(key=lambda s: -s.intensity)
+    head = {**eras[0], "books_that_moved": [
+        {"entry_id": s.entry_id, "title": s.title} for s in movers[:3]
+    ]}
+    return [head, *eras[1:]]
+
+
+def shift_unseen(user: User, v2: dict | None) -> bool:
+    """Whether the DNA page should open with the shift card: the archetype changed
+    since the reader last acknowledged one. Per request, not cached, because
+    acknowledging it doesn't recompute the DNA."""
+    if not v2 or not v2.get("enough") or not v2.get("archetype"):
+        return False
+    return len(v2.get("eras") or []) >= 2 and user.dna_seen_archetype != v2["archetype"]["id"]
 
 
 async def manual_snapshot(db: AsyncSession, user: User, v2: dict) -> DNASnapshot:
@@ -253,7 +317,7 @@ async def manual_snapshot(db: AsyncSession, user: User, v2: dict) -> DNASnapshot
             "archetype_scores": v2["archetype_scores"],
             "margin": v2.get("margin"),
             "drift": sig.drift(prev_current, current) if prev_current else None,
-            "archetype_table_rev": ARCHETYPE_TABLE_REV,
+            "archetype_table_rev": RULES_REV,
         },
         book_count=v2["book_count"],
         year=now.year,
@@ -264,7 +328,9 @@ async def manual_snapshot(db: AsyncSession, user: User, v2: dict) -> DNASnapshot
     return snapshot
 
 
-async def maybe_snapshot_and_notify(db: AsyncSession, user: User) -> DNASnapshot | None:
+async def maybe_snapshot_and_notify(
+    db: AsyncSession, user: User, *, notify_shift: bool = True,
+) -> DNASnapshot | None:
     """Capture a snapshot on drift, a changed archetype, or monthly cadence;
     notify on archetype shift.
 
@@ -280,14 +346,13 @@ async def maybe_snapshot_and_notify(db: AsyncSession, user: User) -> DNASnapshot
     # Snapshot the same vectors the mirror renders — books plus named journal days.
     # If these two diverged, drift would be measured against a profile the reader
     # was never shown, and the "your DNA shifted" notice would be unfalsifiable.
-    vector_sigs = sigs + await _load_journal_sigs(db, user.id)
+    journal_sigs = await _load_journal_sigs(db, user.id)
+    vector_sigs = sigs + journal_sigs
     current = sig.frequency_vector(vector_sigs, weighted=True)
     enduring = sig.frequency_vector(vector_sigs, weighted=False)
-    # Archetype from the intensity-scaled vector, matching build_dna so the
-    # snapshot's label can't disagree with the one the mirror shows.
-    archetype_id, _, _ = sig.classify_reader(
-        sigs, sig.frequency_vector(vector_sigs, weighted=True, intensity_weighted=True)
-    )
+    # The replayed climate, the same function build_dna uses, so the snapshot's
+    # label can't disagree with the one the mirror shows.
+    archetype_id = sig.replay_climate(sigs, journal_sigs)["archetype_id"]
     if archetype_id is None:
         # Nothing to name, so nothing has shifted. A snapshot here would record an
         # archetype the engine declined to give.
@@ -332,7 +397,7 @@ async def maybe_snapshot_and_notify(db: AsyncSession, user: User) -> DNASnapshot
             "current_vector": current,
             "archetype_id": archetype_id,
             "drift": snap_drift,
-            "archetype_table_rev": ARCHETYPE_TABLE_REV,
+            "archetype_table_rev": RULES_REV,
         },
         book_count=len(raw),
         year=now.year,
@@ -346,8 +411,10 @@ async def maybe_snapshot_and_notify(db: AsyncSession, user: User) -> DNASnapshot
     # different rev (or before the field existed), a re-anchor is at least partly
     # responsible, so we take the snapshot but don't tell the reader they shifted.
     prev_rev = (ctx.prev_emotion_data or {}).get("archetype_table_rev")
-    same_table = prev_rev == ARCHETYPE_TABLE_REV
-    if same_table and ctx.last_archetype and ctx.last_archetype != archetype_name:
+    same_table = prev_rev == RULES_REV
+    # A bulk import moves the shelf in one go; announcing the result as "your DNA
+    # moved" would describe our catching up, not their reading.
+    if notify_shift and same_table and ctx.last_archetype and ctx.last_archetype != archetype_name:
         await notify(
             db, user.id, TIER_DIRECT, "dna_shifted",
             payload={"old": ctx.last_archetype, "new": archetype_name},

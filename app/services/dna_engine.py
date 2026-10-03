@@ -515,14 +515,19 @@ def generate_recap(
     month_entries: list[dict],
     prior_entries: list[dict],
     current_personality: str | None,
+    shift: dict | None = None,
 ) -> dict:
     """
     Generate a monthly recap from entries logged in that month.
 
     Args:
-        month_entries: Entries created during the target month.
+        month_entries: Entries read (finished_at, else logged) during the target month.
         prior_entries: All entries BEFORE the target month (for shift detection).
         current_personality: User's current personality_type.
+        shift: The archetype change dated in this month, from the replayed DNA
+            ({previous_type, current_type, shifted}), or None. The caller owns
+            this; it used to be re-derived here from the legacy engine, which
+            disagreed with the live one 42.7% of the time.
 
     Returns:
         Dict with recap data.
@@ -535,7 +540,7 @@ def generate_recap(
             "most_intense_book": None,
             "dominant_emotion": None,
             "new_emotions": [],
-            "personality_shift": {
+            "personality_shift": shift or {
                 "previous_type": None,
                 "current_type": current_personality,
                 "shifted": False,
@@ -583,18 +588,7 @@ def generate_recap(
     month_emotions = set(month_freq.keys())
     new_emotions = sorted(month_emotions - prior_emotions)
 
-    # Personality shift detection
-    prior_personality = None
-    if len(prior_entries) >= 3:
-        prior_result = calculate_personality(prior_entries)
-        if prior_result.get("personality"):
-            prior_personality = prior_result["personality"]["name"]
-
-    shifted = (
-        prior_personality is not None
-        and current_personality is not None
-        and prior_personality != current_personality
-    )
+    shift = shift or {"previous_type": None, "current_type": current_personality, "shifted": False}
 
     return {
         "books_logged": len(month_entries),
@@ -608,10 +602,6 @@ def generate_recap(
         },
         "dominant_emotion": dominant,
         "new_emotions": new_emotions,
-        "personality_shift": {
-            "previous_type": prior_personality,
-            "current_type": current_personality,
-            "shifted": shifted,
-        },
+        "personality_shift": shift,
         "books": books,
     }

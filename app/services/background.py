@@ -23,16 +23,17 @@ logger = logging.getLogger("bibliome.background")
 
 # Track in-flight recalculations per user — prevents redundant concurrent DB work
 _recalc_running: set[uuid.UUID] = set()
-# Users whose write landed WHILE a recalc was in flight. Dropping those requests
+# Users whose write landed WHILE a recalc was in flight, with whether the re-run
+# may announce a shift (False if ANY queued write was an import). Dropping those requests
 # is what froze a reader's DNA: the in-flight pass had already read the shelf, so
 # its cache misses the new entry, yet it still clears `dna_dirty` — and
 # /dna/profile trusts that flag, so the stale card is served until some later
 # write happens to recalc alone.
-_recalc_pending: set[uuid.UUID] = set()
+_recalc_pending: dict[uuid.UUID, bool] = {}
 _resonance_running: set[uuid.UUID] = set()
 
 
-async def recalculate_dna(user_id: uuid.UUID) -> None:
+async def recalculate_dna(user_id: uuid.UUID, notify_shift: bool = True) -> None:
     """
     Recalculate and cache DNA profile for a user.
     Runs in background — uses its own DB session.
@@ -42,7 +43,7 @@ async def recalculate_dna(user_id: uuid.UUID) -> None:
     if user_id in _recalc_running:
         # Not a duplicate — a write the in-flight pass may not have seen. Re-run
         # after it finishes rather than dropping it.
-        _recalc_pending.add(user_id)
+        _recalc_pending[user_id] = _recalc_pending.get(user_id, True) and notify_shift
         logger.debug("DNA recalc already running for user %s, queued a re-run", user_id)
         return
     _recalc_running.add(user_id)
@@ -58,7 +59,11 @@ async def recalculate_dna(user_id: uuid.UUID) -> None:
                 # Recompute both payloads (private Phase-7 + public signature) and
                 # capture a snapshot if the reader has moved far enough (B7.4).
                 v2 = await compute_and_cache(db, user)
-                await maybe_snapshot_and_notify(db, user)
+                await maybe_snapshot_and_notify(db, user, notify_shift=notify_shift)
+                # An import that changes the archetype is our catching up, not a
+                # shift the reader lived through: no card for it either.
+                if not notify_shift and v2.get("archetype"):
+                    user.dna_seen_archetype = v2["archetype"]["id"]
 
                 logger.debug(
                     "Recalculated DNA for user %s (%d books)",
@@ -74,8 +79,8 @@ async def recalculate_dna(user_id: uuid.UUID) -> None:
         _recalc_running.discard(user_id)
 
     if user_id in _recalc_pending:
-        _recalc_pending.discard(user_id)
-        await recalculate_dna(user_id)
+        queued_notify = _recalc_pending.pop(user_id)
+        await recalculate_dna(user_id, notify_shift=queued_notify)
 
 
 async def recompute_resonance(user_id: uuid.UUID) -> None:

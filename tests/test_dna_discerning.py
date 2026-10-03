@@ -79,14 +79,17 @@ def test_journal_days_never_count_toward_discerning():
     assert not S.is_discerning(books + journal)
 
 
-def test_provisional_baseline_always_names_a_runner_up(monkeypatch):
+def test_leaning_is_named_only_when_a_rival_is_close(monkeypatch):
+    """The old provisional hedge named a runner-up for everyone. The leaning line
+    names one only when a rival has caught up — a decisive shelf stands alone,
+    and the gap is looser while the baseline is still a guess."""
     sigs = [book(["thrill", "dread", "shock"], "loved") for _ in range(8)]
+    for provisional in (True, False):
+        monkeypatch.setattr(S, "BASELINE_PROVISIONAL", provisional)
+        res = build_dna(sigs)
+        assert res["archetype"]["id"] == "adrenaline_seeker"
+        assert res["margin"] >= S.TIPPING_GAP_PROVISIONAL
+        assert res["runner_up"] is None and res["leaning"] is None
     monkeypatch.setattr(S, "BASELINE_PROVISIONAL", True)
-    res = build_dna(sigs)
-    assert res["archetype"]["id"] == "adrenaline_seeker"
-    assert res["runner_up"]
-    # Once the baseline is measured from real readers, a decisive lead stands alone.
-    monkeypatch.setattr(S, "BASELINE_PROVISIONAL", False)
-    res = build_dna(sigs)
-    assert res["margin"] >= S.HEDGE_ARCHETYPE_GAP
-    assert res["runner_up"] is None
+    close = build_dna([book(["grief", "longing"], "liked") for _ in range(10)])
+    assert close["leaning"] and close["runner_up"] == close["leaning"]["name"]
