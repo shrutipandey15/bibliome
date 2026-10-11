@@ -355,3 +355,29 @@ async def test_admin_can_deliver_now_once_and_preview_without_writing(client, pu
 
     assert (await client.post("/api/admin/jobs/weekly-digest", headers=admin)).json()["digests_sent"] == 1
     assert (await client.post("/api/admin/jobs/weekly-digest", headers=admin)).json()["digests_sent"] == 0
+
+
+async def test_admin_clicks_report_the_rate_per_section(client, pushes, db):
+    from sqlalchemy import update
+    from app.models.user import User
+    from app.services.digest_service import run_due_digests
+
+    a = await _user(client, "ca")
+    await _user(client, "cb")
+    await _user(client, "cadmin")
+    await db.execute(update(User).where(User.username == "dg_cadmin").values(is_admin=True))
+    await db.commit()
+    tok = (await client.post("/api/auth/login", json={"email": "cadmin@example.com", "password": "hunter2pass"})).json()["access_token"]
+    admin = {"Authorization": f"Bearer {tok}"}
+    await run_due_digests(datetime.now(timezone.utc), force=True)
+    period = period_of(datetime.now(timezone.utc))
+    page = (await client.get(f"/api/digest/{period}", headers=a)).json()
+    lead = page["sections"][0]["kind"]
+    for section in ("open", lead):
+        await client.post(f"/api/digest/{period}/click", headers=a, json={"section": section})
+
+    r = (await client.get("/api/admin/digest/clicks", headers=admin)).json()
+    assert r["digests"] == 3 and r["opened"] == 1
+    row = next(s for s in r["sections"] if s["kind"] == lead)
+    assert row["shown"] == 3 and row["clicked"] == 1 and row["led"] == 3 and row["led_clicked"] == 1
+    assert "dg_" not in str(r)                     # aggregates only

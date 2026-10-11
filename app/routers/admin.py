@@ -317,6 +317,37 @@ async def trigger_weekly_digest(
     return {"digests_sent": sent}
 
 
+@router.get("/digest/clicks")
+async def digest_clicks(weeks: int = 8, db: AsyncSession = Depends(get_db), admin: User = Depends(require_admin)):
+    """The digest's success metric: of the digests that carried a section, the
+    share whose reader tapped through it. Counted per section type, and for when
+    it led, over the last `weeks` weeks. Aggregates only, no readers."""
+    from app.models.notification import DigestClick, NotificationDigest
+
+    since = datetime.now(timezone.utc) - timedelta(weeks=min(max(weeks, 1), 52))
+    rows = (await db.execute(select(NotificationDigest.id, NotificationDigest.lead, NotificationDigest.payload)
+                             .where(NotificationDigest.sent_at >= since, NotificationDigest.lead.isnot(None)))).all()
+    clicks: dict = {}
+    if rows:
+        for did, section in (await db.execute(select(DigestClick.digest_id, DigestClick.section)
+                                              .where(DigestClick.digest_id.in_([r[0] for r in rows])))).all():
+            clicks.setdefault(did, set()).add(section)
+    kinds: dict[str, dict] = {}
+    opened = 0
+    for did, lead, payload in rows:
+        tapped = clicks.get(did, set())
+        opened += "open" in tapped
+        for s in (payload or {}).get("sections", []):
+            k = kinds.setdefault(s["kind"], {"kind": s["kind"], "shown": 0, "clicked": 0, "led": 0, "led_clicked": 0})
+            k["shown"] += 1
+            k["clicked"] += s["kind"] in tapped
+            if s["kind"] == lead:
+                k["led"] += 1
+                k["led_clicked"] += s["kind"] in tapped
+    return {"weeks": weeks, "digests": len(rows), "opened": opened,
+            "sections": sorted(kinds.values(), key=lambda k: -(k["clicked"] / k["shown"]))}
+
+
 @router.get("/answers/pending")
 async def pending_answers(db: AsyncSession = Depends(get_db), admin: User = Depends(require_admin)):
     """Shared weekly-question notes waiting for review. No reader identity: the
