@@ -7,7 +7,7 @@ Three tiers: 0 = security (immediate, non-disableable, bypasses quiet hours),
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Index, Integer, String, UniqueConstraint, func
+from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Index, Integer, SmallInteger, String, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -43,6 +43,10 @@ class Notification(Base):
 
 class NotificationPrefs(Base):
     __tablename__ = "notification_prefs"
+    __table_args__ = (
+        CheckConstraint("digest_day BETWEEN 0 AND 6", name="ck_prefs_digest_day"),
+        CheckConstraint("digest_hour BETWEEN 0 AND 23", name="ck_prefs_digest_hour"),
+    )
 
     user_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
@@ -53,6 +57,9 @@ class NotificationPrefs(Base):
     quiet_hours_start: Mapped[int | None] = mapped_column(Integer, nullable=True)
     quiet_hours_end: Mapped[int | None] = mapped_column(Integer, nullable=True)
     timezone: Mapped[str] = mapped_column(String(64), nullable=False, server_default="UTC")
+    # When the weekly digest is due, in `timezone`. Python weekday: 6 = Sunday.
+    digest_day: Mapped[int] = mapped_column(SmallInteger, nullable=False, server_default="6", default=6)
+    digest_hour: Mapped[int] = mapped_column(SmallInteger, nullable=False, server_default="9", default=9)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
@@ -70,4 +77,22 @@ class NotificationDigest(Base):
     )
     period: Mapped[str] = mapped_column(String(12), nullable=False)  # e.g. "2026-W28"
     payload: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    # Which section led, and the subject line: the history the next week's
+    # variety rules read.
+    lead: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    subject: Mapped[str | None] = mapped_column(String(200), nullable=True)
     sent_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class DigestClick(Base):
+    """A reader clicked through a digest section. Once per (digest, section)."""
+
+    __tablename__ = "digest_clicks"
+    __table_args__ = (UniqueConstraint("digest_id", "section", name="uq_digest_click"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    digest_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("notification_digests.id", ondelete="CASCADE"), nullable=False
+    )
+    section: Mapped[str] = mapped_column(String(30), nullable=False)
+    clicked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

@@ -105,7 +105,9 @@ async def send_email(to_email: str, subject: str, html_body: str) -> bool:
             port=settings.SMTP_PORT,
             username=settings.SMTP_USER,
             password=settings.SMTP_PASSWORD,
-            use_tls=True,
+            # Implicit TLS on 465; on 587 aiosmtplib upgrades with STARTTLS.
+            # use_tls=True on 587 fails the handshake.
+            use_tls=settings.SMTP_PORT == 465,
         )
         logger.info("Email sent to %s: %s", redact_email(to_email), subject)
         return True

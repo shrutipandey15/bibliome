@@ -131,3 +131,35 @@ async def sweep_deferred_pushes_forever(interval: int = 300) -> None:
             raise
         except Exception as e:
             logger.error("Deferred push sweep failed: %s", e)
+
+
+async def run_weekly_digest_forever(interval: int = 900) -> None:
+    """Send each reader's weekly digest at their own day and hour, checking every
+    15 minutes. A digest missed while the server was off goes out when it's back,
+    unless it would be more than 36 hours late (digest_service.LATE_LIMIT).
+
+    Refuses to start while digest_copy still has unwritten text: a placeholder
+    must never reach a reader.
+
+    ponytail: one in-process loop per uvicorn worker, like the push sweeper. Each
+    reader's week is claimed by a unique row before sending, so two workers never
+    double-send. Move to a systemd timer if the API ever runs on more than one box.
+    """
+    from app.services.digest_service import missing_copy, run_due_digests
+
+    missing = missing_copy()
+    if missing:
+        logger.error("Weekly digest NOT started: %d piece(s) of copy unwritten, e.g. %s",
+                     len(missing), ", ".join(missing[:5]))
+        return
+
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            sent = await run_due_digests()
+            if sent:
+                logger.info("Weekly digest delivered to %d reader(s)", sent)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.error("Weekly digest job failed: %s", e)

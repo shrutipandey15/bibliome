@@ -370,10 +370,9 @@ def test_every_notification_kind_lands_where_the_in_app_click_lands():
     assert url("collection_joined", {"collection_id": "c1"}) == "/collections/c1/discussion"
     assert url("dna_shifted", {"old": 1, "new": 2}) == "/?view=dna"
 
-    # Genuinely nowhere to go: the room is gone, and the digest is about the
-    # shelf itself.
+    # Genuinely nowhere to go: the room is gone.
     assert url("collection_deleted", {"title": "Group"}) == "/"
-    assert url("weekly_digest", {"period": "w"}) == "/"
+    assert url("weekly_digest", {"period": "2026-41"}) == "/digest/2026-41"
 
     # A kind with its id missing must not build "/collections/None/discussion".
     assert url("chat_mention") == "/"

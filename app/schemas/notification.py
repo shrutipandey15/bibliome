@@ -28,6 +28,8 @@ class NotificationPrefsResponse(BaseModel):
     quiet_hours_start: int | None
     quiet_hours_end: int | None
     timezone: str
+    digest_day: int
+    digest_hour: int
 
     model_config = {"from_attributes": True}
 
@@ -38,3 +40,5 @@ class NotificationPrefsUpdate(BaseModel):
     quiet_hours_start: int | None = Field(default=None, ge=0, le=23)
     quiet_hours_end: int | None = Field(default=None, ge=0, le=23)
     timezone: str | None = Field(default=None, max_length=64)
+    digest_day: int | None = Field(default=None, ge=0, le=6)
+    digest_hour: int | None = Field(default=None, ge=0, le=23)

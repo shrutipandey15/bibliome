@@ -51,9 +51,10 @@ PUSH_COPY: dict[str, tuple[str, str]] = {
     "collection_joined": ("Bibliome", "Someone joined a collection you're in."),
     "collection_deleted": ("Bibliome", "A collection you were in was closed."),
     "dna_shifted": ("Bibliome", "Your DNA moved."),
+    # Never the subject line: a lock screen is not private.
+    "weekly_digest": ("Bibliome", "Your week is here."),
     # Sent only by POST /push/test, at the reader's own request.
     "push_test": ("Bibliome", "Notifications are working."),
-    "weekly_digest": ("Bibliome", "Your reading week is ready."),
     # Tier 0. Named plainly on purpose: this is the one kind where a reader
     # needs to know what happened without unlocking anything, because the
     # answer may be "that was not me".
@@ -161,10 +162,13 @@ def _url_for(kind: str, payload: dict) -> str:
     if kind == "dna_shifted":
         return "/?view=dna"
 
+    if kind == "weekly_digest" and payload.get("period"):
+        return f"/digest/{quote(str(payload['period']))}"
+
     if kind == "push_test":
         return "/settings?section=notifications"
 
-    # weekly_digest, collection_deleted (the room is gone) and anything new.
+    # collection_deleted (the room is gone) and anything new.
     return "/"
 
 

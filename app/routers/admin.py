@@ -15,7 +15,7 @@ from sqlalchemy.orm import selectinload
 from app.database import get_db
 from app.middleware.auth import get_current_user
 from app.services.moderation import list_open_reports, resolve_target
-from app.services.digest_service import run_weekly_digests
+from app.services.digest_service import build_for, due_at, missing_copy, period_of, run_due_digests
 from app.models.audit_log import AuditLog
 from app.models.book import Book
 from app.models.book_entry import BookEntry
@@ -309,14 +309,41 @@ async def moderation_resolve(
 
 @router.post("/jobs/weekly-digest")
 async def trigger_weekly_digest(
-    db: AsyncSession = Depends(get_db),
     admin: User = Depends(require_admin),
 ):
-    """Run the weekly digest job (Tier 2). Idempotent per user per ISO week —
-    intended to be called by a scheduler; exposed here for manual/cron trigger."""
-    sent = await run_weekly_digests(db)
-    await db.flush()
+    """Deliver this week's digest to every reader now, ignoring their chosen day
+    and hour. Still once per reader per week: anyone already sent is skipped."""
+    sent = await run_due_digests(force=True)
     return {"digests_sent": sent}
+
+
+@router.get("/digest/preview")
+async def preview_digests(
+    limit: int = 10,
+    admin: User = Depends(require_admin),
+):
+    """This week's digest for the most recent readers, built but not delivered.
+
+    Nothing is written: building may refresh a stale DNA cache, so it runs in its
+    own session and rolls back. The digest itself holds no note text (the page
+    reads notes live, for their owner only), so neither does this.
+    """
+    from app.database import async_session
+    from app.models.notification import NotificationPrefs
+
+    now = datetime.now(timezone.utc)
+    out = []
+    async with async_session() as db:
+        rows = (await db.execute(
+            select(User, NotificationPrefs).outerjoin(NotificationPrefs, NotificationPrefs.user_id == User.id)
+            .order_by(User.created_at.desc()).limit(min(max(limit, 1), 50))
+        )).all()
+        for user, prefs in rows:
+            due = due_at(prefs, now)
+            d = await build_for(db, user, period_of(due), due.date())
+            out.append({"username": user.username, "due_at": due.isoformat(), "digest": d})
+        await db.rollback()
+    return {"missing_copy": missing_copy(), "readers": out}
 
 
 # ── Maintenance ──
