@@ -2,6 +2,7 @@
 
 - GET  /digest/{period}         the week's digest, nothing held back.
 - POST /digest/{period}/click   the reader opened it, or tapped through a section.
+- POST /digest/{period}/answer  the reader's answer to that week's question.
 """
 
 import uuid
@@ -16,7 +17,10 @@ from app.database import get_db
 from app.middleware.auth import get_current_user
 from app.models.book_entry import BookEntry
 from app.models.notification import DigestClick, NotificationDigest
+from app.models.digest_extra import QuestionAnswer
 from app.models.user import User
+from app.services import question_service
+from app.services.digest_service import question_for
 
 router = APIRouter(prefix="/digest", tags=["digest"])
 
@@ -43,6 +47,13 @@ async def get_digest(
                 BookEntry.id == uuid.UUID(s["data"]["entry_id"]), BookEntry.user_id == current_user.id,
             ))).scalar_one_or_none()
             s["reveal"] = {"note": e.notes, "finish_thought": e.finish_thought} if e else None
+        if s["kind"] == "weekly_question":
+            a = (await db.execute(select(QuestionAnswer).where(
+                QuestionAnswer.user_id == current_user.id, QuestionAnswer.period == row.period,
+            ))).scalar_one_or_none()
+            rp = s["data"].get("results_period")
+            s["reveal"] = {"mine": question_service.mine(a),
+                           "results": await question_service.results(db, rp) if rp else None}
         sections.append(s)
     return {"period": row.period, "subject": row.subject, "intro": d.get("intro"),
             "sections": sections, "action": d.get("action"), "sent_at": row.sent_at}
@@ -69,3 +80,34 @@ async def record_click(
     await db.execute(insert(DigestClick).values(
         id=uuid.uuid4(), digest_id=digest_id, section=data.section,
     ).on_conflict_do_nothing(constraint="uq_digest_click"))
+
+
+class AnswerIn(BaseModel):
+    entry_id: uuid.UUID | None = None      # a book from the reader's shelf...
+    book_title: str | None = Field(default=None, max_length=300)   # ...or one typed in
+    book_author: str | None = Field(default=None, max_length=200)
+    note: str | None = Field(default=None, max_length=280)
+    share: bool = False                    # others may see it, anonymously
+
+
+@router.post("/{period}/answer")
+async def answer(
+    period: str,
+    data: AnswerIn,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Answer the question of a digest you were sent. One answer per week; sending
+    again replaces it."""
+    row = (await db.execute(select(NotificationDigest).where(
+        NotificationDigest.user_id == current_user.id, NotificationDigest.period == period,
+    ))).scalar_one_or_none()
+    if row is None or not any(s["kind"] == "weekly_question" for s in (row.payload or {}).get("sections", [])):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No question that week")
+    try:
+        a = await question_service.save_answer(
+            db, current_user.id, period, question_for(period)["id"], entry_id=data.entry_id,
+            book_title=data.book_title, book_author=data.book_author, note=data.note, share=data.share)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e))
+    return question_service.mine(a)

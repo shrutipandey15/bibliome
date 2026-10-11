@@ -168,3 +168,19 @@ async def db(db_ready):
     from app.database import async_session
     async with async_session() as session:
         yield session
+
+
+@pytest.fixture(autouse=True)
+def _no_outside_book_data(monkeypatch):
+    """The digest looks books up on Wikidata and Wikipedia. Tests never reach the
+    network: every lookup finds nothing unless a test says otherwise."""
+    from app.services import shelf_news
+
+    async def not_found(client, title, author, key):
+        return shelf_news.BookInfo(key=key, found=False)
+
+    async def no_views(client, title, today):
+        return None
+
+    monkeypatch.setattr(shelf_news, "_lookup", not_found)
+    monkeypatch.setattr(shelf_news, "_views", no_views)

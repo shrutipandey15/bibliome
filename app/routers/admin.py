@@ -317,6 +317,34 @@ async def trigger_weekly_digest(
     return {"digests_sent": sent}
 
 
+@router.get("/answers/pending")
+async def pending_answers(db: AsyncSession = Depends(get_db), admin: User = Depends(require_admin)):
+    """Shared weekly-question notes waiting for review. No reader identity: the
+    note is judged on what it says."""
+    from app.services import question_service
+    from app.services.digest_service import question_for
+
+    return [{"id": a.id, "period": a.period, "question": question_for(a.period)["text"],
+             "book_title": a.book_title, "note": a.note, "created_at": a.created_at}
+            for a in await question_service.pending(db)]
+
+
+class ReviewIn(BaseModel):
+    approve: bool
+
+
+@router.post("/answers/{answer_id}/review")
+async def review_answer(answer_id: uuid.UUID, data: ReviewIn,
+                        db: AsyncSession = Depends(get_db), admin: User = Depends(require_admin)):
+    from app.services import question_service
+
+    if not await question_service.review(db, answer_id, data.approve):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Nothing pending with that id")
+    await _audit(db, admin, "answer_approved" if data.approve else "answer_rejected", "question_answer",
+                 str(answer_id), None)
+    return {"status": "approved" if data.approve else "rejected"}
+
+
 @router.post("/jobs/daily-fact")
 async def trigger_daily_fact(admin: User = Depends(require_admin)):
     """Send today's fact to every reader now, ignoring their hour. Still once
@@ -349,7 +377,8 @@ async def preview_digests(
         )).all()
         for user, prefs in rows:
             due = due_at(prefs, now)
-            d = await build_for(db, user, period_of(due), due.date())
+            from app.services.digest_service import outside_for
+            d = await build_for(db, user, period_of(due), due.date(), await outside_for(user.id, due.date()))
             out.append({"username": user.username, "due_at": due.isoformat(), "digest": d})
         await db.rollback()
     return {"missing_copy": missing_copy(), "readers": out}

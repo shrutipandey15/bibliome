@@ -52,6 +52,7 @@ class Book:
     title: str
     status: str
     created_at: datetime
+    author: str | None = None
     finished_at: date | None = None
     note: str | None = None          # notes, else the finish thought
     emotions: dict[str, int] = field(default_factory=dict)   # slug -> strength
@@ -73,7 +74,7 @@ def book_from_entry(e: BookEntry) -> Book:
             emotions[slug] = max(emotions.get(slug, 0), em.strength or 5)
     note = (e.notes or "").strip() or (e.finish_thought or "").strip() or None
     return Book(id=str(e.id), title=e.title, status=e.status, created_at=e.created_at,
-                finished_at=e.finished_at, note=note, emotions=emotions)
+                finished_at=e.finished_at, note=note, emotions=emotions, author=e.author)
 
 
 # ── Small helpers ─────────────────────────────────────────────────────────────
@@ -111,6 +112,18 @@ def _ago(days: int) -> str:
 def _pick(seed: str, items: list):
     """A stable choice per (reader, week), so a re-render shows the same thing."""
     return items[int(hashlib.sha256(seed.encode()).hexdigest(), 16) % len(items)]
+
+
+def question_for(period: str) -> dict:
+    """The week's question, the same for every reader; walks the list in order."""
+    y, w = (int(x) for x in period.split("-"))
+    weeks = (date.fromisocalendar(y, w, 1) - date(2024, 1, 1)).days // 7
+    return copy.QUESTIONS[weeks % len(copy.QUESTIONS)]
+
+
+def previous_period(period: str) -> str:
+    y, w = (int(x) for x in period.split("-"))
+    return period_of(datetime.combine(date.fromisocalendar(y, w, 1) - timedelta(days=7), datetime.min.time()))
 
 
 def emotion_of_week(week_monday: date) -> str:
@@ -183,7 +196,27 @@ def _weather(books, today, archetype, period):
                     emotions=top, emotion=top[0], p=p, forecast=text)
 
 
-def _while_away(books, today):
+def _news_section(n):
+    if n["type"] == "spike":
+        body = _fill(copy.NEWS_SPIKE, book=n["book"], x=n["x"])
+    elif n["type"] == "published":
+        d = date.fromisoformat(n["date"])
+        body = _fill(copy.NEWS_PUBLISHED, book=n["book"], n=n["years"], date=f"{d.day} {d:%B %Y}")
+    else:
+        tmpl = copy.NEWS_AUTHOR_TURNS if n["alive"] else copy.NEWS_AUTHOR_BORN
+        body = _fill(tmpl, book=n["book"], author=n["author"], n=n["years"])
+    data = {k: v for k, v in n.items() if k not in ("id",)}
+    return _section("while_away", body, f"/?entry={n['entry_id']}", copy.WHILE_AWAY_TEASE,
+                    **data, news_id=n["id"])
+
+
+def _while_away(books, today, news=(), history=()):
+    """Outside news about the shelf first (never the same item twice in a year),
+    then the reader's own anniversary: a year since they finished a book."""
+    seen = {h.get("news_id") for h in history[:52]}
+    for n in news:
+        if n["id"] not in seen:
+            return _news_section(n)
     for b in sorted(books, key=lambda b: b.day):
         if not b.finished_at:
             continue
@@ -261,17 +294,46 @@ def _waiting(books, v2, zero_streak):
     return _section("dna_waiting", "\n".join([*shown[:2], *extra]), "/?add=1", "\n".join(shown))
 
 
+def _shelf_news(opened, outside, today):
+    if not outside:
+        return []
+    from app.services.shelf_news import find_news, infos_from_json
+    return find_news([{"entry_id": b.id, "title": b.title, "author": b.author} for b in opened],
+                     infos_from_json(outside.get("infos")),
+                     {t: tuple(v) for t, v in (outside.get("views") or {}).items()}, today)
+
+
+def _question(period, last_count):
+    """This week's question, plus last week's answers once three or more readers
+    shared theirs (the answers themselves are only ever shown in the app)."""
+    q = question_for(period)
+    ask = _fill(copy.QUESTION_ASK, q=q["text"])
+    data = {"question_id": q["id"], "question": q["text"], "question_period": period}
+    body = ask
+    if last_count >= 3:
+        last = question_for(previous_period(period))
+        body += "\n" + _fill(copy.QUESTION_RESULTS, n=_num(last_count), q=last["text"])
+        data |= {"results_period": previous_period(period), "results_question": last["text"]}
+    return _section("weekly_question", body, f"/digest/{period}#weekly_question", ask, **data)
+
+
 # ── Assembly ──────────────────────────────────────────────────────────────────
 
-PRIORITY_ACTIVE = ["past_self", "drift", "weather", "archetype_letter", "while_away", "emotion_of_week"]
-PRIORITY_QUIET = ["while_away", "past_self", "drift", "archetype_letter", "weather", "emotion_of_week"]
+PRIORITY_ACTIVE = ["past_self", "drift", "weather", "archetype_letter", "while_away", "emotion_of_week",
+                   "weekly_question"]
+PRIORITY_QUIET = ["while_away", "past_self", "drift", "archetype_letter", "weather", "emotion_of_week",
+                  "weekly_question"]
 
 
 def build_digest(*, name: str, books: list[Book], v2: dict | None, history: list[dict],
-                 period: str, today: date) -> dict:
+                 period: str, today: date, outside: dict | None = None,
+                 question_answers: int | None = None) -> dict:
     """The week's digest for one reader, or {"skipped": True} on a rest week.
 
     ``history`` is this reader's past digest payloads, newest first.
+    ``outside`` is shelf_news.gather()'s result (Wikidata + page views), or None.
+    ``question_answers`` is how many readers shared an answer to last week's
+    question; None leaves the weekly question out.
     """
     opened = [b for b in books if b.opened]
     enough = bool(v2 and v2.get("enough"))
@@ -298,9 +360,10 @@ def build_digest(*, name: str, books: list[Book], v2: dict | None, history: list
         "archetype_letter": _letter(archetype["id"] if archetype else "unwritten", name, books,
                                     top_emotion or _ename(eow), history, period),
         "weather": _weather(opened, today, archetype, period),
-        "while_away": _while_away(opened, today),
+        "while_away": _while_away(opened, today, _shelf_news(opened, outside, today), history),
         "emotion_of_week": _emotion_week(opened, eow, period),
         "drift": _drift(v2) if enough else None,
+        "weekly_question": _question(period, question_answers) if question_answers is not None else None,
     }
     available = {k: v for k, v in available.items() if v}
     last_lead = history[0].get("lead") if history else None
@@ -318,13 +381,19 @@ def build_digest(*, name: str, books: list[Book], v2: dict | None, history: list
                   and not (k == "past_self" and not available[k]["anniversary"])
                   and not (k == "drift" and not available[k]["notable"])]
         ranked += [k for k in order if k in available and k not in ranked]
+        # Real news from outside (a spike, a round anniversary) is worth leading with.
+        if "while_away" in available and available["while_away"]["data"].get("news_id"):
+            ranked.remove("while_away")
+            ranked.insert(0, "while_away")
         pick = next((k for k in ranked if k != last_lead), ranked[0])
         lead = available.pop(pick)
 
     order = PRIORITY_QUIET if quiet else PRIORITY_ACTIVE
     rest = [available[k] for k in order if k in available and k != lead["kind"]]
-    # Feeling of the week carries the easy action, so it rides along when it can.
-    rest.sort(key=lambda s: s["kind"] != "emotion_of_week")
+    # Two weekly rituals ride along when they can: the feeling of the week (it
+    # carries the easy action) and the weekly question. The lead is what varies.
+    ritual = {"emotion_of_week": 0, "weekly_question": 1}
+    rest.sort(key=lambda s: ritual.get(s["kind"], 2))
     smaller = rest[:2]
 
     kinds = {s["kind"] for s in smaller}
@@ -362,6 +431,7 @@ def build_digest(*, name: str, books: list[Book], v2: dict | None, history: list
         "action": action,
         "letter_id": letter["data"]["letter_id"] if letter else None,
         "past_entry_id": past["data"]["entry_id"] if past else None,
+        "news_id": next((s["data"].get("news_id") for s in [lead, *smaller] if s["kind"] == "while_away"), None),
         "zero_books": zero,
     }
 
@@ -405,10 +475,31 @@ async def load_reader(db: AsyncSession, user: User) -> tuple[list[Book], dict | 
     return [book_from_entry(e) for e in entries], v2, history
 
 
-async def build_for(db: AsyncSession, user: User, period: str, today: date) -> dict:
+async def build_for(db: AsyncSession, user: User, period: str, today: date, outside: dict | None = None) -> dict:
+    from sqlalchemy import func
+    from app.models.digest_extra import QuestionAnswer
+
     books, v2, history = await load_reader(db, user)
+    shared = (await db.execute(select(func.count(QuestionAnswer.id)).where(
+        QuestionAnswer.period == previous_period(period), QuestionAnswer.share.is_(True)))).scalar() or 0
     return build_digest(name=user.display_name or user.username, books=books, v2=v2,
-                        history=history, period=period, today=today)
+                        history=history, period=period, today=today, outside=outside,
+                        question_answers=shared)
+
+
+async def outside_for(user_id, today: date) -> dict:
+    """Outside data for this reader's recent opened books. Network; call it
+    outside any transaction. Never raises."""
+    from app.database import async_session
+    from app.services.shelf_news import MAX_BOOKS, gather
+
+    async with async_session() as db:
+        rows = (await db.execute(
+            select(BookEntry.id, BookEntry.title, BookEntry.author)
+            .where(BookEntry.user_id == user_id, BookEntry.status != "want_to_read")
+            .order_by(BookEntry.created_at.desc()).limit(MAX_BOOKS)
+        )).all()
+    return await gather([{"entry_id": str(i), "title": t, "author": a} for i, t, a in rows], today)
 
 
 async def deliver_one(user: User, prefs: NotificationPrefs | None, now: datetime, *, force: bool = False) -> bool:
@@ -427,13 +518,18 @@ async def deliver_one(user: User, prefs: NotificationPrefs | None, now: datetime
         return False
     period = period_of(due)
     async with async_session() as db:
+        if (await db.execute(select(NotificationDigest.id).where(
+                NotificationDigest.user_id == user.id, NotificationDigest.period == period))).scalar_one_or_none():
+            return False
+    outside = await outside_for(user.id, due.date())     # network, outside the transaction
+    async with async_session() as db:
         async with db.begin():
             exists = (await db.execute(select(NotificationDigest.id).where(
                 NotificationDigest.user_id == user.id, NotificationDigest.period == period))).scalar_one_or_none()
             if exists:
                 return False
             user = await db.get(User, user.id)
-            d = await build_for(db, user, period, due.date())
+            d = await build_for(db, user, period, due.date(), outside)
             db.add(NotificationDigest(user_id=user.id, period=period, payload=d,
                                       lead=None if d.get("skipped") else d["lead"], subject=d.get("subject")))
             await db.flush()      # IntegrityError here = another worker claimed it

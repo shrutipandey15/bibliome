@@ -61,6 +61,10 @@ SUBJECTS: dict[str, list[dict]] = {
     "revealed": [
         {"id": "rv1", "text": "You've been revealed"},
     ],
+    "weekly_question": [
+        {"id": "wq1", "text": "A question for you this week"},
+        {"id": "wq2", "text": "What would you answer?"},
+    ],
 }
 
 # ── Section titles (small caps label above each section) ──────────────────────
@@ -73,6 +77,7 @@ TITLES: dict[str, str] = {
     "drift": "the drift",
     "dna_waiting": "your DNA is waiting",
     "revealed": "you've been revealed",
+    "weekly_question": "the weekly question",
 }
 
 # ── Main button label, per lead section ───────────────────────────────────────
@@ -85,6 +90,7 @@ BUTTONS: dict[str, str] = {
     "drift": "See where you're leaning",
     "dna_waiting": "Add a book",
     "revealed": "Meet yourself",
+    "weekly_question": "Answer it",
 }
 
 # ── 1. A line from your past self ─────────────────────────────────────────────
@@ -152,6 +158,12 @@ FALLOW_OPENERS: list[str] = [
     "A quiet week on your shelf. Some stories are happy to wait.",
 ]
 WHILE_AWAY_TEASE = "Something happened on your shelf while you weren't looking."
+# Outside news about a book on the shelf (Wikidata, Wikipedia page views).
+# Drafted by Claude for Shruti to edit. Fields: {book}, {author}, {n}, {x}, {date}.
+NEWS_SPIKE = "{book} is suddenly getting attention: about {x} times its usual Wikipedia views this week."
+NEWS_PUBLISHED = "{book} turns {n} this week. It was first published on {date}."
+NEWS_AUTHOR_TURNS = "{author}, who wrote {book}, turns {n} this week."
+NEWS_AUTHOR_BORN = "{author}, who wrote {book}, was born {n} years ago this week."
 # Fields: {book}, {when} ("a year", "two years").
 ANNIVERSARY = "{when} ago this week, you finished {book}."
 
@@ -211,6 +223,32 @@ WAITING_CLUES: list[str] = [
 REVEALED = "The blur is gone. You're {archetype}."
 REVEALED_TEASE = "The blur is gone."
 
+# ── 6. The weekly question ────────────────────────────────────────────────────
+# One a week, the same for everyone, cycling through the list. Ids are permanent.
+# Drafted by Claude for Shruti to edit or replace.
+QUESTIONS: list[dict] = [
+    {"id": "q01", "text": "Which book would you reread on a rainy night?"},
+    {"id": "q02", "text": "Which book would you hand to a stranger on a train?"},
+    {"id": "q03", "text": "Which book ruined you for other books for a while?"},
+    {"id": "q04", "text": "Which book do you wish you could read again for the first time?"},
+    {"id": "q05", "text": "Which character would you want to have dinner with?"},
+    {"id": "q06", "text": "Which book did you love that everyone else seems to hate?"},
+    {"id": "q07", "text": "Which ending are you still thinking about?"},
+    {"id": "q08", "text": "Which book would you save from a fire?"},
+    {"id": "q09", "text": "Which book made you laugh out loud somewhere you shouldn't have?"},
+    {"id": "q10", "text": "Which book do you pretend you've read?"},
+    {"id": "q11", "text": "Which book felt like it was written about you?"},
+    {"id": "q12", "text": "Which book would you take on a long holiday with no internet?"},
+    {"id": "q13", "text": "Which book changed your mind about something?"},
+    {"id": "q14", "text": "Which villain did you secretly root for?"},
+    {"id": "q15", "text": "Which book would you give your younger self?"},
+    {"id": "q16", "text": "Which book's world would you move into tomorrow?"},
+]
+# Fields: {q} the question.
+QUESTION_ASK = "This week's question: {q}"
+# Fields: {n} spelled out (always three or more), {q} last week's question.
+QUESTION_RESULTS = "Last week, {n} readers answered \"{q}\". See what they said."
+
 # ── The one easy action (under 10 seconds) ────────────────────────────────────
 ACTIONS: dict[str, str] = {
     "tag_emotion": "Tag one book with {emotion}",
@@ -245,4 +283,6 @@ def missing_copy(emotion_slugs, archetype_ids) -> list[str]:
         _check(f"FALLOW_OPENERS[{i}]", line)
     for i, line in enumerate(WAITING_CLUES):
         _check(f"WAITING_CLUES[{i}]", line)
+    for q in QUESTIONS:
+        _check(f"QUESTIONS.{q['id']}", q["text"])
     return missing

@@ -400,12 +400,18 @@ for password resets and other important mail.
       are re-sent by the push sweeper.
 - [x] Click tracking: "open" + per section + action (`digest_clicks`).
 - [x] Signed-out deep links (any in-app path) return to the exact page after sign-in.
-- [ ] **Write the copy** in `app/services/digest_copy.py` (`TODO(shruti)` left). The
-      scheduler refuses to start until there are none.
+- [x] Copy written by Shruti (all essays, letters, subjects, clues, weather, fallow).
+- [x] Digest page redesigned as a weekly issue; installed-app fixes (back bar, safe areas, offline copy).
 - [ ] Review ~10 real readers in Admin → digest.
-- [ ] Phase 2: section 4 with Wikipedia / Open Library, section 6. Phase 3: section 8, clicks admin page.
+- [x] Phase 2, section 4: outside shelf news (Wikidata + Wikipedia search + page views): a views spike,
+      a round publication anniversary, an author's birthday. Matched only when Wikidata's author matches
+      the shelf's; each book looked up once (`book_wikidata`, migration 042). Never twice a year per item.
+- [x] Phase 2, section 6: the weekly question (16 drafted questions in `digest_copy.QUESTIONS`).
+      Answer = shelf book or typed title + optional 280-char note; share off by default; results only at
+      3+ shared answers; notes only after review in Admin → answers; nobody ever named.
+- [ ] Phase 3: section 8 (sealed letters), clicks admin page.
 
-### [~] DG2 — Daily book fact *(inserted 2026-10-11, after DG1)*
+### [x] DG2 — Daily book fact *(inserted 2026-10-11, after DG1)*
 **Split:** backend (`fact_service`, `fact_bank`, `routers/facts.py`, migration 040) +
 frontend ("today in books" card on the shelf, notification row, Settings switch + hour).
 **Decided 2026-10-11:** on by default, 10 am local, sources = hand-checked bank +
@@ -414,10 +420,11 @@ holidays for everyone, alternating with the bank). Claude drafts, Shruti checks.
 
 - [x] One fact a day per reader, never the same fact twice; >12h late is skipped.
 - [x] Push carries the fact ("Today in books"), never the "on your shelf" note.
-- [x] Dark/political events and non-book "published" items filtered out.
+- [x] Book- and author-related only (topic check); no tone filtering, Wikipedia text as written.
+- [x] Writers born or died today go to everyone, so every date has a dated fact.
 - [x] Wikipedia down → the bank covers the day.
-- [ ] **Check the 88 drafted facts** in `app/services/fact_bank.py` and flip `ok` to
-      True. Until then only Wikipedia's dated facts go out, on the days that have one.
+- [x] All 88 bank facts read against their sources on 2026-10-11 and reworded to match.
+- [x] "Replies to your echoes" switch removed (migration 041): direct notices always arrive in-app.
 
 ### [P] OFF — Offline service worker *(parked 2026-10-11 until the digest and the queue are done)*
 Plan agreed in chat: network-first navigations with cached shell, cache-first hashed
