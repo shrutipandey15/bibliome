@@ -78,7 +78,7 @@ def generate_insight(user: User, entries: list[BookEntry]) -> str | None:
 
     # Rule 2: >=5 books finished in last 30 days
     if len(finished_last_30) >= 5:
-        return f"{len(finished_last_30)} books this month. You have been somewhere else entirely."
+        return f"{len(finished_last_30)} books this month. touch grass? never heard of her."
 
     # Rule 3: <=1 book finished in last 30 but prior pattern of more
     if len(finished_last_30) <= 1 and len(finished_prev_30) >= 3:
@@ -159,9 +159,10 @@ def generate_weekly_memory(entries: list[BookEntry]) -> str | None:
         if len(books) == 2 and books[0].id != books[1].id:
             b1, b2 = books[0].title, books[1].title
             days_ago = (now - _ts(books[0])).days
+            name = _display_name(slug).lower()
             return (
-                f"{_period_phrase(days_ago).capitalize()} you tagged {_display_name(slug)} twice — "
-                f"once for {b1}, once for {b2}. You might have a type."
+                f"{_period_phrase(days_ago)} you tagged {name} twice. {b1} AND {b2}. "
+                f"you have a type and the type is {name}."
             )
 
     # Rule 2: entry from 60–120 days ago with high-intensity Grief + no Catharsis tagged since
