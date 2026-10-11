@@ -160,7 +160,7 @@ def generate_weekly_memory(entries: list[BookEntry]) -> str | None:
             b1, b2 = books[0].title, books[1].title
             days_ago = (now - _ts(books[0])).days
             return (
-                f"Last {_period_phrase(days_ago)} you tagged {_display_name(slug)} twice — "
+                f"{_period_phrase(days_ago).capitalize()} you tagged {_display_name(slug)} twice — "
                 f"once for {b1}, once for {b2}. You might have a type."
             )
 
