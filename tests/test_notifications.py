@@ -67,13 +67,16 @@ async def test_self_reply_does_not_notify(client):
     assert (await _notifs(client, a))["unread_count"] == 0
 
 
-async def test_disabling_replies_suppresses_notification(client):
+async def test_direct_notices_have_no_off_switch(client):
+    """The old reply_enabled switch silenced every tier-1 notice; it's gone.
+    Sending it now changes nothing, and a reply still arrives."""
     a = await _user(client, "gg")
     b = await _user(client, "hh")
-    await client.patch("/api/notifications/preferences", json={"reply_enabled": False}, headers=a)
+    r = await client.patch("/api/notifications/preferences", json={"reply_enabled": False}, headers=a)
+    assert r.status_code == 200 and "reply_enabled" not in r.json()
     echo_id = await _echo(client, a)
     await client.post(f"/api/echoes/{echo_id}/replies", json={"body": "hi"}, headers=b)
-    assert (await _notifs(client, a))["unread_count"] == 0
+    assert (await _notifs(client, a))["unread_count"] == 1
 
 
 # ── Quiet hours + tier-0 precedence ──

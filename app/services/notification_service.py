@@ -21,7 +21,6 @@ from app.models.notification import (
     Notification,
     NotificationPrefs,
     TIER_DIGEST,
-    TIER_DIRECT,
     TIER_SECURITY,
 )
 from app.services.social_service import is_blocked_between
@@ -156,8 +155,6 @@ async def notify(
 
     if tier != TIER_SECURITY:
         prefs = await get_or_create_prefs(db, user_id)
-        if tier == TIER_DIRECT and not prefs.reply_enabled:
-            return None
         # Tier 2 kinds each have their own switch.
         if tier == TIER_DIGEST and not getattr(prefs, TIER2_SWITCH.get(kind, "digest_enabled")):
             return None

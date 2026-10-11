@@ -23,7 +23,6 @@ class MarkReadRequest(BaseModel):
 
 
 class NotificationPrefsResponse(BaseModel):
-    reply_enabled: bool
     digest_enabled: bool
     quiet_hours_start: int | None
     quiet_hours_end: int | None
@@ -37,7 +36,6 @@ class NotificationPrefsResponse(BaseModel):
 
 
 class NotificationPrefsUpdate(BaseModel):
-    reply_enabled: bool | None = None
     digest_enabled: bool | None = None
     quiet_hours_start: int | None = Field(default=None, ge=0, le=23)
     quiet_hours_end: int | None = Field(default=None, ge=0, le=23)

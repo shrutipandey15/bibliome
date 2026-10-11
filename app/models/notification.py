@@ -52,7 +52,6 @@ class NotificationPrefs(Base):
     user_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
     )
-    reply_enabled: Mapped[bool] = mapped_column(nullable=False, server_default="true")   # tier 1
     digest_enabled: Mapped[bool] = mapped_column(nullable=False, server_default="true")  # tier 2
     # Quiet hours as local-time hours [start, end); NULL = no quiet hours.
     quiet_hours_start: Mapped[int | None] = mapped_column(Integer, nullable=True)
