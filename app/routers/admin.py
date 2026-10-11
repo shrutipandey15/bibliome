@@ -378,7 +378,10 @@ async def preview_digests(
         for user, prefs in rows:
             due = due_at(prefs, now)
             from app.services.digest_service import outside_for
-            d = await build_for(db, user, period_of(due), due.date(), await outside_for(user.id, due.date()))
+            # Known data only: live lookups take tens of seconds per reader and
+            # belong to the real send, which runs in the background.
+            d = await build_for(db, user, period_of(due), due.date(),
+                                await outside_for(user.id, due.date(), network=False))
             out.append({"username": user.username, "due_at": due.isoformat(), "digest": d})
         await db.rollback()
     return {"missing_copy": missing_copy(), "readers": out}

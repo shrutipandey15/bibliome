@@ -487,9 +487,9 @@ async def build_for(db: AsyncSession, user: User, period: str, today: date, outs
                         question_answers=shared)
 
 
-async def outside_for(user_id, today: date) -> dict:
-    """Outside data for this reader's recent opened books. Network; call it
-    outside any transaction. Never raises."""
+async def outside_for(user_id, today: date, *, network: bool = True) -> dict:
+    """Outside data for this reader's recent opened books. Network unless
+    network=False; call it outside any transaction. Never raises."""
     from app.database import async_session
     from app.services.shelf_news import MAX_BOOKS, gather
 
@@ -499,7 +499,8 @@ async def outside_for(user_id, today: date) -> dict:
             .where(BookEntry.user_id == user_id, BookEntry.status != "want_to_read")
             .order_by(BookEntry.created_at.desc()).limit(MAX_BOOKS)
         )).all()
-    return await gather([{"entry_id": str(i), "title": t, "author": a} for i, t, a in rows], today)
+    return await gather([{"entry_id": str(i), "title": t, "author": a} for i, t, a in rows], today,
+                        network=network)
 
 
 async def deliver_one(user: User, prefs: NotificationPrefs | None, now: datetime, *, force: bool = False) -> bool:

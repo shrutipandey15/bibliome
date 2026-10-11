@@ -134,3 +134,39 @@ async def test_gather_never_raises_and_caches_lookups(db_ready, monkeypatch):
     await shelf_news.gather(books, TODAY)
     assert calls.count("Pride and Prejudice") == 1     # second time from the cache
     assert calls.count("Broken") == 2                  # failures aren't cached; tried again
+
+
+async def test_preview_mode_never_calls_outside(db_ready, monkeypatch):
+    """The admin preview has a request timeout to beat; it uses known data only."""
+    from app.services import shelf_news
+
+    async def boom(*a, **k):
+        raise AssertionError("no network in preview mode")
+
+    monkeypatch.setattr(shelf_news, "_lookup", boom)
+    monkeypatch.setattr(shelf_news, "_views", boom)
+    out = await shelf_news.gather([{"entry_id": "e1", "title": "Circe", "author": "Madeline Miller"}],
+                                  TODAY, network=False)
+    assert out == {"infos": {}, "views": {}}
+
+
+async def test_admin_preview_builds_without_lookups(client, db, monkeypatch):
+    from sqlalchemy import update
+    from app.models.user import User
+    from app.services import shelf_news
+
+    calls = []
+
+    async def lookup(*a, **k):
+        calls.append(a)
+        return shelf_news.BookInfo(key="x", found=False)
+
+    monkeypatch.setattr(shelf_news, "_lookup", lookup)
+    await client.post("/api/auth/register", json={"email": "pv@example.com", "username": "sn_pv", "password": "hunter2pass"})
+    await db.execute(update(User).where(User.username == "sn_pv").values(is_admin=True))
+    await db.commit()
+    tok = (await client.post("/api/auth/login", json={"email": "pv@example.com", "password": "hunter2pass"})).json()["access_token"]
+    h = {"Authorization": f"Bearer {tok}"}
+    await client.post("/api/entries", headers=h, json={"title": "Circe", "author": "Madeline Miller", "intensity": 7})
+    r = await client.get("/api/admin/digest/preview", headers=h)
+    assert r.status_code == 200 and calls == []

@@ -234,8 +234,15 @@ async def _views(client: httpx.AsyncClient, wiki_title: str, today: date) -> tup
 _view_cache: dict[tuple[str, date], tuple[int, int] | None] = {}
 
 
-async def gather(books: list[dict], today: date) -> dict:
+CONCURRENCY = 4         # calls in flight at once, per reader
+
+
+async def gather(books: list[dict], today: date, *, network: bool = True) -> dict:
     """Look up what's needed for find_news. Never raises.
+
+    network=False uses only what is already known (the book_wikidata table and
+    this worker's page-view cache) and calls nothing outside: for anything that
+    must answer quickly, like the admin preview.
 
     Returns {"infos": {key: BookInfo-as-dict}, "views": {wiki_title: [last7, prev28]}},
     the JSON-able shape build_digest takes.
@@ -257,39 +264,49 @@ async def gather(books: list[dict], today: date) -> dict:
                                         pub_date=r.pub_date, pub_precision=r.pub_precision,
                                         author_name=r.author_name, author_born=r.author_born,
                                         author_died=r.author_died)
-        todo = [k for k in keys if k not in infos][:MAX_LOOKUPS]
-        async with _client() as client:
-            fresh = []
-            for k in todo:
-                try:
-                    info = await _lookup(client, keys[k]["title"], keys[k].get("author"), k)
-                except Exception as e:  # noqa: BLE001 — one book's trouble isn't the shelf's
-                    logger.info("Wikidata lookup failed for %s: %s", k, e)
-                    continue
-                infos[k] = info
-                fresh.append(info)
-                await asyncio.sleep(0.1)    # be polite to a free API
-            if fresh:
-                async with async_session() as db:
-                    async with db.begin():
-                        for info in fresh:
-                            row = asdict(info) | {"resolved_at": now}
-                            await db.execute(insert(BookWikidata).values(**row).on_conflict_do_update(
-                                index_elements=["key"], set_={k: v for k, v in row.items() if k != "key"}))
+        if not network:
             for info in infos.values():
-                t = info.wiki_title
-                if not (info.found and t) or t in views:
-                    continue
-                hit = _view_cache.get((t, today))
-                if hit is None and (t, today) not in _view_cache:
-                    try:
-                        hit = await _views(client, t, today)
-                    except Exception as e:  # noqa: BLE001
-                        logger.info("Pageviews failed for %s: %s", t, e)
-                        hit = None
-                    _view_cache[(t, today)] = hit
+                hit = _view_cache.get((info.wiki_title, today)) if info.found and info.wiki_title else None
                 if hit:
-                    views[t] = hit
+                    views[info.wiki_title] = hit
+        else:
+            todo = [k for k in keys if k not in infos][:MAX_LOOKUPS]
+            gate = asyncio.Semaphore(CONCURRENCY)
+            async with _client() as client:
+
+                async def look(k):
+                    async with gate:
+                        try:
+                            return await _lookup(client, keys[k]["title"], keys[k].get("author"), k)
+                        except Exception as e:  # noqa: BLE001 — one book's trouble isn't the shelf's
+                            logger.info("Wikidata lookup failed for %s: %s", k, e)
+                            return None
+
+                fresh = [i for i in await asyncio.gather(*(look(k) for k in todo)) if i]
+                for info in fresh:
+                    infos[info.key] = info
+                if fresh:
+                    async with async_session() as db:
+                        async with db.begin():
+                            for info in fresh:
+                                row = asdict(info) | {"resolved_at": now}
+                                await db.execute(insert(BookWikidata).values(**row).on_conflict_do_update(
+                                    index_elements=["key"], set_={k: v for k, v in row.items() if k != "key"}))
+
+                async def view(t):
+                    async with gate:
+                        if (t, today) not in _view_cache:
+                            try:
+                                _view_cache[(t, today)] = await _views(client, t, today)
+                            except Exception as e:  # noqa: BLE001
+                                logger.info("Pageviews failed for %s: %s", t, e)
+                                _view_cache[(t, today)] = None
+                        return t, _view_cache[(t, today)]
+
+                titles = {i.wiki_title for i in infos.values() if i.found and i.wiki_title}
+                for t, hit in await asyncio.gather(*(view(t) for t in titles)):
+                    if hit:
+                        views[t] = hit
         for old in [k for k in _view_cache if k[1] < today - timedelta(days=2)]:
             del _view_cache[old]
     except Exception as e:  # noqa: BLE001 — outside data is a bonus, never a failure
