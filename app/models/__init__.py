@@ -10,7 +10,7 @@ from app.models.audit_log import AuditLog
 from app.models.entry_checkin import EntryCheckin
 from app.models.echo import Echo, EchoReply, EchoReaction
 from app.models.social import Block, Mute, Report, HandleHistory
-from app.models.notification import DigestClick, Notification, NotificationPrefs, NotificationDigest
+from app.models.notification import DailyFact, DigestClick, Notification, NotificationPrefs, NotificationDigest
 from app.models.collection import (
     Collection, CollectionInvite, CollectionItem, CollectionMember, CollectionMessage,
 )
@@ -43,6 +43,7 @@ __all__ = [
     "NotificationPrefs",
     "NotificationDigest",
     "DigestClick",
+    "DailyFact",
     "Collection",
     "CollectionItem",
     "CollectionMember",

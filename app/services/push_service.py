@@ -100,6 +100,10 @@ async def delete_subscription(db: AsyncSession, endpoint: str) -> None:
 
 def _payload(kind: str, payload: dict) -> dict:
     title, body = PUSH_COPY.get(kind, _DEFAULT_COPY)
+    # The one push that carries its content: a book fact is public by nature,
+    # and reading it on the lock screen is the point. Never the shelf note.
+    if kind == "daily_fact" and payload.get("text"):
+        title, body = "Today in books", payload["text"][:200]
     # Where to go when tapped. Built from ids the client already has to be
     # authorised for — the push grants nothing by itself.
     url = _url_for(kind, payload)

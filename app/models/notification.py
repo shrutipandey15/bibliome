@@ -5,9 +5,9 @@ Three tiers: 0 = security (immediate, non-disableable, bypasses quiet hours),
 """
 
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 
-from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Index, Integer, SmallInteger, String, UniqueConstraint, func
+from sqlalchemy import CheckConstraint, Date, DateTime, ForeignKey, Index, Integer, SmallInteger, String, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -46,6 +46,7 @@ class NotificationPrefs(Base):
     __table_args__ = (
         CheckConstraint("digest_day BETWEEN 0 AND 6", name="ck_prefs_digest_day"),
         CheckConstraint("digest_hour BETWEEN 0 AND 23", name="ck_prefs_digest_hour"),
+        CheckConstraint("fact_hour BETWEEN 0 AND 23", name="ck_prefs_fact_hour"),
     )
 
     user_id: Mapped[uuid.UUID] = mapped_column(
@@ -60,6 +61,9 @@ class NotificationPrefs(Base):
     # When the weekly digest is due, in `timezone`. Python weekday: 6 = Sunday.
     digest_day: Mapped[int] = mapped_column(SmallInteger, nullable=False, server_default="6", default=6)
     digest_hour: Mapped[int] = mapped_column(SmallInteger, nullable=False, server_default="9", default=9)
+    # The daily book fact: on by default, at this local hour.
+    fact_enabled: Mapped[bool] = mapped_column(nullable=False, server_default="true", default=True)
+    fact_hour: Mapped[int] = mapped_column(SmallInteger, nullable=False, server_default="10", default=10)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
@@ -96,3 +100,19 @@ class DigestClick(Base):
     )
     section: Mapped[str] = mapped_column(String(30), nullable=False)
     clicked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class DailyFact(Base):
+    """The fact a reader was sent on a (local) day. One per day; never the same fact twice."""
+
+    __tablename__ = "daily_facts"
+    __table_args__ = (UniqueConstraint("user_id", "day", name="uq_daily_fact_day"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    day: Mapped[date] = mapped_column(Date, nullable=False)
+    fact_id: Mapped[str] = mapped_column(String(200), nullable=False)
+    payload: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    sent_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

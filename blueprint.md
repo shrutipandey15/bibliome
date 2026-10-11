@@ -387,6 +387,7 @@ Tell users the *few* things they'll be glad to know, in a way that respects atte
 - **Tier 0 — Security/account (immediate, non-disableable):** new-device login, password/email change, reset requested. These protect the user; they're never marketing.
 - **Tier 1 — Direct & consented (batched, few/day default):** a reply to your echo, a Twin accepted your request, a new Twin Conversation message. Things *you* set in motion or that require your response.
 - **Tier 2 — Ambient/community (weekly digest only):** "your reading week," a resurfaced memory, a new prompt that fits you. Never real-time.
+  - *Exception, decided 2026-10-11:* one **daily book fact** at the reader's chosen hour (10 am default), on by default, with its own switch. Bounded to one a day, never caught up, never about other readers.
 
 ### Anti-fatigue rules (each with a reason)
 - **Batch by default.** Tier 1 collapses ("3 readers responded to your echoes") rather than pinging per event — reduces interruption count, the actual fatigue driver.

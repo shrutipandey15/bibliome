@@ -163,3 +163,25 @@ async def run_weekly_digest_forever(interval: int = 900) -> None:
             raise
         except Exception as e:
             logger.error("Weekly digest job failed: %s", e)
+
+
+async def run_daily_facts_forever(interval: int = 900) -> None:
+    """Send each reader's daily book fact at their own hour, checking every 15
+    minutes. Only hand-checked bank facts and Wikipedia's own text ever go out
+    (fact_service), so there is no copy gate to wait on.
+
+    ponytail: in-process per worker, like the digest; the (user, day) unique row
+    keeps two workers from double-sending.
+    """
+    from app.services.fact_service import run_due_facts
+
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            sent = await run_due_facts()
+            if sent:
+                logger.info("Daily fact sent to %d reader(s)", sent)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.error("Daily fact job failed: %s", e)

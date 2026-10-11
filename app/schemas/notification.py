@@ -30,6 +30,8 @@ class NotificationPrefsResponse(BaseModel):
     timezone: str
     digest_day: int
     digest_hour: int
+    fact_enabled: bool
+    fact_hour: int
 
     model_config = {"from_attributes": True}
 
@@ -42,3 +44,5 @@ class NotificationPrefsUpdate(BaseModel):
     timezone: str | None = Field(default=None, max_length=64)
     digest_day: int | None = Field(default=None, ge=0, le=6)
     digest_hour: int | None = Field(default=None, ge=0, le=23)
+    fact_enabled: bool | None = None
+    fact_hour: int | None = Field(default=None, ge=0, le=23)

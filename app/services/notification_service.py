@@ -130,6 +130,9 @@ def _merge_batch(existing: dict, incoming: dict) -> dict:
     return p
 
 
+TIER2_SWITCH = {"weekly_digest": "digest_enabled", "daily_fact": "fact_enabled"}
+
+
 async def notify(
     db: AsyncSession,
     user_id: uuid.UUID,
@@ -155,7 +158,8 @@ async def notify(
         prefs = await get_or_create_prefs(db, user_id)
         if tier == TIER_DIRECT and not prefs.reply_enabled:
             return None
-        if tier == TIER_DIGEST and not prefs.digest_enabled:
+        # Tier 2 kinds each have their own switch.
+        if tier == TIER_DIGEST and not getattr(prefs, TIER2_SWITCH.get(kind, "digest_enabled")):
             return None
         quiet_until = _quiet_until(now, prefs)
         if quiet_until is not None:

@@ -317,6 +317,15 @@ async def trigger_weekly_digest(
     return {"digests_sent": sent}
 
 
+@router.post("/jobs/daily-fact")
+async def trigger_daily_fact(admin: User = Depends(require_admin)):
+    """Send today's fact to every reader now, ignoring their hour. Still once
+    per reader per day."""
+    from app.services.fact_service import run_due_facts
+
+    return {"facts_sent": await run_due_facts(force=True)}
+
+
 @router.get("/digest/preview")
 async def preview_digests(
     limit: int = 10,
