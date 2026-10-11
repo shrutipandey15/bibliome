@@ -180,10 +180,10 @@ def _weather(books, today, archetype, period):
     text = _fill(tmpl["text"], e1=_ename(top[0]), e2=_ename(top[1]), e3=_ename(top[2]), p=p)
     tease = text.split(". ")[0].rstrip(".") + "."
     return _section("weather", text, f"/digest/{period}#weather", tease,
-                    emotions=top, p=p, forecast=text)
+                    emotions=top, emotion=top[0], p=p, forecast=text)
 
 
-def _while_away(books, today, quiet, period):
+def _while_away(books, today):
     for b in sorted(books, key=lambda b: b.day):
         if not b.finished_at:
             continue
@@ -195,11 +195,10 @@ def _while_away(books, today, quiet, period):
         except ValueError:            # 29 February
             anniv = b.finished_at.replace(year=today.year, day=28)
         if abs((today - anniv).days) <= 3:
-            opener = _pick(period, copy.FALLOW_OPENERS) + "\n" if quiet else ""
             when = "A year" if years == 1 else f"{_num(years).capitalize()} years"
-            body = opener + _fill(copy.ANNIVERSARY, when=when, book=b.title)
-            return _section("while_away", body, f"/?entry={b.id}", opener + copy.WHILE_AWAY_TEASE,
-                            entry_id=b.id, book=b.title)
+            body = _fill(copy.ANNIVERSARY, when=when, book=b.title)
+            return _section("while_away", body, f"/?entry={b.id}", copy.WHILE_AWAY_TEASE,
+                            entry_id=b.id, book=b.title, years=years)
     return None
 
 
@@ -299,7 +298,7 @@ def build_digest(*, name: str, books: list[Book], v2: dict | None, history: list
         "archetype_letter": _letter(archetype["id"] if archetype else "unwritten", name, books,
                                     top_emotion or _ename(eow), history, period),
         "weather": _weather(opened, today, archetype, period),
-        "while_away": _while_away(opened, today, quiet, period),
+        "while_away": _while_away(opened, today),
         "emotion_of_week": _emotion_week(opened, eow, period),
         "drift": _drift(v2) if enough else None,
     }
@@ -357,7 +356,8 @@ def build_digest(*, name: str, books: list[Book], v2: dict | None, history: list
         "lead": lead["kind"],
         "subject": subject_text,
         "subject_id": subject["id"],
-        "intro": _pick(period, copy.FALLOW_OPENERS) if quiet and opened and lead["kind"] != "while_away" else None,
+        # A quiet week opens on a fallow line, whatever leads.
+        "intro": _pick(period, copy.FALLOW_OPENERS) if quiet and opened else None,
         "sections": [lead, *smaller],
         "action": action,
         "letter_id": letter["data"]["letter_id"] if letter else None,

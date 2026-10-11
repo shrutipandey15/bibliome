@@ -88,7 +88,8 @@ def test_revealed_is_sent_exactly_once_after_the_archetype_arrives():
 def test_a_quiet_week_is_still_warm_and_full():
     books, v2 = _personas()["twenty_quiet"]
     d = _build(books, v2)
-    assert "fallow" in (d.get("intro") or d["sections"][0]["body"]).lower()
+    opening = d.get("intro") or d["sections"][0]["body"]
+    assert any(opening.startswith(o) for o in copy.FALLOW_OPENERS)
 
 
 # ── Tone ──────────────────────────────────────────────────────────────────────
@@ -349,7 +350,7 @@ async def test_admin_can_deliver_now_once_and_preview_without_writing(client, pu
     admin = {"Authorization": f"Bearer {tok}"}
 
     preview = (await client.get("/api/admin/digest/preview", headers=admin)).json()
-    assert preview["readers"][0]["digest"]["subject"] and preview["missing_copy"]
+    assert preview["readers"][0]["digest"]["subject"] and preview["missing_copy"] == []
     assert (await db.execute(select(func.count(NotificationDigest.id)))).scalar() == 0
 
     assert (await client.post("/api/admin/jobs/weekly-digest", headers=admin)).json()["digests_sent"] == 1

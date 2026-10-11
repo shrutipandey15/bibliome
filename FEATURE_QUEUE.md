@@ -386,6 +386,25 @@ Final table (primaries | antis):
       driving each, never-assigned list). Run periodically; >2x fair share on
       real readers is the "add an archetype" trigger.
 
+### [~] DG1 — Weekly digest (in-app + push), Phase 1 *(inserted 2026-10-11, ahead of #7)*
+**Split:** backend (`digest_service`, `digest_copy`, `routers/digest.py`, migration 039,
+admin preview) + frontend (`/digest/:period`, Settings day/time, letter pinned on the DNA
+tab, `?add=1` / `?entry=` deep links, admin "digest" tab).
+**Delivered in-app, not by email** (decided 2026-10-11): the free Resend plan is kept
+for password resets and other important mail.
+
+- [x] Sections 1, 2, 3, 5, 7, 9, and 4 as "a year since you finished". One lead + 1–2 smaller.
+- [x] In-app notice (subject + teaser) + push ("Your week is here.", opens /digest/<week>).
+- [x] Sunday 9am local by default, day/hour/timezone in Settings; 36h-late skip; once per week.
+- [x] Retry: a failed build keeps nothing and retries next 15-min tick; failed pushes
+      are re-sent by the push sweeper.
+- [x] Click tracking: "open" + per section + action (`digest_clicks`).
+- [x] Signed-out deep links (any in-app path) return to the exact page after sign-in.
+- [ ] **Write the copy** in `app/services/digest_copy.py` (`TODO(shruti)` left). The
+      scheduler refuses to start until there are none.
+- [ ] Review ~10 real readers in Admin → digest.
+- [ ] Phase 2: section 4 with Wikipedia / Open Library, section 6. Phase 3: section 8, clicks admin page.
+
 ### [ ] 7 — Book emotion vectors
 **Split:** backend only (LLM pipeline + `books` column).
 Nothing exists yet. LLM predicts an 18-emotion vector from blurb/reviews → new
